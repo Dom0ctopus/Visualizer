@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Backend uploaded file storage
+server/data/files
+server/data/index.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

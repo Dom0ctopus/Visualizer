@@ -1,13 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
-import type { NVImage } from '@niivue/niivue'
-import { buildSegmentationLut, paletteColorCss } from '../lib/segmentationColors'
-import type { BaseVolumeInfo, CrosshairInfo, SegmentationLayer } from '../types'
+import { fetchLibrary, fileUrl, uploadSegmentation, uploadVolume } from '../lib/api'
+import { buildLutForLayer } from '../lib/segmentationLut'
+import type {
+  BaseVolumeInfo,
+  CrosshairInfo,
+  LibraryRecord,
+  LoadedSegmentation,
+  SegmentationRecord,
+  SegmentState,
+  VolumeRecord
+} from '../types'
 
 function round(n: number, decimals = 2): number {
   const f = 10 ** decimals
   return Math.round(n * f) / f
 }
+
+const DEFAULT_SEGMENT_OPACITY = 0.6
 
 export function useNiivue() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -15,10 +25,19 @@ export function useNiivue() {
 
   const [ready, setReady] = useState(false)
   const [baseVolume, setBaseVolume] = useState<BaseVolumeInfo | null>(null)
-  const [segmentations, setSegmentations] = useState<SegmentationLayer[]>([])
+  const [segmentations, setSegmentations] = useState<LoadedSegmentation[]>([])
   const [crosshair, setCrosshair] = useState<CrosshairInfo | null>(null)
+  const [library, setLibrary] = useState<LibraryRecord[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  const refreshLibrary = useCallback(async () => {
+    try {
+      setLibrary(await fetchLibrary())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to reach the backend server.')
+    }
+  }, [])
 
   useEffect(() => {
     const nv = new Niivue({
@@ -51,6 +70,8 @@ export function useNiivue() {
       })
     }
 
+    refreshLibrary()
+
     return () => {
       nvRef.current = null
     }
@@ -61,7 +82,7 @@ export function useNiivue() {
     const nv = nvRef.current
     if (!nv) return
     while (nv.volumes.length > 0) {
-      nv.removeVolume(nv.volumes[nv.volumes.length - 1] as NVImage)
+      nv.removeVolume(nv.volumes[nv.volumes.length - 1])
     }
     setBaseVolume(null)
     setSegmentations([])
@@ -69,124 +90,230 @@ export function useNiivue() {
     setError(null)
   }, [])
 
-  const loadBaseVolume = useCallback(
-    async (file: File) => {
+  const loadVolumeRecord = useCallback(
+    async (record: VolumeRecord) => {
       const nv = nvRef.current
       if (!nv) return
+      clearAll()
+      const vol = await nv.addVolumeFromUrl({ url: fileUrl(record.id), name: record.name, colormap: 'gray' })
+      setBaseVolume({
+        id: vol.id,
+        name: record.name,
+        dataMin: vol.global_min ?? vol.cal_min ?? 0,
+        dataMax: vol.global_max ?? vol.cal_max ?? 0,
+        calMin: vol.cal_min ?? 0,
+        calMax: vol.cal_max ?? 0
+      })
+      nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
+    },
+    [clearAll]
+  )
+
+  const loadSegmentationRecord = useCallback(async (record: SegmentationRecord) => {
+    const nv = nvRef.current
+    if (!nv) return
+
+    const allSegments = record.systems.flatMap((sys) => sys.segments.map((seg) => ({ ...seg, system: sys.name })))
+    const layers = [...new Set(allSegments.map((s) => s.layer))].sort((a, b) => a - b)
+
+    const segmentStates: SegmentState[] = allSegments.map((seg) => ({
+      key: `${seg.layer}:${seg.labelValue}`,
+      system: seg.system,
+      name: seg.name,
+      labelValue: seg.labelValue,
+      layer: seg.layer,
+      color: seg.color,
+      visible: true,
+      opacity: DEFAULT_SEGMENT_OPACITY
+    }))
+
+    const volumeIdsByLayer: Record<number, string> = {}
+    for (const layer of layers) {
+      const segmentsInLayer = segmentStates.filter((s) => s.layer === layer)
+      const { lut, min, max } = buildLutForLayer(segmentsInLayer)
+      const vol = await nv.addVolumeFromUrl({
+        url: fileUrl(record.id),
+        // Keep the real filename (and its extension) so niivue's format detection works;
+        // layer identity is tracked separately via volumeIdsByLayer.
+        name: record.name,
+        frame4D: layer,
+        opacity: 1,
+        colormapLabel: { lut, min, max }
+      })
+      volumeIdsByLayer[layer] = vol.id
+    }
+    nv.updateGLVolume()
+
+    setSegmentations((prev) => [
+      ...prev,
+      { recordId: record.id, name: record.name, layerCount: record.layerCount, volumeIdsByLayer, segments: segmentStates }
+    ])
+  }, [])
+
+  const uploadAndLoadVolume = useCallback(
+    async (file: File) => {
       setBusy(true)
       setError(null)
       try {
-        clearAll()
-        await nv.loadFromFile(file)
-        const vol = nv.volumes[0]
-        if (!vol) throw new Error('Volume failed to load')
-        vol.colormap = 'gray'
-        vol.opacity = 1
-        nv.updateGLVolume()
-        setBaseVolume({
-          id: vol.id,
-          name: file.name,
-          dataMin: vol.global_min ?? vol.cal_min ?? 0,
-          dataMax: vol.global_max ?? vol.cal_max ?? 0,
-          calMin: vol.cal_min ?? 0,
-          calMax: vol.cal_max ?? 0
-        })
-        nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
+        const record = await uploadVolume(file)
+        await loadVolumeRecord(record)
+        setLibrary((prev) => [...prev, record])
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load volume. Is this a valid NRRD file?')
       } finally {
         setBusy(false)
       }
     },
-    [clearAll]
+    [loadVolumeRecord]
   )
 
-  const addSegmentation = useCallback(
+  const uploadAndLoadSegmentation = useCallback(
     async (file: File) => {
-      const nv = nvRef.current
-      if (!nv) return
       setBusy(true)
       setError(null)
       try {
-        const beforeCount = nv.volumes.length
-        await nv.loadFromFile(file)
-        const vol = nv.volumes[nv.volumes.length - 1]
-        if (!vol || nv.volumes.length === beforeCount) {
-          throw new Error('Segmentation failed to load')
-        }
-        const maxLabel = Math.max(1, Math.round(vol.global_max ?? 1))
-        const layerIndex = beforeCount - 1
-        const { lut, min, max } = buildSegmentationLut(maxLabel, layerIndex)
-        vol.colormapLabel = { lut, min, max } as NVImage['colormapLabel']
-        vol.opacity = 0.6
-        nv.updateGLVolume()
-        setSegmentations((prev) => [
-          ...prev,
-          {
-            id: vol.id,
-            name: file.name,
-            color: paletteColorCss(layerIndex),
-            opacity: 0.6,
-            visible: true,
-            labelCount: maxLabel
-          }
-        ])
+        const record = await uploadSegmentation(file)
+        await loadSegmentationRecord(record)
+        setLibrary((prev) => [...prev, record])
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load segmentation. Is this a valid NRRD file?')
       } finally {
         setBusy(false)
       }
     },
-    []
+    [loadSegmentationRecord]
   )
 
-  const findVolumeIndex = useCallback((id: string) => {
+  const loadFromLibrary = useCallback(
+    async (record: LibraryRecord) => {
+      setBusy(true)
+      setError(null)
+      try {
+        if (record.kind === 'volume') {
+          await loadVolumeRecord(record)
+        } else {
+          await loadSegmentationRecord(record)
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to load from the library.')
+      } finally {
+        setBusy(false)
+      }
+    },
+    [loadVolumeRecord, loadSegmentationRecord]
+  )
+
+  const rebuildLayerLut = useCallback((loaded: LoadedSegmentation, layer: number) => {
     const nv = nvRef.current
-    if (!nv) return -1
-    return nv.volumes.findIndex((v) => v.id === id)
+    if (!nv) return
+    const volId = loaded.volumeIdsByLayer[layer]
+    const idx = nv.volumes.findIndex((v) => v.id === volId)
+    if (idx < 0) return
+    const segmentsInLayer = loaded.segments.filter((s) => s.layer === layer)
+    nv.volumes[idx].colormapLabel = buildLutForLayer(segmentsInLayer)
+    nv.updateGLVolume()
   }, [])
 
-  const setSegmentationOpacity = useCallback(
-    (id: string, opacity: number) => {
-      const nv = nvRef.current
-      if (!nv) return
-      const idx = findVolumeIndex(id)
-      if (idx < 0) return
-      nv.setOpacity(idx, opacity)
-      setSegmentations((prev) => prev.map((s) => (s.id === id ? { ...s, opacity, visible: opacity > 0 } : s)))
-    },
-    [findVolumeIndex]
-  )
-
-  const toggleSegmentationVisibility = useCallback(
-    (id: string) => {
-      const nv = nvRef.current
-      if (!nv) return
-      const idx = findVolumeIndex(id)
-      if (idx < 0) return
+  const updateSegments = useCallback(
+    (recordId: string, predicate: (seg: SegmentState) => boolean, updater: (seg: SegmentState) => SegmentState) => {
       setSegmentations((prev) =>
-        prev.map((s) => {
-          if (s.id !== id) return s
-          const nextVisible = !s.visible
-          nv.setOpacity(idx, nextVisible ? s.opacity : 0)
-          return { ...s, visible: nextVisible }
+        prev.map((loaded) => {
+          if (loaded.recordId !== recordId) return loaded
+          const affectedLayers = new Set<number>()
+          const segments = loaded.segments.map((seg) => {
+            if (!predicate(seg)) return seg
+            affectedLayers.add(seg.layer)
+            return updater(seg)
+          })
+          const next = { ...loaded, segments }
+          affectedLayers.forEach((layer) => rebuildLayerLut(next, layer))
+          return next
         })
       )
     },
-    [findVolumeIndex]
+    [rebuildLayerLut]
   )
 
-  const removeSegmentation = useCallback(
-    (id: string) => {
-      const nv = nvRef.current
-      if (!nv) return
-      const idx = findVolumeIndex(id)
-      if (idx < 0) return
-      nv.removeVolumeByIndex(idx)
-      setSegmentations((prev) => prev.filter((s) => s.id !== id))
+  const setSegmentVisible = useCallback(
+    (recordId: string, key: string, visible: boolean) => {
+      updateSegments(
+        recordId,
+        (s) => s.key === key,
+        (s) => ({ ...s, visible })
+      )
     },
-    [findVolumeIndex]
+    [updateSegments]
   )
+
+  const setSegmentOpacity = useCallback(
+    (recordId: string, key: string, opacity: number) => {
+      updateSegments(
+        recordId,
+        (s) => s.key === key,
+        (s) => ({ ...s, opacity, visible: opacity > 0 })
+      )
+    },
+    [updateSegments]
+  )
+
+  const setSystemVisible = useCallback(
+    (recordId: string, systemName: string, visible: boolean) => {
+      updateSegments(
+        recordId,
+        (s) => s.system === systemName,
+        (s) => ({ ...s, visible })
+      )
+    },
+    [updateSegments]
+  )
+
+  const setSystemOpacity = useCallback(
+    (recordId: string, systemName: string, opacity: number) => {
+      updateSegments(
+        recordId,
+        (s) => s.system === systemName,
+        (s) => ({ ...s, opacity, visible: opacity > 0 })
+      )
+    },
+    [updateSegments]
+  )
+
+  const setFileVisible = useCallback(
+    (recordId: string, visible: boolean) => {
+      updateSegments(
+        recordId,
+        () => true,
+        (s) => ({ ...s, visible })
+      )
+    },
+    [updateSegments]
+  )
+
+  const setFileOpacity = useCallback(
+    (recordId: string, opacity: number) => {
+      updateSegments(
+        recordId,
+        () => true,
+        (s) => ({ ...s, opacity, visible: opacity > 0 })
+      )
+    },
+    [updateSegments]
+  )
+
+  const removeSegmentation = useCallback((recordId: string) => {
+    const nv = nvRef.current
+    if (!nv) return
+    setSegmentations((prev) => {
+      const loaded = prev.find((s) => s.recordId === recordId)
+      if (loaded) {
+        for (const volId of Object.values(loaded.volumeIdsByLayer)) {
+          const idx = nv.volumes.findIndex((v) => v.id === volId)
+          if (idx >= 0) nv.removeVolumeByIndex(idx)
+        }
+      }
+      return prev.filter((s) => s.recordId !== recordId)
+    })
+  }, [])
 
   const setWindowLevel = useCallback((calMin: number, calMax: number) => {
     const nv = nvRef.current
@@ -221,10 +348,17 @@ export function useNiivue() {
     baseVolume,
     segmentations,
     crosshair,
-    loadBaseVolume,
-    addSegmentation,
-    setSegmentationOpacity,
-    toggleSegmentationVisibility,
+    library,
+    refreshLibrary,
+    uploadAndLoadVolume,
+    uploadAndLoadSegmentation,
+    loadFromLibrary,
+    setSegmentVisible,
+    setSegmentOpacity,
+    setSystemVisible,
+    setSystemOpacity,
+    setFileVisible,
+    setFileOpacity,
     removeSegmentation,
     setWindowLevel,
     resetWindowLevel,

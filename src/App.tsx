@@ -1,10 +1,15 @@
+import { useState } from 'react'
 import { useNiivue } from './hooks/useNiivue'
 import { Viewer } from './components/Viewer'
+import { LibraryPanel } from './components/LibraryPanel'
 import { VolumePanel } from './components/VolumePanel'
-import { SegmentationPanel } from './components/SegmentationPanel'
+import { SearchBar } from './components/SearchBar'
+import { SegmentTree } from './components/SegmentTree'
 import { CrosshairPanel } from './components/CrosshairPanel'
 
 function App() {
+  const [searchText, setSearchText] = useState('')
+
   const {
     canvasRef,
     busy,
@@ -12,10 +17,16 @@ function App() {
     baseVolume,
     segmentations,
     crosshair,
-    loadBaseVolume,
-    addSegmentation,
-    setSegmentationOpacity,
-    toggleSegmentationVisibility,
+    library,
+    uploadAndLoadVolume,
+    uploadAndLoadSegmentation,
+    loadFromLibrary,
+    setSegmentVisible,
+    setSegmentOpacity,
+    setSystemVisible,
+    setSystemOpacity,
+    setFileVisible,
+    setFileOpacity,
     removeSegmentation,
     setWindowLevel,
     resetWindowLevel,
@@ -43,30 +54,48 @@ function App() {
         <aside className="sidebar">
           {error && <div className="error-banner">{error}</div>}
 
-          <VolumePanel
-            baseVolume={baseVolume}
+          <LibraryPanel
+            library={library}
             busy={busy}
-            onLoadVolume={loadBaseVolume}
-            onWindowLevelChange={setWindowLevel}
-            onResetWindowLevel={resetWindowLevel}
+            onUploadVolume={uploadAndLoadVolume}
+            onUploadSegmentation={uploadAndLoadSegmentation}
+            onLoad={loadFromLibrary}
           />
 
-          <SegmentationPanel
-            segmentations={segmentations}
-            disabled={!baseVolume}
-            busy={busy}
-            onAddSegmentation={addSegmentation}
-            onOpacityChange={setSegmentationOpacity}
-            onToggleVisibility={toggleSegmentationVisibility}
-            onRemove={removeSegmentation}
-          />
+          {baseVolume && (
+            <VolumePanel baseVolume={baseVolume} onWindowLevelChange={setWindowLevel} onResetWindowLevel={resetWindowLevel} />
+          )}
+
+          <section className="panel">
+            <h2 className="panel-title">Segmentations</h2>
+            <SearchBar
+              value={searchText}
+              onChange={setSearchText}
+              segmentations={segmentations}
+              onSegmentVisible={setSegmentVisible}
+            />
+            <SegmentTree
+              segmentations={segmentations}
+              filterText={searchText}
+              onSegmentVisible={setSegmentVisible}
+              onSegmentOpacity={setSegmentOpacity}
+              onSystemVisible={setSystemVisible}
+              onSystemOpacity={setSystemOpacity}
+              onFileVisible={setFileVisible}
+              onFileOpacity={setFileOpacity}
+              onRemoveFile={removeSegmentation}
+            />
+          </section>
 
           <CrosshairPanel crosshair={crosshair} />
 
           {!baseVolume && (
             <section className="panel panel-hint">
-              <p>Load a volume NRRD file to begin. The viewer shows axial, coronal, sagittal, and 3D render panes.</p>
-              <p>Then add one or more segmentation NRRD files as color-coded overlays.</p>
+              <p>Upload a volume NRRD file to begin. The viewer shows axial, coronal, sagittal, and 3D render panes.</p>
+              <p>
+                Then upload one or more Slicer-exported segmentation NRRD files &mdash; each labeled segment appears in the
+                tree below, grouped by system, with its own visibility and opacity.
+              </p>
             </section>
           )}
         </aside>
