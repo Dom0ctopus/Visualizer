@@ -163,6 +163,17 @@ export function useNiivue() {
       })
       volumeIdsByLayer[layer] = vol.id
     }
+    // Re-assert each volume's colormapLabel after all volumes are loaded and
+    // force a redraw. Setting colormapLabel via addVolumeFromUrl's own options
+    // doesn't reliably take effect on first paint (the same fix a visibility
+    // toggle applies afterward, via rebuildLayerLut) — doing it here up front
+    // avoids needing that extra toggle before colors render correctly.
+    for (const layer of layers) {
+      const idx = nv.volumes.findIndex((v) => v.id === volumeIdsByLayer[layer])
+      if (idx < 0) continue
+      const segmentsInLayer = segmentStates.filter((s) => s.layer === layer)
+      nv.volumes[idx].colormapLabel = buildLutForLayer(segmentsInLayer)
+    }
     nv.updateGLVolume()
 
     setSegmentations((prev) => [
@@ -237,20 +248,31 @@ export function useNiivue() {
 
   const updateSegments = useCallback(
     (recordId: string, predicate: (seg: SegmentState) => boolean, updater: (seg: SegmentState) => SegmentState) => {
+      // The map callback below must stay pure -- React (in StrictMode) can invoke a
+      // setState updater function more than once per commit. Rebuilding the LUT and
+      // touching niivue's GL state is a real side effect, so it's captured here and
+      // fired exactly once, after setSegmentations returns, rather than from inside
+      // the updater itself.
+      let changed: LoadedSegmentation | null = null
+      const affectedLayers = new Set<number>()
+
       setSegmentations((prev) =>
         prev.map((loaded) => {
           if (loaded.recordId !== recordId) return loaded
-          const affectedLayers = new Set<number>()
           const segments = loaded.segments.map((seg) => {
             if (!predicate(seg)) return seg
             affectedLayers.add(seg.layer)
             return updater(seg)
           })
           const next = { ...loaded, segments }
-          affectedLayers.forEach((layer) => rebuildLayerLut(next, layer))
+          changed = next
           return next
         })
       )
+
+      if (changed) {
+        affectedLayers.forEach((layer) => rebuildLayerLut(changed!, layer))
+      }
     },
     [rebuildLayerLut]
   )

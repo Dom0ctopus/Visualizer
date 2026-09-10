@@ -6,7 +6,20 @@ import path from 'node:path'
 import { readNrrdHeader } from './nrrdHeader.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
 import { FILES_DIR, addRecord, getRecord, initStore, listRecords, newId, removeRecord } from './store.js'
-import type { SegmentationRecord, VolumeRecord } from './types.js'
+import type { LibraryRecord, SegmentationRecord, StoredRecord, StoredSegmentationRecord, VolumeRecord } from './types.js'
+
+async function enrichSegmentationRecord(stored: StoredSegmentationRecord): Promise<SegmentationRecord> {
+  const header = await readNrrdHeader(path.join(FILES_DIR, stored.storedFilename))
+  const segments = extractSegments(header)
+  const systems = groupIntoSystems(segments)
+  const dimension = Number(header.fields['dimension'] ?? '3')
+  const layerCount = Math.max(1, ...segments.map((s) => s.layer + 1))
+  return { ...stored, dimension, layerCount, systems }
+}
+
+async function toLibraryRecord(stored: StoredRecord): Promise<LibraryRecord> {
+  return stored.kind === 'volume' ? stored : enrichSegmentationRecord(stored)
+}
 
 await initStore()
 
@@ -28,8 +41,9 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/library', (_req, res) => {
-  res.json({ records: listRecords() })
+app.get('/api/library', async (_req, res) => {
+  const records = await Promise.all(listRecords().map(toLibraryRecord))
+  res.json({ records })
 })
 
 app.get('/api/files/:id', (req, res) => {
@@ -66,6 +80,14 @@ app.post('/api/segmentations', upload.single('file'), async (req, res) => {
     return
   }
   const filePath = path.join(FILES_DIR, file.filename)
+  const stored: StoredSegmentationRecord = {
+    id: path.parse(file.filename).name,
+    kind: 'segmentation',
+    name: file.originalname,
+    storedFilename: file.filename,
+    sizeBytes: file.size,
+    uploadedAt: new Date().toISOString()
+  }
   try {
     const header = await readNrrdHeader(filePath)
     const segments = extractSegments(header)
@@ -74,23 +96,8 @@ app.post('/api/segmentations', upload.single('file'), async (req, res) => {
         'No Slicer-style segment metadata (Segment0_Name, Segment0_LabelValue, ...) found in this NRRD header.'
       )
     }
-    const systems = groupIntoSystems(segments)
-    const dimension = Number(header.fields['dimension'] ?? '3')
-    const layerCount = Math.max(1, ...segments.map((s) => s.layer + 1))
-
-    const record: SegmentationRecord = {
-      id: path.parse(file.filename).name,
-      kind: 'segmentation',
-      name: file.originalname,
-      storedFilename: file.filename,
-      sizeBytes: file.size,
-      uploadedAt: new Date().toISOString(),
-      dimension,
-      layerCount,
-      systems
-    }
-    await addRecord(record)
-    res.json(record)
+    await addRecord(stored)
+    res.json(await enrichSegmentationRecord(stored))
   } catch (e) {
     await rm(filePath, { force: true })
     res.status(422).json({ error: e instanceof Error ? e.message : 'Failed to parse segmentation' })
