@@ -17,6 +17,8 @@ function App() {
     baseVolume,
     segmentations,
     crosshair,
+    crosshairVisible,
+    setCrosshairVisible,
     library,
     uploadAndLoadVolume,
     uploadAndLoadSegmentation,
@@ -39,6 +41,15 @@ function App() {
       <header className="app-header">
         <h1>Micro-CT Visualizer</h1>
         <div className="app-header-actions">
+          <label className="crosshair-toggle">
+            <input
+              type="checkbox"
+              checked={crosshairVisible}
+              onChange={(e) => setCrosshairVisible(e.target.checked)}
+              disabled={!baseVolume}
+            />
+            Crosshair
+          </label>
           <button className="btn btn-secondary btn-small" onClick={resetView} disabled={!baseVolume}>
             Reset View
           </button>

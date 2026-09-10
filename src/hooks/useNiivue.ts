@@ -18,6 +18,7 @@ function round(n: number, decimals = 2): number {
 }
 
 const DEFAULT_SEGMENT_OPACITY = 0.6
+const CROSSHAIR_WIDTH_VISIBLE = 0.6
 
 export function useNiivue() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -27,6 +28,7 @@ export function useNiivue() {
   const [baseVolume, setBaseVolume] = useState<BaseVolumeInfo | null>(null)
   const [segmentations, setSegmentations] = useState<LoadedSegmentation[]>([])
   const [crosshair, setCrosshair] = useState<CrosshairInfo | null>(null)
+  const [crosshairVisible, setCrosshairVisibleState] = useState(false)
   const [library, setLibrary] = useState<LibraryRecord[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -42,7 +44,8 @@ export function useNiivue() {
   useEffect(() => {
     const nv = new Niivue({
       backColor: [0.07, 0.08, 0.1, 1],
-      show3Dcrosshair: true,
+      show3Dcrosshair: false,
+      crosshairWidth: 0,
       isColorbar: false,
       isOrientCube: false,
       isRadiologicalConvention: false,
@@ -333,6 +336,15 @@ export function useNiivue() {
     setWindowLevel(vol.cal_min ?? 0, vol.cal_max ?? 0)
   }, [setWindowLevel])
 
+  const setCrosshairVisible = useCallback((visible: boolean) => {
+    const nv = nvRef.current
+    if (!nv) return
+    nv.opts.crosshairWidth = visible ? CROSSHAIR_WIDTH_VISIBLE : 0
+    nv.opts.show3Dcrosshair = visible
+    nv.drawScene()
+    setCrosshairVisibleState(visible)
+  }, [])
+
   const resetView = useCallback(() => {
     const nv = nvRef.current
     if (!nv) return
@@ -348,6 +360,8 @@ export function useNiivue() {
     baseVolume,
     segmentations,
     crosshair,
+    crosshairVisible,
+    setCrosshairVisible,
     library,
     refreshLibrary,
     uploadAndLoadVolume,
