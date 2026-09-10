@@ -101,43 +101,47 @@ function interpolate(points: CurvePoint[], t: number): number {
   return last.value
 }
 
-export interface GrayscaleColormap {
-  R: number[]
-  G: number[]
-  B: number[]
-  A: number[]
-  I: number[]
+export interface TransferFunctionLut {
+  lut: Uint8ClampedArray
+  min: number
+  max: number
 }
-
-const SAMPLES = 256
 
 function clamp01(n: number): number {
   return Math.max(0, Math.min(1, n))
 }
 
 /**
- * Builds a niivue-compatible colormap from a parsed transfer function: the
- * natural grayscale ramp scaled by the luminosity curve (a gain, defaulting to
- * unity), with alpha driven directly by the opacity curve.
+ * Builds a direct-index label-style LUT (one entry per raw intensity value from
+ * dataMin to dataMax) rather than a named/registered continuous colormap.
+ *
+ * niivue's 3D volume-render bake pass has a real limitation with custom, varying
+ * (non-flat) colormaps registered via `colormap`/`cmapper.addColormap`: the 2D
+ * slice panes render them correctly, but the 3D render always comes out fully
+ * black, reproduced even with a trivial 2-point gradient LUT and confirmed
+ * independent of curve shape or point count. `colormapLabel` uses a different,
+ * unaffected code path (the same one segmentation overlays already rely on for
+ * correct multi-color 3D rendering), at the cost of nearest-index rather than
+ * interpolated lookup -- immaterial here since the LUT already has one entry
+ * per representable intensity.
  */
-export function buildTransferFunctionColormap(tf: ParsedTransferFunction): GrayscaleColormap {
-  const R: number[] = []
-  const G: number[] = []
-  const B: number[] = []
-  const A: number[] = []
-  const I: number[] = []
+export function buildTransferFunctionColormap(tf: ParsedTransferFunction, dataMin: number, dataMax: number): TransferFunctionLut {
+  const min = Math.floor(dataMin)
+  const max = Math.max(min + 1, Math.ceil(dataMax))
+  const entries = max - min + 1
+  const lut = new Uint8ClampedArray(entries * 4)
 
-  for (let i = 0; i < SAMPLES; i++) {
-    const t = i / (SAMPLES - 1)
+  for (let i = 0; i < entries; i++) {
+    const t = i / (entries - 1)
     const gain = interpolate(tf.luminosity, t)
     const opacity = interpolate(tf.opacity, t)
     const gray = Math.round(clamp01(t * gain) * 255)
-    R.push(gray)
-    G.push(gray)
-    B.push(gray)
-    A.push(Math.round(clamp01(opacity) * 255))
-    I.push(i)
+    const k = i * 4
+    lut[k] = gray
+    lut[k + 1] = gray
+    lut[k + 2] = gray
+    lut[k + 3] = Math.round(clamp01(opacity) * 255)
   }
 
-  return { R, G, B, A, I }
+  return { lut, min, max }
 }

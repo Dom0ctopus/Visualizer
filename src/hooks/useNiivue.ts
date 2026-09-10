@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { cmapper, DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
+import { DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { deleteLibraryFile, fetchLibrary, fileUrl, uploadSegmentation, uploadVolume } from '../lib/api'
 import { buildLutForLayer } from '../lib/segmentationLut'
 import { buildTransferFunctionColormap, parseCtvoxTransferFunction } from '../lib/transferFunction'
@@ -12,8 +12,6 @@ import type {
   SegmentState,
   VolumeRecord
 } from '../types'
-
-const CTVOX_COLORMAP_NAME = 'ctvox-transfer-function'
 
 function round(n: number, decimals = 2): number {
   const f = 10 ** decimals
@@ -73,6 +71,9 @@ export function useNiivue() {
       dragModePrimary: DRAG_MODE.crosshair
     })
     nvRef.current = nv
+    if (import.meta.env.DEV) {
+      ;(window as unknown as { __nv: Niivue }).__nv = nv
+    }
 
     nv.onLocationChange = (data: unknown) => {
       const loc = data as { mm?: number[]; values?: Array<{ name: string; value: number }> }
@@ -399,9 +400,10 @@ export function useNiivue() {
     try {
       const buffer = await file.arrayBuffer()
       const tf = parseCtvoxTransferFunction(buffer)
-      const cmap = buildTransferFunctionColormap(tf)
-      cmapper.addColormap(CTVOX_COLORMAP_NAME, cmap)
-      nv.volumes[0].colormap = CTVOX_COLORMAP_NAME
+      const vol = nv.volumes[0]
+      const dataMin = vol.global_min ?? 0
+      const dataMax = vol.global_max ?? 255
+      vol.colormapLabel = buildTransferFunctionColormap(tf, dataMin, dataMax)
       nv.updateGLVolume()
       setTransferFunctionActive(true)
     } catch (e) {
@@ -412,7 +414,7 @@ export function useNiivue() {
   const clearTransferFunction = useCallback(() => {
     const nv = nvRef.current
     if (!nv || nv.volumes.length === 0) return
-    nv.volumes[0].colormap = 'gray'
+    nv.volumes[0].colormapLabel = null
     nv.updateGLVolume()
     setTransferFunctionActive(false)
   }, [])
