@@ -7,6 +7,7 @@ interface LibraryPanelProps {
   onUploadVolume: (file: File) => void
   onUploadSegmentation: (file: File) => void
   onLoad: (record: LibraryRecord) => void
+  onRemove: (record: LibraryRecord) => void
 }
 
 function formatSize(bytes: number): string {
@@ -14,7 +15,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export function LibraryPanel({ library, busy, onUploadVolume, onUploadSegmentation, onLoad }: LibraryPanelProps) {
+export function LibraryPanel({ library, busy, onUploadVolume, onUploadSegmentation, onLoad, onRemove }: LibraryPanelProps) {
   const volumeInputRef = useRef<HTMLInputElement | null>(null)
   const segInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -74,6 +75,17 @@ export function LibraryPanel({ library, busy, onUploadVolume, onUploadSegmentati
               </div>
               <button className="icon-btn" disabled={busy} onClick={() => onLoad(record)}>
                 Load
+              </button>
+              <button
+                className="icon-btn"
+                disabled={busy}
+                onClick={() => {
+                  if (window.confirm(`Remove "${record.name}" from the server library? This deletes the uploaded file.`)) {
+                    onRemove(record)
+                  }
+                }}
+              >
+                Remove
               </button>
             </li>
           ))}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { cmapper, DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
-import { fetchLibrary, fileUrl, uploadSegmentation, uploadVolume } from '../lib/api'
+import { deleteLibraryFile, fetchLibrary, fileUrl, uploadSegmentation, uploadVolume } from '../lib/api'
 import { buildLutForLayer } from '../lib/segmentationLut'
 import { buildTransferFunctionColormap, parseCtvoxTransferFunction } from '../lib/transferFunction'
 import type {
@@ -336,6 +336,22 @@ export function useNiivue() {
     })
   }, [])
 
+  const removeFromLibrary = useCallback(
+    async (record: LibraryRecord) => {
+      setError(null)
+      try {
+        await deleteLibraryFile(record.id)
+        setLibrary((prev) => prev.filter((r) => r.id !== record.id))
+        if (record.kind === 'segmentation') {
+          removeSegmentation(record.id)
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to remove file from the library.')
+      }
+    },
+    [removeSegmentation]
+  )
+
   const setWindowLevel = useCallback((calMin: number, calMax: number) => {
     const nv = nvRef.current
     if (!nv || nv.volumes.length === 0) return
@@ -410,6 +426,7 @@ export function useNiivue() {
     uploadAndLoadVolume,
     uploadAndLoadSegmentation,
     loadFromLibrary,
+    removeFromLibrary,
     setSegmentVisible,
     setSegmentOpacity,
     setSystemVisible,

@@ -76,36 +76,51 @@ export function SegmentTree({
               onRemove={() => onRemoveFile(loaded.recordId)}
               badge={String(loaded.segments.length)}
             />
-            {systems.map((system) => {
-              const sysChecked = system.segments.every((s) => s.visible)
-              const sysIndeterminate = !sysChecked && system.segments.some((s) => s.visible)
-              return (
-                <div key={system.name}>
+            {systems.length === 1 && systems[0].name === 'Ungrouped'
+              ? // No real grouping was detected for this file — skip the redundant
+                // "Ungrouped" wrapper and list segments directly under the file.
+                systems[0].segments.map((seg) => (
                   <TreeRow
+                    key={seg.key}
                     depth={1}
-                    label={system.name}
-                    checked={sysChecked}
-                    indeterminate={sysIndeterminate}
-                    opacity={avgOpacity(system.segments)}
-                    onToggle={(checked) => onSystemVisible(loaded.recordId, system.name, checked)}
-                    onOpacityChange={(o) => onSystemOpacity(loaded.recordId, system.name, o)}
-                    badge={String(system.segments.length)}
+                    label={seg.name}
+                    color={colorCss(seg.color)}
+                    checked={seg.visible}
+                    opacity={seg.opacity}
+                    onToggle={(checked) => onSegmentVisible(loaded.recordId, seg.key, checked)}
+                    onOpacityChange={(o) => onSegmentOpacity(loaded.recordId, seg.key, o)}
                   />
-                  {system.segments.map((seg) => (
-                    <TreeRow
-                      key={seg.key}
-                      depth={2}
-                      label={seg.name}
-                      color={colorCss(seg.color)}
-                      checked={seg.visible}
-                      opacity={seg.opacity}
-                      onToggle={(checked) => onSegmentVisible(loaded.recordId, seg.key, checked)}
-                      onOpacityChange={(o) => onSegmentOpacity(loaded.recordId, seg.key, o)}
-                    />
-                  ))}
-                </div>
-              )
-            })}
+                ))
+              : systems.map((system) => {
+                  const sysChecked = system.segments.every((s) => s.visible)
+                  const sysIndeterminate = !sysChecked && system.segments.some((s) => s.visible)
+                  return (
+                    <div key={system.name}>
+                      <TreeRow
+                        depth={1}
+                        label={system.name}
+                        checked={sysChecked}
+                        indeterminate={sysIndeterminate}
+                        opacity={avgOpacity(system.segments)}
+                        onToggle={(checked) => onSystemVisible(loaded.recordId, system.name, checked)}
+                        onOpacityChange={(o) => onSystemOpacity(loaded.recordId, system.name, o)}
+                        badge={String(system.segments.length)}
+                      />
+                      {system.segments.map((seg) => (
+                        <TreeRow
+                          key={seg.key}
+                          depth={2}
+                          label={seg.name}
+                          color={colorCss(seg.color)}
+                          checked={seg.visible}
+                          opacity={seg.opacity}
+                          onToggle={(checked) => onSegmentVisible(loaded.recordId, seg.key, checked)}
+                          onOpacityChange={(o) => onSegmentOpacity(loaded.recordId, seg.key, o)}
+                        />
+                      ))}
+                    </div>
+                  )
+                })}
           </div>
         )
       })}

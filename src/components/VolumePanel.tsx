@@ -3,7 +3,6 @@ import type { BaseVolumeInfo } from '../types'
 
 interface VolumePanelProps {
   baseVolume: BaseVolumeInfo
-  onWindowLevelChange: (calMin: number, calMax: number) => void
   onResetWindowLevel: () => void
   transferFunctionActive: boolean
   onLoadTransferFunction: (file: File) => void
@@ -12,14 +11,11 @@ interface VolumePanelProps {
 
 export function VolumePanel({
   baseVolume,
-  onWindowLevelChange,
   onResetWindowLevel,
   transferFunctionActive,
   onLoadTransferFunction,
   onClearTransferFunction
 }: VolumePanelProps) {
-  const range = Math.max(1e-6, baseVolume.dataMax - baseVolume.dataMin)
-  const step = range / 500
   const tfInputRef = useRef<HTMLInputElement | null>(null)
 
   return (
@@ -30,33 +26,9 @@ export function VolumePanel({
           {baseVolume.name}
         </div>
 
-        <label className="field">
-          <span>
-            Window min <b>{baseVolume.calMin.toFixed(1)}</b>
-          </span>
-          <input
-            type="range"
-            min={baseVolume.dataMin}
-            max={baseVolume.dataMax}
-            step={step}
-            value={baseVolume.calMin}
-            onChange={(e) => onWindowLevelChange(Number(e.target.value), baseVolume.calMax)}
-          />
-        </label>
-
-        <label className="field">
-          <span>
-            Window max <b>{baseVolume.calMax.toFixed(1)}</b>
-          </span>
-          <input
-            type="range"
-            min={baseVolume.dataMin}
-            max={baseVolume.dataMax}
-            step={step}
-            value={baseVolume.calMax}
-            onChange={(e) => onWindowLevelChange(baseVolume.calMin, Number(e.target.value))}
-          />
-        </label>
+        <p className="tf-hint">
+          Window/level: {baseVolume.calMin.toFixed(1)} &ndash; {baseVolume.calMax.toFixed(1)} (click-drag on the image to adjust)
+        </p>
 
         <button className="btn btn-secondary btn-small" onClick={onResetWindowLevel}>
           Reset Window/Level

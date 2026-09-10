@@ -68,8 +68,10 @@ function parseColor(text: string | undefined): [number, number, number] {
   return FALLBACK_COLOR
 }
 
-// Checked in order from most to least specific, to minimize false-positive splits.
-const SYSTEM_DELIMITERS = [' - ', '_', '-', ':', '/']
+// Only "_" is treated as a deliberate system/segment separator. Hyphens, colons,
+// and slashes show up naturally inside real anatomical names (e.g. "cerebro-branchial")
+// and produced false-positive splits when treated as delimiters.
+const SYSTEM_DELIMITERS = ['_']
 
 /**
  * Groups segments into "systems" by splitting each segment's name on the first

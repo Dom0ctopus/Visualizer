@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 interface TreeRowProps {
@@ -30,6 +30,7 @@ export function TreeRow({
   const [popoverPos, setPopoverPos] = useState({ top: 0, left: 0 })
   const rowRef = useRef<HTMLDivElement | null>(null)
   const hideTimer = useRef<number | null>(null)
+  const draggingRef = useRef(false)
 
   const show = useCallback(() => {
     if (hideTimer.current !== null) {
@@ -49,8 +50,21 @@ export function TreeRow({
   }, [])
 
   const scheduleHide = useCallback(() => {
+    // Dragging the slider can easily move the pointer outside the popover's
+    // small hit area — don't let that abort the drag by unmounting it.
+    if (draggingRef.current) return
     hideTimer.current = window.setTimeout(() => setHovered(false), 200)
   }, [])
+
+  useEffect(() => {
+    const onPointerUp = () => {
+      if (!draggingRef.current) return
+      draggingRef.current = false
+      scheduleHide()
+    }
+    window.addEventListener('pointerup', onPointerUp)
+    return () => window.removeEventListener('pointerup', onPointerUp)
+  }, [scheduleHide])
 
   const checkboxRef = useCallback(
     (el: HTMLInputElement | null) => {
@@ -96,6 +110,13 @@ export function TreeRow({
               max={1}
               step={0.01}
               value={opacity}
+              onPointerDown={() => {
+                draggingRef.current = true
+                if (hideTimer.current !== null) {
+                  window.clearTimeout(hideTimer.current)
+                  hideTimer.current = null
+                }
+              }}
               onChange={(e) => onOpacityChange(Number(e.target.value))}
             />
           </div>,

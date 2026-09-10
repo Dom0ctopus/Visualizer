@@ -23,6 +23,7 @@ function App() {
     uploadAndLoadVolume,
     uploadAndLoadSegmentation,
     loadFromLibrary,
+    removeFromLibrary,
     setSegmentVisible,
     setSegmentOpacity,
     setSystemVisible,
@@ -30,7 +31,6 @@ function App() {
     setFileVisible,
     setFileOpacity,
     removeSegmentation,
-    setWindowLevel,
     resetWindowLevel,
     transferFunctionActive,
     loadTransferFunction,
@@ -74,12 +74,12 @@ function App() {
             onUploadVolume={uploadAndLoadVolume}
             onUploadSegmentation={uploadAndLoadSegmentation}
             onLoad={loadFromLibrary}
+            onRemove={removeFromLibrary}
           />
 
           {baseVolume && (
             <VolumePanel
               baseVolume={baseVolume}
-              onWindowLevelChange={setWindowLevel}
               onResetWindowLevel={resetWindowLevel}
               transferFunctionActive={transferFunctionActive}
               onLoadTransferFunction={loadTransferFunction}
