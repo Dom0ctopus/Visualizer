@@ -1,36 +1,61 @@
-// Parser for 3D Slicer/CTvox-style transfer function (.tf) files, reverse-engineered
-// from real exports (Bruker doesn't publish the format). Confirmed structure:
+// Parser for CTvox transfer function (.tf) files, reverse-engineered from real
+// exports (Bruker doesn't publish the format). Confirmed structure, validated
+// against 8 real files including one with both curves customized:
 //
 //   bytes 0-1    magic "tf"
 //   byte 2       version (1)
 //   byte 3       reserved
-//   bytes 4-22   fixed header fields (unidentified, constant across samples)
-//   ...          "mode" byte at offset 14: 2 = opacity-only, 3 = +luminosity, 4 = +color
-//   block A      (mode - 1) constant baseline (position, value) float32 pairs —
-//                fixed defaults for CTvox's other channels; only mode 2's pairs are
-//                confirmed unused/irrelevant for opacity-only import
+//   bytes 4-13   fixed header fields (unidentified, constant across samples)
+//   byte 14      opacity curve's total point count (>= 2)
+//   bytes 15-22  reserved (zero)
+//   ...          opacity curve: (count - 1) float32 (position, value) pairs.
+//                The first point is always implicit at position 0.0 and is
+//                never stored.
 //   1 byte       flag, always 1
-//   1 byte       point count N (total curve points, including an implicit first
-//                point at position 0.0 that is never stored)
+//   1 byte       luminosity curve's total point count (>= 2)
 //   8 bytes      zero padding
-//   block B      (N - 1) float32 (position, opacity) pairs, one per stored point,
-//                position ascending, values normalized 0..1
+//   ...          luminosity curve: (count - 1) float32 (position, value) pairs,
+//                same implicit-first-point convention as opacity.
 //
-// Only mode 2 (plain opacity curve, no custom color/luminosity) is understood well
-// enough to import with confidence — modes 3/4 add channels whose exact byte
-// assignment isn't pinned down yet.
+// CTvox's editor (see its "Channel" dropdown: Opacity / Luminosity / R / G / B)
+// stores one curve per channel that's been touched; R/G/B aren't understood yet
+// (no real sample customizes them), so any leftover bytes after the two curves
+// above means the file uses those and is rejected rather than guessed at.
+//
+// Rendering semantics: opacity is the alpha curve directly. Luminosity acts as
+// a gain multiplier on the natural grayscale ramp (both curves default to a
+// flat 1.0, which is why an all-default file renders as plain opaque grayscale).
 
-export interface OpacityPoint {
+export interface CurvePoint {
   position: number
-  opacity: number
+  value: number
 }
 
 export interface ParsedTransferFunction {
-  mode: number
-  points: OpacityPoint[]
+  opacity: CurvePoint[]
+  luminosity: CurvePoint[]
 }
 
-const MAGIC = 0x66_74 // "tf" as little-endian uint16 read from bytes[0..1] ("t"=0x74,"f"=0x66)
+const MAGIC = 0x66_74 // "tf" as little-endian uint16 (bytes "t"=0x74, "f"=0x66)
+const PADDING_BYTES = 8
+
+function readCurve(view: DataView, bytes: Uint8Array, totalPoints: number, startByte: number): { points: CurvePoint[]; nextOffset: number } {
+  if (totalPoints < 2) {
+    throw new Error('Unrecognized transfer function structure (curve has fewer than 2 points).')
+  }
+  const points: CurvePoint[] = [{ position: 0, value: 1 }]
+  let offset = startByte
+  for (let i = 0; i < totalPoints - 1; i++) {
+    if (offset + 8 > bytes.length) {
+      throw new Error('Unrecognized transfer function structure (truncated curve data).')
+    }
+    const position = view.getFloat32(offset, true)
+    const value = view.getFloat32(offset + 4, true)
+    points.push({ position, value })
+    offset += 8
+  }
+  return { points, nextOffset: offset }
+}
 
 export function parseCtvoxTransferFunction(buffer: ArrayBuffer): ParsedTransferFunction {
   const bytes = new Uint8Array(buffer)
@@ -40,41 +65,40 @@ export function parseCtvoxTransferFunction(buffer: ArrayBuffer): ParsedTransferF
     throw new Error('Not a recognized CTvox transfer function file (missing "tf" signature).')
   }
 
-  const mode = bytes[14]
-  if (mode !== 2) {
+  const opacityCount = bytes[14]
+  const { points: opacity, nextOffset: afterOpacity } = readCurve(view, bytes, opacityCount, 23)
+
+  const flagPos = afterOpacity
+  if (bytes.length <= flagPos + 1 || bytes[flagPos] !== 1) {
+    throw new Error('Unrecognized transfer function structure (missing expected marker byte).')
+  }
+  const luminosityCount = bytes[flagPos + 1]
+  const luminosityStart = flagPos + 2 + PADDING_BYTES
+  const { points: luminosity, nextOffset: afterLuminosity } = readCurve(view, bytes, luminosityCount, luminosityStart)
+
+  if (afterLuminosity !== bytes.length) {
     throw new Error(
-      `This transfer function uses a color/luminosity mode (mode ${mode}) that isn't supported yet — only plain ` +
-        `opacity-curve transfer functions can be imported currently.`
+      'This transfer function uses additional color channels (R/G/B) that aren\'t supported yet — only opacity and luminosity curves can be imported currently.'
     )
   }
 
-  const blockAFloats = 2
-  const flagPos = 23 + blockAFloats * 4
-  const countPos = flagPos + 1
-  const padding = 8
-  const blockBStart = countPos + 1 + padding
+  return { opacity, luminosity }
+}
 
-  if (bytes.length <= flagPos || bytes[flagPos] !== 1) {
-    throw new Error('Unrecognized transfer function structure (missing expected marker byte).')
+function interpolate(points: CurvePoint[], t: number): number {
+  if (t <= points[0].position) return points[0].value
+  const last = points[points.length - 1]
+  if (t >= last.position) return last.value
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    if (t >= a.position && t <= b.position) {
+      const span = b.position - a.position
+      const frac = span === 0 ? 0 : (t - a.position) / span
+      return a.value + (b.value - a.value) * frac
+    }
   }
-
-  const count = bytes[countPos]
-  const pairCount = count - 1
-  const expectedLength = blockBStart + pairCount * 8
-  if (count < 1 || expectedLength !== bytes.length) {
-    throw new Error('Unrecognized transfer function structure (unexpected file length).')
-  }
-
-  const points: OpacityPoint[] = [{ position: 0, opacity: 1 }]
-  let offset = blockBStart
-  for (let i = 0; i < pairCount; i++) {
-    const position = view.getFloat32(offset, true)
-    const opacity = view.getFloat32(offset + 4, true)
-    points.push({ position, opacity })
-    offset += 8
-  }
-
-  return { mode, points }
+  return last.value
 }
 
 export interface GrayscaleColormap {
@@ -85,25 +109,35 @@ export interface GrayscaleColormap {
   I: number[]
 }
 
+const SAMPLES = 256
+
+function clamp01(n: number): number {
+  return Math.max(0, Math.min(1, n))
+}
+
 /**
- * Builds a niivue-compatible colormap from opacity control points: an identity
- * grayscale ramp (color == intensity) with alpha driven by the transfer function's
- * own knots, letting niivue's colormap interpolation reproduce the curve exactly.
+ * Builds a niivue-compatible colormap from a parsed transfer function: the
+ * natural grayscale ramp scaled by the luminosity curve (a gain, defaulting to
+ * unity), with alpha driven directly by the opacity curve.
  */
-export function buildGrayscaleColormapFromPoints(points: OpacityPoint[]): GrayscaleColormap {
-  const sorted = [...points].sort((a, b) => a.position - b.position)
-  const I = sorted.map((p) => Math.round(Math.max(0, Math.min(1, p.position)) * 255))
-  const A = sorted.map((p) => Math.round(Math.max(0, Math.min(1, p.opacity)) * 255))
+export function buildTransferFunctionColormap(tf: ParsedTransferFunction): GrayscaleColormap {
+  const R: number[] = []
+  const G: number[] = []
+  const B: number[] = []
+  const A: number[] = []
+  const I: number[] = []
 
-  if (I[0] !== 0) {
-    I.unshift(0)
-    A.unshift(A[0])
-  }
-  if (I[I.length - 1] !== 255) {
-    I.push(255)
-    A.push(A[A.length - 1])
+  for (let i = 0; i < SAMPLES; i++) {
+    const t = i / (SAMPLES - 1)
+    const gain = interpolate(tf.luminosity, t)
+    const opacity = interpolate(tf.opacity, t)
+    const gray = Math.round(clamp01(t * gain) * 255)
+    R.push(gray)
+    G.push(gray)
+    B.push(gray)
+    A.push(Math.round(clamp01(opacity) * 255))
+    I.push(i)
   }
 
-  const gray = I.slice()
-  return { R: gray, G: gray, B: gray, A, I }
+  return { R, G, B, A, I }
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { cmapper, DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { fetchLibrary, fileUrl, uploadSegmentation, uploadVolume } from '../lib/api'
 import { buildLutForLayer } from '../lib/segmentationLut'
-import { buildGrayscaleColormapFromPoints, parseCtvoxTransferFunction } from '../lib/transferFunction'
+import { buildTransferFunctionColormap, parseCtvoxTransferFunction } from '../lib/transferFunction'
 import type {
   BaseVolumeInfo,
   CrosshairInfo,
@@ -360,8 +360,8 @@ export function useNiivue() {
     setError(null)
     try {
       const buffer = await file.arrayBuffer()
-      const { points } = parseCtvoxTransferFunction(buffer)
-      const cmap = buildGrayscaleColormapFromPoints(points)
+      const tf = parseCtvoxTransferFunction(buffer)
+      const cmap = buildTransferFunctionColormap(tf)
       cmapper.addColormap(CTVOX_COLORMAP_NAME, cmap)
       nv.volumes[0].colormap = CTVOX_COLORMAP_NAME
       nv.updateGLVolume()
