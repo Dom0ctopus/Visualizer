@@ -190,6 +190,22 @@ body,
   text-overflow: ellipsis;
 }
 
+.tf-row {
+  display: flex;
+  gap: 6px;
+}
+
+.tf-row .btn {
+  width: auto;
+  flex: 1;
+}
+
+.tf-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
 .field {
   display: flex;
   flex-direction: column;

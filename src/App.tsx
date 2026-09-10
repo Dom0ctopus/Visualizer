@@ -32,6 +32,9 @@ function App() {
     removeSegmentation,
     setWindowLevel,
     resetWindowLevel,
+    transferFunctionActive,
+    loadTransferFunction,
+    clearTransferFunction,
     resetView,
     clearAll
   } = useNiivue()
@@ -74,7 +77,14 @@ function App() {
           />
 
           {baseVolume && (
-            <VolumePanel baseVolume={baseVolume} onWindowLevelChange={setWindowLevel} onResetWindowLevel={resetWindowLevel} />
+            <VolumePanel
+              baseVolume={baseVolume}
+              onWindowLevelChange={setWindowLevel}
+              onResetWindowLevel={resetWindowLevel}
+              transferFunctionActive={transferFunctionActive}
+              onLoadTransferFunction={loadTransferFunction}
+              onClearTransferFunction={clearTransferFunction}
+            />
           )}
 
           <section className="panel">

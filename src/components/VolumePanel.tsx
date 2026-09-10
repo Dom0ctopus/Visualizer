@@ -1,14 +1,26 @@
+import { useRef } from 'react'
 import type { BaseVolumeInfo } from '../types'
 
 interface VolumePanelProps {
   baseVolume: BaseVolumeInfo
   onWindowLevelChange: (calMin: number, calMax: number) => void
   onResetWindowLevel: () => void
+  transferFunctionActive: boolean
+  onLoadTransferFunction: (file: File) => void
+  onClearTransferFunction: () => void
 }
 
-export function VolumePanel({ baseVolume, onWindowLevelChange, onResetWindowLevel }: VolumePanelProps) {
+export function VolumePanel({
+  baseVolume,
+  onWindowLevelChange,
+  onResetWindowLevel,
+  transferFunctionActive,
+  onLoadTransferFunction,
+  onClearTransferFunction
+}: VolumePanelProps) {
   const range = Math.max(1e-6, baseVolume.dataMax - baseVolume.dataMin)
   const step = range / 500
+  const tfInputRef = useRef<HTMLInputElement | null>(null)
 
   return (
     <section className="panel">
@@ -49,6 +61,29 @@ export function VolumePanel({ baseVolume, onWindowLevelChange, onResetWindowLeve
         <button className="btn btn-secondary btn-small" onClick={onResetWindowLevel}>
           Reset Window/Level
         </button>
+
+        <div className="tf-row">
+          <input
+            ref={tfInputRef}
+            type="file"
+            accept=".tf"
+            className="hidden-input"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) onLoadTransferFunction(file)
+              e.target.value = ''
+            }}
+          />
+          <button className="btn btn-secondary btn-small" onClick={() => tfInputRef.current?.click()}>
+            Load Transfer Function (.tf)…
+          </button>
+          {transferFunctionActive && (
+            <button className="btn btn-secondary btn-small" onClick={onClearTransferFunction}>
+              Clear
+            </button>
+          )}
+        </div>
+        {transferFunctionActive && <p className="tf-hint">Custom opacity curve applied to the 3D render.</p>}
       </div>
     </section>
   )

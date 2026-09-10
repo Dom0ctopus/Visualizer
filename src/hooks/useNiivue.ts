@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
+import { cmapper, DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { fetchLibrary, fileUrl, uploadSegmentation, uploadVolume } from '../lib/api'
 import { buildLutForLayer } from '../lib/segmentationLut'
+import { buildGrayscaleColormapFromPoints, parseCtvoxTransferFunction } from '../lib/transferFunction'
 import type {
   BaseVolumeInfo,
   CrosshairInfo,
@@ -11,6 +12,8 @@ import type {
   SegmentState,
   VolumeRecord
 } from '../types'
+
+const CTVOX_COLORMAP_NAME = 'ctvox-transfer-function'
 
 function round(n: number, decimals = 2): number {
   const f = 10 ** decimals
@@ -32,6 +35,7 @@ export function useNiivue() {
   const [library, setLibrary] = useState<LibraryRecord[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [transferFunctionActive, setTransferFunctionActive] = useState(false)
 
   const refreshLibrary = useCallback(async () => {
     try {
@@ -91,6 +95,7 @@ export function useNiivue() {
     setSegmentations([])
     setCrosshair(null)
     setError(null)
+    setTransferFunctionActive(false)
   }, [])
 
   const loadVolumeRecord = useCallback(
@@ -336,6 +341,31 @@ export function useNiivue() {
     setWindowLevel(vol.cal_min ?? 0, vol.cal_max ?? 0)
   }, [setWindowLevel])
 
+  const loadTransferFunction = useCallback(async (file: File) => {
+    const nv = nvRef.current
+    if (!nv || nv.volumes.length === 0) return
+    setError(null)
+    try {
+      const buffer = await file.arrayBuffer()
+      const { points } = parseCtvoxTransferFunction(buffer)
+      const cmap = buildGrayscaleColormapFromPoints(points)
+      cmapper.addColormap(CTVOX_COLORMAP_NAME, cmap)
+      nv.volumes[0].colormap = CTVOX_COLORMAP_NAME
+      nv.updateGLVolume()
+      setTransferFunctionActive(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load transfer function.')
+    }
+  }, [])
+
+  const clearTransferFunction = useCallback(() => {
+    const nv = nvRef.current
+    if (!nv || nv.volumes.length === 0) return
+    nv.volumes[0].colormap = 'gray'
+    nv.updateGLVolume()
+    setTransferFunctionActive(false)
+  }, [])
+
   const setCrosshairVisible = useCallback((visible: boolean) => {
     const nv = nvRef.current
     if (!nv) return
@@ -376,6 +406,9 @@ export function useNiivue() {
     removeSegmentation,
     setWindowLevel,
     resetWindowLevel,
+    transferFunctionActive,
+    loadTransferFunction,
+    clearTransferFunction,
     resetView,
     clearAll
   }
