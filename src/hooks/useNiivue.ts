@@ -23,6 +23,19 @@ function round(n: number, decimals = 2): number {
 const DEFAULT_SEGMENT_OPACITY = 0.6
 const CROSSHAIR_WIDTH_VISIBLE = 0.6
 
+// 2x2 grid with the 3D render pane top-right: coronal | render, axial | sagittal
+const GAP = 0.006
+const LAYOUT: Array<{ sliceType: SLICE_TYPE; position: [number, number, number, number] }> = [
+  { sliceType: SLICE_TYPE.CORONAL, position: [0, 0, 0.5 - GAP / 2, 0.5 - GAP / 2] },
+  { sliceType: SLICE_TYPE.RENDER, position: [0.5 + GAP / 2, 0, 0.5 - GAP / 2, 0.5 - GAP / 2] },
+  { sliceType: SLICE_TYPE.AXIAL, position: [0, 0.5 + GAP / 2, 0.5 - GAP / 2, 0.5 - GAP / 2] },
+  { sliceType: SLICE_TYPE.SAGITTAL, position: [0.5 + GAP / 2, 0.5 + GAP / 2, 0.5 - GAP / 2, 0.5 - GAP / 2] }
+]
+
+function applyLayout(nv: Niivue): void {
+  nv.setCustomLayout(LAYOUT)
+}
+
 export function useNiivue() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const nvRef = useRef<Niivue | null>(null)
@@ -72,7 +85,7 @@ export function useNiivue() {
 
     if (canvasRef.current) {
       nv.attachToCanvas(canvasRef.current).then(() => {
-        nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
+        applyLayout(nv)
         setReady(true)
       })
     }
@@ -112,7 +125,7 @@ export function useNiivue() {
         calMin: vol.cal_min ?? 0,
         calMax: vol.cal_max ?? 0
       })
-      nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
+      applyLayout(nv)
     },
     [clearAll]
   )
@@ -378,7 +391,7 @@ export function useNiivue() {
   const resetView = useCallback(() => {
     const nv = nvRef.current
     if (!nv) return
-    nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
+    applyLayout(nv)
     nv.updateGLVolume()
   }, [])
 
