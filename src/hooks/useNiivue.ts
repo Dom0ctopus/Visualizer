@@ -538,16 +538,19 @@ export function useNiivue() {
       const tf = parseCtvoxTransferFunction(buffer)
       const vol = nv.volumes[0]
       // Floor is the current window's minimum (cal_min), so background the user has
-      // already windowed out stays excluded. Ceiling is the datatype's own maximum
-      // (255 for 8-bit data) rather than cal_max: niivue clamps samples above the
-      // table's top entry to fully opaque, and the auto-computed window's ceiling can
-      // sit well below the data's actual bright/dense material, sweeping a large
-      // chunk of the volume into that "clipped opaque" bucket -- reproducing the same
-      // solid-block look this fix is meant to avoid.
-      const bitsPerVoxel = vol.hdr?.numBitsPerVoxel
-      const typeMax = bitsPerVoxel ? 2 ** bitsPerVoxel - 1 : undefined
+      // already windowed out stays excluded. Ceiling is global_max -- the actual
+      // observed maximum voxel value in this dataset -- rather than a guess at the
+      // datatype's theoretical maximum (2^bits-1): that guess is only correct for
+      // unsigned data that actually spans its full range, and for anything else
+      // (signed types, or real data that never reaches the type's ceiling) it can
+      // wildly overshoot, compressing the entire real data range into a razor-thin
+      // sliver near the bottom of the table. Since gray = t*gain, "near the bottom"
+      // means every voxel's mapped color comes out near-black regardless of the
+      // curve's actual shape -- reproducing the same solid-block look this is meant
+      // to fix, just black instead of white. global_max can never be exceeded by the
+      // data by definition, so it's always correctly scaled.
       const dataMin = vol.cal_min ?? vol.global_min ?? 0
-      const dataMax = Math.max(typeMax ?? 0, vol.cal_max ?? 0, vol.global_max ?? 0, dataMin + 1)
+      const dataMax = Math.max(vol.global_max ?? vol.cal_max ?? 255, dataMin + 1)
       vol.colormapLabel = buildTransferFunctionColormap(tf, dataMin, dataMax)
       nv.updateGLVolume()
       setTransferFunctionActive(true)
