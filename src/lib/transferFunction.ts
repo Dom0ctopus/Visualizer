@@ -155,7 +155,13 @@ const TABLE_RESOLUTION = 256
 // along ray-marched rays into a visible haze/box. Widening the forced-transparent
 // region to the bottom slice of the table (a soft floor, not a single sample) is the
 // standard fix for this in volume renderers.
-const DEAD_ZONE_FRACTION = 0.03
+//
+// 5% rather than something tighter because niivue's own auto-window (cal_min) can
+// degenerate to the data's literal minimum with no real exclusion at all -- observed
+// directly on a real scan (global_min/cal_min both 0) where most of the volume is
+// background, so the floor needs enough margin to matter even with zero help from
+// windowing.
+const DEAD_ZONE_FRACTION = 0.05
 
 export function buildTransferFunctionColormap(tf: ParsedTransferFunction, dataMin: number, dataMax: number): TransferFunctionLut {
   const min = dataMin

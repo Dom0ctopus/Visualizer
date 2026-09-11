@@ -74,7 +74,12 @@ export function VolumePanel({
             </button>
           )}
         </div>
-        {transferFunctionActive && <p className="tf-hint">Custom opacity curve applied to the 3D render.</p>}
+        {transferFunctionActive && (
+          <p className="tf-hint">
+            Custom opacity curve applied to the 3D render. Background still showing? Drag on the image to narrow the
+            window above it -- the curve re-applies live.
+          </p>
+        )}
       </div>
     </section>
   )

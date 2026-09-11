@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { deleteLibraryFile, fetchLibrary, fileUrl, uploadSegmentation, uploadVolume } from '../lib/api'
 import { buildLutForBucket, opacityBucket } from '../lib/segmentationLut'
-import { buildTransferFunctionColormap, parseCtvoxTransferFunction } from '../lib/transferFunction'
+import { buildTransferFunctionColormap, parseCtvoxTransferFunction, type ParsedTransferFunction } from '../lib/transferFunction'
 import type {
   BaseVolumeInfo,
   CrosshairInfo,
@@ -55,6 +55,11 @@ export function useNiivue() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [transferFunctionActive, setTransferFunctionActive] = useState(false)
+  // The active transfer function's curve data, kept around so window/level drags can
+  // re-bake it against the new cal_min/cal_max live -- otherwise the curve's domain
+  // is frozen at whatever the window happened to be when the .tf file was loaded,
+  // leaving no way to interactively push the floor above a noisy background.
+  const activeTransferFunctionRef = useRef<ParsedTransferFunction | null>(null)
 
   // Mirrors `segmentations` for the debounced rebuild pipeline below, which needs to
   // read the latest segment state from a timer callback without depending on
@@ -111,6 +116,16 @@ export function useNiivue() {
       })
     }
 
+    // Fires once when a click-drag-to-window gesture (dragMode: contrast) completes.
+    // Syncs the displayed window and, if a transfer function is active, re-bakes it
+    // against the new cal_min/cal_max -- letting that drag double as a live, manual
+    // way to push the floor above a noisy background instead of only being usable
+    // at the moment a .tf file is first loaded.
+    nv.onIntensityChange = (volume) => {
+      setBaseVolume((prev) => (prev ? { ...prev, calMin: volume.cal_min ?? prev.calMin, calMax: volume.cal_max ?? prev.calMax } : prev))
+      applyActiveTransferFunction()
+    }
+
     if (canvasRef.current) {
       nv.attachToCanvas(canvasRef.current).then(() => {
         applyLayout(nv)
@@ -136,6 +151,7 @@ export function useNiivue() {
     setSegmentations([])
     setCrosshair(null)
     setError(null)
+    activeTransferFunctionRef.current = null
     setTransferFunctionActive(false)
   }, [])
 
@@ -511,15 +527,49 @@ export function useNiivue() {
     [removeSegmentation]
   )
 
-  const setWindowLevel = useCallback((calMin: number, calMax: number) => {
+  // Floor is the current window's minimum (cal_min), so background the user has
+  // already windowed out stays excluded. Ceiling is global_max -- the actual
+  // observed maximum voxel value in this dataset -- rather than a guess at the
+  // datatype's theoretical maximum (2^bits-1): that guess is only correct for
+  // unsigned data that actually spans its full range, and for anything else
+  // (signed types, or real data that never reaches the type's ceiling) it can
+  // wildly overshoot, compressing the entire real data range into a razor-thin
+  // sliver near the bottom of the table. Since gray = t*gain, "near the bottom"
+  // means every voxel's mapped color comes out near-black regardless of the
+  // curve's actual shape -- reproducing the same solid-block look this is meant
+  // to fix, just black instead of white. global_max can never be exceeded by the
+  // data by definition, so it's always correctly scaled.
+  const applyActiveTransferFunction = useCallback(() => {
     const nv = nvRef.current
-    if (!nv || nv.volumes.length === 0) return
+    const tf = activeTransferFunctionRef.current
+    if (!nv || !tf || nv.volumes.length === 0) return
     const vol = nv.volumes[0]
-    vol.cal_min = calMin
-    vol.cal_max = calMax
+    const dataMin = vol.cal_min ?? vol.global_min ?? 0
+    const dataMax = Math.max(vol.global_max ?? vol.cal_max ?? 255, dataMin + 1)
+    vol.colormapLabel = buildTransferFunctionColormap(tf, dataMin, dataMax)
     nv.updateGLVolume()
-    setBaseVolume((prev) => (prev ? { ...prev, calMin, calMax } : prev))
   }, [])
+
+  const setWindowLevel = useCallback(
+    (calMin: number, calMax: number) => {
+      const nv = nvRef.current
+      if (!nv || nv.volumes.length === 0) return
+      const vol = nv.volumes[0]
+      vol.cal_min = calMin
+      vol.cal_max = calMax
+      // niivue's own auto-window can land its floor right on the data's true
+      // minimum (observed directly: a real scan with global_min === cal_min === 0),
+      // giving the transfer function's dead-zone margin nothing to work with. Since
+      // the curve is otherwise baked once at load time, re-applying it here lets a
+      // manual window drag serve as a live, interactive way to push the floor above
+      // a noisy background -- dragging narrower excludes more low-end material
+      // immediately, without having to reload the .tf file.
+      applyActiveTransferFunction()
+      nv.updateGLVolume()
+      setBaseVolume((prev) => (prev ? { ...prev, calMin, calMax } : prev))
+    },
+    [applyActiveTransferFunction]
+  )
 
   const resetWindowLevel = useCallback(() => {
     const nv = nvRef.current
@@ -529,39 +579,28 @@ export function useNiivue() {
     setWindowLevel(vol.cal_min ?? 0, vol.cal_max ?? 0)
   }, [setWindowLevel])
 
-  const loadTransferFunction = useCallback(async (file: File) => {
-    const nv = nvRef.current
-    if (!nv || nv.volumes.length === 0) return
-    setError(null)
-    try {
-      const buffer = await file.arrayBuffer()
-      const tf = parseCtvoxTransferFunction(buffer)
-      const vol = nv.volumes[0]
-      // Floor is the current window's minimum (cal_min), so background the user has
-      // already windowed out stays excluded. Ceiling is global_max -- the actual
-      // observed maximum voxel value in this dataset -- rather than a guess at the
-      // datatype's theoretical maximum (2^bits-1): that guess is only correct for
-      // unsigned data that actually spans its full range, and for anything else
-      // (signed types, or real data that never reaches the type's ceiling) it can
-      // wildly overshoot, compressing the entire real data range into a razor-thin
-      // sliver near the bottom of the table. Since gray = t*gain, "near the bottom"
-      // means every voxel's mapped color comes out near-black regardless of the
-      // curve's actual shape -- reproducing the same solid-block look this is meant
-      // to fix, just black instead of white. global_max can never be exceeded by the
-      // data by definition, so it's always correctly scaled.
-      const dataMin = vol.cal_min ?? vol.global_min ?? 0
-      const dataMax = Math.max(vol.global_max ?? vol.cal_max ?? 255, dataMin + 1)
-      vol.colormapLabel = buildTransferFunctionColormap(tf, dataMin, dataMax)
-      nv.updateGLVolume()
-      setTransferFunctionActive(true)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load transfer function.')
-    }
-  }, [])
+  const loadTransferFunction = useCallback(
+    async (file: File) => {
+      const nv = nvRef.current
+      if (!nv || nv.volumes.length === 0) return
+      setError(null)
+      try {
+        const buffer = await file.arrayBuffer()
+        const tf = parseCtvoxTransferFunction(buffer)
+        activeTransferFunctionRef.current = tf
+        applyActiveTransferFunction()
+        setTransferFunctionActive(true)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to load transfer function.')
+      }
+    },
+    [applyActiveTransferFunction]
+  )
 
   const clearTransferFunction = useCallback(() => {
     const nv = nvRef.current
     if (!nv || nv.volumes.length === 0) return
+    activeTransferFunctionRef.current = null
     nv.volumes[0].colormapLabel = null
     nv.updateGLVolume()
     setTransferFunctionActive(false)
