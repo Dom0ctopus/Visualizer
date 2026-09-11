@@ -56,6 +56,21 @@ export function useNiivue() {
   const [busy, setBusy] = useState(false)
   const [transferFunctionActive, setTransferFunctionActive] = useState(false)
 
+  // Mirrors `segmentations` for the debounced rebuild pipeline below, which needs to
+  // read the latest segment state from a timer callback without depending on
+  // useCallback's closure over a stale `segmentations` value.
+  const segmentationsRef = useRef<LoadedSegmentation[]>([])
+  useEffect(() => {
+    segmentationsRef.current = segmentations
+  }, [segmentations])
+
+  // Per-recordId bookkeeping for the debounced/serialized volume rebuild below --
+  // see updateSegments/scheduleRebuild/runRebuild.
+  const dirtyLayersRef = useRef<Map<string, Set<number>>>(new Map())
+  const rebuildTimersRef = useRef<Map<string, number>>(new Map())
+  const rebuildInFlightRef = useRef<Set<string>>(new Set())
+  const rebuildQueuedRef = useRef<Set<string>>(new Set())
+
   const refreshLibrary = useCallback(async () => {
     try {
       setLibrary(await fetchLibrary())
@@ -292,51 +307,103 @@ export function useNiivue() {
     [loadVolumeRecord, loadSegmentationRecord]
   )
 
-  const updateSegments = useCallback(
-    (recordId: string, predicate: (seg: SegmentState) => boolean, updater: (seg: SegmentState) => SegmentState) => {
-      // The map callback below must stay pure -- React (in StrictMode) can invoke a
-      // setState updater function more than once per commit. Rebuilding volumes and
-      // touching niivue's GL state is a real side effect, so it's captured here and
-      // fired exactly once, after setSegmentations returns, rather than from inside
-      // the updater itself.
-      let changed: LoadedSegmentation | null = null
-      const affectedLayers = new Set<number>()
-
-      setSegmentations((prev) =>
-        prev.map((loaded) => {
-          if (loaded.recordId !== recordId) return loaded
-          const segments = loaded.segments.map((seg) => {
-            if (!predicate(seg)) return seg
-            affectedLayers.add(seg.layer)
-            return updater(seg)
-          })
-          const next = { ...loaded, segments }
-          changed = next
-          return next
-        })
-      )
-
+  // Runs (or re-runs) the pending volume rebuild for one segmentation file, always
+  // reading the freshest segment state and dirty-layer set at the moment it actually
+  // executes. Only one rebuild runs at a time per recordId -- a request that arrives
+  // while one is already in flight is coalesced into a single follow-up pass instead
+  // of starting a second, overlapping rebuild (which is what let concurrent slider
+  // drag events race each other and leave niivue's volumes out of sync with React
+  // state, showing as opacity changes only "sometimes" taking effect).
+  const runRebuild = useCallback(
+    async (recordId: string) => {
       const nv = nvRef.current
-      if (changed !== null && nv) {
-        const snapshot: LoadedSegmentation = changed
-        void (async () => {
-          let volumeIdsByBucket = snapshot.volumeIdsByBucket
-          for (const layer of affectedLayers) {
-            const layerIds = await rebuildLayerVolumes(nv, { ...snapshot, volumeIdsByBucket }, layer)
+      if (!nv) return
+      if (rebuildInFlightRef.current.has(recordId)) {
+        rebuildQueuedRef.current.add(recordId)
+        return
+      }
+      rebuildInFlightRef.current.add(recordId)
+      try {
+        for (;;) {
+          const layers = dirtyLayersRef.current.get(recordId)
+          if (!layers || layers.size === 0) break
+          dirtyLayersRef.current.set(recordId, new Set())
+          const loaded = segmentationsRef.current.find((s) => s.recordId === recordId)
+          if (!loaded) break
+
+          let volumeIdsByBucket = loaded.volumeIdsByBucket
+          for (const layer of layers) {
+            const layerIds = await rebuildLayerVolumes(nv, { ...loaded, volumeIdsByBucket }, layer)
             volumeIdsByBucket = { ...volumeIdsByBucket }
             for (const key of Object.keys(volumeIdsByBucket)) {
               if (key.startsWith(`${layer}:`)) delete volumeIdsByBucket[key]
             }
             volumeIdsByBucket = { ...volumeIdsByBucket, ...layerIds }
           }
+
           const finalIds = volumeIdsByBucket
-          setSegmentations((prev) =>
-            prev.map((loaded) => (loaded.recordId === recordId ? { ...loaded, volumeIdsByBucket: finalIds } : loaded))
+          segmentationsRef.current = segmentationsRef.current.map((l) =>
+            l.recordId === recordId ? { ...l, volumeIdsByBucket: finalIds } : l
           )
-        })()
+          setSegmentations((prev) => prev.map((l) => (l.recordId === recordId ? { ...l, volumeIdsByBucket: finalIds } : l)))
+        }
+      } finally {
+        rebuildInFlightRef.current.delete(recordId)
+        if (rebuildQueuedRef.current.delete(recordId)) {
+          void runRebuild(recordId)
+        }
       }
     },
     [rebuildLayerVolumes]
+  )
+
+  // Debounces the actual GL rebuild so a fast slider drag (which fires onChange
+  // continuously) doesn't spawn a volume-creation fetch per pixel of movement --
+  // only once ~120ms after the user pauses or releases.
+  const scheduleRebuild = useCallback(
+    (recordId: string) => {
+      const existing = rebuildTimersRef.current.get(recordId)
+      if (existing !== undefined) window.clearTimeout(existing)
+      const timer = window.setTimeout(() => {
+        rebuildTimersRef.current.delete(recordId)
+        void runRebuild(recordId)
+      }, 120)
+      rebuildTimersRef.current.set(recordId, timer)
+    },
+    [runRebuild]
+  )
+
+  const updateSegments = useCallback(
+    (recordId: string, predicate: (seg: SegmentState) => boolean, updater: (seg: SegmentState) => SegmentState) => {
+      // Which layers are affected is determined structurally (by key/system/etc, via
+      // `predicate`), which doesn't change as opacity/visibility are edited -- so it's
+      // safe to read this from the ref mirror rather than from React's state updater.
+      // That distinction matters: setSegmentations' updater callback isn't guaranteed
+      // to run synchronously (React can defer it to the actual render pass), so a
+      // variable populated *inside* the updater and read immediately after the call
+      // -- the previous approach here -- was frequently still at its initial value,
+      // silently dropping the dirty-layer marking on most calls during a fast drag.
+      const loaded = segmentationsRef.current.find((l) => l.recordId === recordId)
+      if (!loaded) return
+      const affectedLayers = new Set<number>()
+      for (const seg of loaded.segments) {
+        if (predicate(seg)) affectedLayers.add(seg.layer)
+      }
+      if (affectedLayers.size === 0) return
+
+      setSegmentations((prev) =>
+        prev.map((l) => {
+          if (l.recordId !== recordId) return l
+          return { ...l, segments: l.segments.map((seg) => (predicate(seg) ? updater(seg) : seg)) }
+        })
+      )
+
+      const layers = dirtyLayersRef.current.get(recordId) ?? new Set<number>()
+      for (const layer of affectedLayers) layers.add(layer)
+      dirtyLayersRef.current.set(recordId, layers)
+      scheduleRebuild(recordId)
+    },
+    [scheduleRebuild]
   )
 
   const setSegmentVisible = useCallback(
@@ -408,6 +475,14 @@ export function useNiivue() {
   const removeSegmentation = useCallback((recordId: string) => {
     const nv = nvRef.current
     if (!nv) return
+    // Drop any pending/queued rebuild for this file -- its volumes are about to be
+    // removed, so a stale rebuild firing afterward would just recreate them.
+    const timer = rebuildTimersRef.current.get(recordId)
+    if (timer !== undefined) window.clearTimeout(timer)
+    rebuildTimersRef.current.delete(recordId)
+    dirtyLayersRef.current.delete(recordId)
+    rebuildQueuedRef.current.delete(recordId)
+
     setSegmentations((prev) => {
       const loaded = prev.find((s) => s.recordId === recordId)
       if (loaded) {
@@ -462,12 +537,17 @@ export function useNiivue() {
       const buffer = await file.arrayBuffer()
       const tf = parseCtvoxTransferFunction(buffer)
       const vol = nv.volumes[0]
-      // Anchored to the current window (cal_min/cal_max), matching what CTvox's
-      // curve editor treats as the transfer function's 0..1 domain -- not the
-      // volume's full data range, which would stretch the curve across background
-      // noise the user has already windowed out.
+      // Floor is the current window's minimum (cal_min), so background the user has
+      // already windowed out stays excluded. Ceiling is the datatype's own maximum
+      // (255 for 8-bit data) rather than cal_max: niivue clamps samples above the
+      // table's top entry to fully opaque, and the auto-computed window's ceiling can
+      // sit well below the data's actual bright/dense material, sweeping a large
+      // chunk of the volume into that "clipped opaque" bucket -- reproducing the same
+      // solid-block look this fix is meant to avoid.
+      const bitsPerVoxel = vol.hdr?.numBitsPerVoxel
+      const typeMax = bitsPerVoxel ? 2 ** bitsPerVoxel - 1 : undefined
       const dataMin = vol.cal_min ?? vol.global_min ?? 0
-      const dataMax = vol.cal_max ?? vol.global_max ?? 255
+      const dataMax = Math.max(typeMax ?? 0, vol.cal_max ?? 0, vol.global_max ?? 0, dataMin + 1)
       vol.colormapLabel = buildTransferFunctionColormap(tf, dataMin, dataMax)
       nv.updateGLVolume()
       setTransferFunctionActive(true)
