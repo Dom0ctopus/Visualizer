@@ -85,17 +85,33 @@ export function parseCtvoxTransferFunction(buffer: ArrayBuffer): ParsedTransferF
   return { opacity, luminosity }
 }
 
+// CTvox's own curve editor draws these as smooth curves through each control point
+// (confirmed against a real screenshot: a curve with several points rendered as a
+// series of arcs/parabolas, not straight segments), so reconstructing them with
+// linear interpolation gets the shape wrong for any curve with 3+ points -- flat or
+// 2-point curves are unaffected since a straight line and a spline coincide there.
+// Catmull-Rom passes exactly through every control point (unlike a fitted Bezier),
+// using the segment's own neighbors to estimate tangents, which matches an editor
+// where you place points and the curve bends smoothly between them.
+function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t
+  const t3 = t2 * t
+  return 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+}
+
 function interpolate(points: CurvePoint[], t: number): number {
   if (t <= points[0].position) return points[0].value
   const last = points[points.length - 1]
   if (t >= last.position) return last.value
   for (let i = 0; i < points.length - 1; i++) {
-    const a = points[i]
-    const b = points[i + 1]
-    if (t >= a.position && t <= b.position) {
-      const span = b.position - a.position
-      const frac = span === 0 ? 0 : (t - a.position) / span
-      return a.value + (b.value - a.value) * frac
+    const p1 = points[i]
+    const p2 = points[i + 1]
+    if (t >= p1.position && t <= p2.position) {
+      const span = p2.position - p1.position
+      const frac = span === 0 ? 0 : (t - p1.position) / span
+      const p0 = points[i - 1] ?? p1
+      const p3 = points[i + 2] ?? p2
+      return catmullRom(p0.value, p1.value, p2.value, p3.value, frac)
     }
   }
   return last.value
