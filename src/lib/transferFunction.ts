@@ -147,6 +147,16 @@ const TABLE_RESOLUTION = 256
  * default) would make the *entire* volume -- background included -- fully opaque,
  * rendering as a solid box instead of the intended windowed structure.
  */
+// Forcing only the single bottom texel transparent assumes real dead-space voxels
+// sit exactly at (or below) the window floor. In practice sensor/reconstruction
+// noise spreads dead space over a small range, and since it's usually the majority
+// of the volume's voxels, even a small fraction poking just above a single-texel
+// cutoff -- landing on the curve's real (often near-1) opacity there -- accumulates
+// along ray-marched rays into a visible haze/box. Widening the forced-transparent
+// region to the bottom slice of the table (a soft floor, not a single sample) is the
+// standard fix for this in volume renderers.
+const DEAD_ZONE_FRACTION = 0.03
+
 export function buildTransferFunctionColormap(tf: ParsedTransferFunction, dataMin: number, dataMax: number): TransferFunctionLut {
   const min = dataMin
   const max = Math.max(min + 1e-6, dataMax)
@@ -156,7 +166,7 @@ export function buildTransferFunctionColormap(tf: ParsedTransferFunction, dataMi
   for (let i = 0; i < entries; i++) {
     const t = i / (entries - 1)
     const gain = interpolate(tf.luminosity, t)
-    const opacity = i === 0 ? 0 : interpolate(tf.opacity, t)
+    const opacity = t < DEAD_ZONE_FRACTION ? 0 : interpolate(tf.opacity, t)
     const gray = Math.round(clamp01(t * gain) * 255)
     const k = i * 4
     lut[k] = gray
