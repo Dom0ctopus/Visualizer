@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { deleteLibraryFile, fetchLibrary, fileUrl, uploadSegmentation, uploadVolume } from '../lib/api'
-import { buildLutForLayer } from '../lib/segmentationLut'
+import { buildLutForBucket, opacityBucket } from '../lib/segmentationLut'
 import { buildTransferFunctionColormap, parseCtvoxTransferFunction } from '../lib/transferFunction'
 import type {
   BaseVolumeInfo,
@@ -20,18 +20,26 @@ function round(n: number, decimals = 2): number {
 
 const DEFAULT_SEGMENT_OPACITY = 0.6
 const CROSSHAIR_WIDTH_VISIBLE = 0.6
+// niivue's own scene defaults (INITIAL_SCENE_DATA), used to snap the 3D camera
+// back to its starting orientation.
+const DEFAULT_RENDER_AZIMUTH = 110
+const DEFAULT_RENDER_ELEVATION = 10
 
-// 2x2 grid with the 3D render pane top-right: coronal | render, axial | sagittal
+// 2x2 grid with the 3D render pane top-left: render | coronal, axial | sagittal
 const GAP = 0.006
 const LAYOUT: Array<{ sliceType: SLICE_TYPE; position: [number, number, number, number] }> = [
-  { sliceType: SLICE_TYPE.CORONAL, position: [0, 0, 0.5 - GAP / 2, 0.5 - GAP / 2] },
-  { sliceType: SLICE_TYPE.RENDER, position: [0.5 + GAP / 2, 0, 0.5 - GAP / 2, 0.5 - GAP / 2] },
+  { sliceType: SLICE_TYPE.RENDER, position: [0, 0, 0.5 - GAP / 2, 0.5 - GAP / 2] },
+  { sliceType: SLICE_TYPE.CORONAL, position: [0.5 + GAP / 2, 0, 0.5 - GAP / 2, 0.5 - GAP / 2] },
   { sliceType: SLICE_TYPE.AXIAL, position: [0, 0.5 + GAP / 2, 0.5 - GAP / 2, 0.5 - GAP / 2] },
   { sliceType: SLICE_TYPE.SAGITTAL, position: [0.5 + GAP / 2, 0.5 + GAP / 2, 0.5 - GAP / 2, 0.5 - GAP / 2] }
 ]
 
 function applyLayout(nv: Niivue): void {
   nv.setCustomLayout(LAYOUT)
+}
+
+function bucketKey(layer: number, bucket: number): string {
+  return `${layer}:${bucket}`
 }
 
 export function useNiivue() {
@@ -68,7 +76,11 @@ export function useNiivue() {
       multiplanarShowRender: SHOW_RENDER.ALWAYS,
       dragAndDropEnabled: true,
       dragMode: DRAG_MODE.contrast,
-      dragModePrimary: DRAG_MODE.crosshair
+      dragModePrimary: DRAG_MODE.crosshair,
+      // Retina/HiDPI displays otherwise render at 2x+ pixel density, which multiplies
+      // the 3D view's per-frame ray-marching cost accordingly; forcing 1x keeps
+      // interactive rotation responsive at a barely-noticeable sharpness cost.
+      forceDevicePixelRatio: -1
     })
     nvRef.current = nv
     if (import.meta.env.DEV) {
@@ -131,57 +143,101 @@ export function useNiivue() {
     [clearAll]
   )
 
-  const loadSegmentationRecord = useCallback(async (record: SegmentationRecord) => {
-    const nv = nvRef.current
-    if (!nv) return
+  // Segments sharing a layer and an opacity value (rounded to the nearest percent)
+  // are packed into one niivue volume, using that volume's own `.opacity` property
+  // to drive visible transparency. colormapLabel's alpha channel only supports
+  // binary/edge-anti-aliasing visibility in niivue's 3D renderer, not analog
+  // blending, so it is used here for color + per-label masking only (always at
+  // full alpha for included labels).
+  const rebuildLayerVolumes = useCallback(
+    async (nv: Niivue, loaded: LoadedSegmentation, layer: number): Promise<Record<string, string>> => {
+      const segmentsInLayer = loaded.segments.filter((s) => s.layer === layer)
+      const byBucket = new Map<number, SegmentState[]>()
+      for (const seg of segmentsInLayer) {
+        if (!seg.visible || seg.opacity <= 0) continue
+        const bucket = opacityBucket(seg.opacity)
+        if (bucket <= 0) continue
+        const list = byBucket.get(bucket) ?? []
+        list.push(seg)
+        byBucket.set(bucket, list)
+      }
 
-    const allSegments = record.systems.flatMap((sys) => sys.segments.map((seg) => ({ ...seg, system: sys.name })))
-    const layers = [...new Set(allSegments.map((s) => s.layer))].sort((a, b) => a - b)
+      const result: Record<string, string> = {}
+      for (const [bucket, segs] of byBucket) {
+        const key = bucketKey(layer, bucket)
+        const { lut, min, max } = buildLutForBucket(segs, segmentsInLayer)
+        const existingId = loaded.volumeIdsByBucket[key]
+        const existingIdx = existingId ? nv.volumes.findIndex((v) => v.id === existingId) : -1
+        if (existingIdx >= 0) {
+          nv.volumes[existingIdx].colormapLabel = { lut, min, max }
+          nv.volumes[existingIdx].opacity = bucket / 100
+          result[key] = existingId!
+        } else {
+          const vol = await nv.addVolumeFromUrl({
+            url: fileUrl(loaded.recordId),
+            // Keep the real filename (and its extension) so niivue's format detection
+            // works; layer/bucket identity is tracked separately via volumeIdsByBucket.
+            name: loaded.name,
+            frame4D: layer,
+            opacity: bucket / 100,
+            colormapLabel: { lut, min, max }
+          })
+          // Re-assert colormapLabel after creation and force a redraw: setting it via
+          // addVolumeFromUrl's own options doesn't reliably take effect on first paint.
+          const idx = nv.volumes.findIndex((v) => v.id === vol.id)
+          if (idx >= 0) nv.volumes[idx].colormapLabel = { lut, min, max }
+          result[key] = vol.id
+        }
+      }
 
-    const segmentStates: SegmentState[] = allSegments.map((seg) => ({
-      key: `${seg.layer}:${seg.labelValue}`,
-      system: seg.system,
-      name: seg.name,
-      labelValue: seg.labelValue,
-      layer: seg.layer,
-      color: seg.color,
-      visible: true,
-      opacity: DEFAULT_SEGMENT_OPACITY
-    }))
+      for (const [key, volId] of Object.entries(loaded.volumeIdsByBucket)) {
+        if (!key.startsWith(`${layer}:`) || key in result) continue
+        const idx = nv.volumes.findIndex((v) => v.id === volId)
+        if (idx >= 0) nv.removeVolumeByIndex(idx)
+      }
 
-    const volumeIdsByLayer: Record<number, string> = {}
-    for (const layer of layers) {
-      const segmentsInLayer = segmentStates.filter((s) => s.layer === layer)
-      const { lut, min, max } = buildLutForLayer(segmentsInLayer)
-      const vol = await nv.addVolumeFromUrl({
-        url: fileUrl(record.id),
-        // Keep the real filename (and its extension) so niivue's format detection works;
-        // layer identity is tracked separately via volumeIdsByLayer.
+      nv.updateGLVolume()
+      return result
+    },
+    []
+  )
+
+  const loadSegmentationRecord = useCallback(
+    async (record: SegmentationRecord) => {
+      const nv = nvRef.current
+      if (!nv) return
+
+      const allSegments = record.systems.flatMap((sys) => sys.segments.map((seg) => ({ ...seg, system: sys.name })))
+      const layers = [...new Set(allSegments.map((s) => s.layer))].sort((a, b) => a - b)
+
+      const segmentStates: SegmentState[] = allSegments.map((seg) => ({
+        key: `${seg.layer}:${seg.labelValue}`,
+        system: seg.system,
+        name: seg.name,
+        labelValue: seg.labelValue,
+        layer: seg.layer,
+        color: seg.color,
+        visible: true,
+        opacity: DEFAULT_SEGMENT_OPACITY
+      }))
+
+      let loaded: LoadedSegmentation = {
+        recordId: record.id,
         name: record.name,
-        frame4D: layer,
-        opacity: 1,
-        colormapLabel: { lut, min, max }
-      })
-      volumeIdsByLayer[layer] = vol.id
-    }
-    // Re-assert each volume's colormapLabel after all volumes are loaded and
-    // force a redraw. Setting colormapLabel via addVolumeFromUrl's own options
-    // doesn't reliably take effect on first paint (the same fix a visibility
-    // toggle applies afterward, via rebuildLayerLut) — doing it here up front
-    // avoids needing that extra toggle before colors render correctly.
-    for (const layer of layers) {
-      const idx = nv.volumes.findIndex((v) => v.id === volumeIdsByLayer[layer])
-      if (idx < 0) continue
-      const segmentsInLayer = segmentStates.filter((s) => s.layer === layer)
-      nv.volumes[idx].colormapLabel = buildLutForLayer(segmentsInLayer)
-    }
-    nv.updateGLVolume()
+        layerCount: record.layerCount,
+        volumeIdsByBucket: {},
+        segments: segmentStates
+      }
 
-    setSegmentations((prev) => [
-      ...prev,
-      { recordId: record.id, name: record.name, layerCount: record.layerCount, volumeIdsByLayer, segments: segmentStates }
-    ])
-  }, [])
+      for (const layer of layers) {
+        const layerIds = await rebuildLayerVolumes(nv, loaded, layer)
+        loaded = { ...loaded, volumeIdsByBucket: { ...loaded.volumeIdsByBucket, ...layerIds } }
+      }
+
+      setSegmentations((prev) => [...prev, loaded])
+    },
+    [rebuildLayerVolumes]
+  )
 
   const uploadAndLoadVolume = useCallback(
     async (file: File) => {
@@ -236,21 +292,10 @@ export function useNiivue() {
     [loadVolumeRecord, loadSegmentationRecord]
   )
 
-  const rebuildLayerLut = useCallback((loaded: LoadedSegmentation, layer: number) => {
-    const nv = nvRef.current
-    if (!nv) return
-    const volId = loaded.volumeIdsByLayer[layer]
-    const idx = nv.volumes.findIndex((v) => v.id === volId)
-    if (idx < 0) return
-    const segmentsInLayer = loaded.segments.filter((s) => s.layer === layer)
-    nv.volumes[idx].colormapLabel = buildLutForLayer(segmentsInLayer)
-    nv.updateGLVolume()
-  }, [])
-
   const updateSegments = useCallback(
     (recordId: string, predicate: (seg: SegmentState) => boolean, updater: (seg: SegmentState) => SegmentState) => {
       // The map callback below must stay pure -- React (in StrictMode) can invoke a
-      // setState updater function more than once per commit. Rebuilding the LUT and
+      // setState updater function more than once per commit. Rebuilding volumes and
       // touching niivue's GL state is a real side effect, so it's captured here and
       // fired exactly once, after setSegmentations returns, rather than from inside
       // the updater itself.
@@ -271,11 +316,27 @@ export function useNiivue() {
         })
       )
 
-      if (changed) {
-        affectedLayers.forEach((layer) => rebuildLayerLut(changed!, layer))
+      const nv = nvRef.current
+      if (changed !== null && nv) {
+        const snapshot: LoadedSegmentation = changed
+        void (async () => {
+          let volumeIdsByBucket = snapshot.volumeIdsByBucket
+          for (const layer of affectedLayers) {
+            const layerIds = await rebuildLayerVolumes(nv, { ...snapshot, volumeIdsByBucket }, layer)
+            volumeIdsByBucket = { ...volumeIdsByBucket }
+            for (const key of Object.keys(volumeIdsByBucket)) {
+              if (key.startsWith(`${layer}:`)) delete volumeIdsByBucket[key]
+            }
+            volumeIdsByBucket = { ...volumeIdsByBucket, ...layerIds }
+          }
+          const finalIds = volumeIdsByBucket
+          setSegmentations((prev) =>
+            prev.map((loaded) => (loaded.recordId === recordId ? { ...loaded, volumeIdsByBucket: finalIds } : loaded))
+          )
+        })()
       }
     },
-    [rebuildLayerLut]
+    [rebuildLayerVolumes]
   )
 
   const setSegmentVisible = useCallback(
@@ -350,7 +411,7 @@ export function useNiivue() {
     setSegmentations((prev) => {
       const loaded = prev.find((s) => s.recordId === recordId)
       if (loaded) {
-        for (const volId of Object.values(loaded.volumeIdsByLayer)) {
+        for (const volId of Object.values(loaded.volumeIdsByBucket)) {
           const idx = nv.volumes.findIndex((v) => v.id === volId)
           if (idx >= 0) nv.removeVolumeByIndex(idx)
         }
@@ -401,8 +462,12 @@ export function useNiivue() {
       const buffer = await file.arrayBuffer()
       const tf = parseCtvoxTransferFunction(buffer)
       const vol = nv.volumes[0]
-      const dataMin = vol.global_min ?? 0
-      const dataMax = vol.global_max ?? 255
+      // Anchored to the current window (cal_min/cal_max), matching what CTvox's
+      // curve editor treats as the transfer function's 0..1 domain -- not the
+      // volume's full data range, which would stretch the curve across background
+      // noise the user has already windowed out.
+      const dataMin = vol.cal_min ?? vol.global_min ?? 0
+      const dataMax = vol.cal_max ?? vol.global_max ?? 255
       vol.colormapLabel = buildTransferFunctionColormap(tf, dataMin, dataMax)
       nv.updateGLVolume()
       setTransferFunctionActive(true)
@@ -432,7 +497,39 @@ export function useNiivue() {
     const nv = nvRef.current
     if (!nv) return
     applyLayout(nv)
+    // Snap 2D pan/zoom and the 3D camera back to niivue's defaults, in case the
+    // user has scrolled/dragged themselves somewhere disorienting.
+    nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
+    nv.scene.volScaleMultiplier = 1.0
+    nv.setRenderAzimuthElevation(DEFAULT_RENDER_AZIMUTH, DEFAULT_RENDER_ELEVATION)
     nv.updateGLVolume()
+  }, [])
+
+  // Mirrors niivue's own internal wheel-zoom math (WheelController.calculateZoom /
+  // calculatePanOffsetAfterZoom) so the buttons below feel identical to scroll-zoom,
+  // without touching niivue's default scroll-to-change-slice behavior.
+  const zoomBy = useCallback((direction: 1 | -1) => {
+    const nv = nvRef.current
+    if (!nv || nv.volumes.length === 0) return
+    const currentZoom = nv.scene.pan2Dxyzmm[3]
+    let newZoom = currentZoom * (1 + 10 * (0.01 * direction))
+    newZoom = Math.max(0.1, Math.round(newZoom * 10) / 10)
+    const zoomChange = currentZoom - newZoom
+    const mm = nv.frac2mm(nv.scene.crosshairPos)
+    nv.scene.pan2Dxyzmm[0] += zoomChange * mm[0]
+    nv.scene.pan2Dxyzmm[1] += zoomChange * mm[1]
+    nv.scene.pan2Dxyzmm[2] += zoomChange * mm[2]
+    nv.scene.pan2Dxyzmm[3] = newZoom
+    nv.drawScene()
+  }, [])
+
+  const zoomIn = useCallback(() => zoomBy(1), [zoomBy])
+  const zoomOut = useCallback(() => zoomBy(-1), [zoomBy])
+  const resetZoom = useCallback(() => {
+    const nv = nvRef.current
+    if (!nv) return
+    nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
+    nv.drawScene()
   }, [])
 
   return {
@@ -464,6 +561,9 @@ export function useNiivue() {
     loadTransferFunction,
     clearTransferFunction,
     resetView,
+    zoomIn,
+    zoomOut,
+    resetZoom,
     clearAll
   }
 }

@@ -111,30 +111,36 @@ function clamp01(n: number): number {
   return Math.max(0, Math.min(1, n))
 }
 
+// niivue's 3D volume-render bake pass has a real limitation with custom, varying
+// (non-flat) colormaps registered via `colormap`/`cmapper.addColormap`: the 2D
+// slice panes render them correctly, but the 3D render always comes out fully
+// black, reproduced even with a trivial 2-point gradient LUT and confirmed
+// independent of curve shape or point count. `colormapLabel` uses a different,
+// unaffected code path (the same one segmentation overlays already rely on for
+// correct multi-color 3D rendering); for a non-label volume it's sampled with
+// linear interpolation across a normalized [min, max] window (via cal_min/cal_max),
+// the same as any other continuous colormap, so a fixed-resolution table is fine.
+const TABLE_RESOLUTION = 256
+
 /**
- * Builds a direct-index label-style LUT (one entry per raw intensity value from
- * dataMin to dataMax) rather than a named/registered continuous colormap.
- *
- * niivue's 3D volume-render bake pass has a real limitation with custom, varying
- * (non-flat) colormaps registered via `colormap`/`cmapper.addColormap`: the 2D
- * slice panes render them correctly, but the 3D render always comes out fully
- * black, reproduced even with a trivial 2-point gradient LUT and confirmed
- * independent of curve shape or point count. `colormapLabel` uses a different,
- * unaffected code path (the same one segmentation overlays already rely on for
- * correct multi-color 3D rendering), at the cost of nearest-index rather than
- * interpolated lookup -- immaterial here since the LUT already has one entry
- * per representable intensity.
+ * Builds a linearly-sampled LUT covering [dataMin, dataMax] (typically the volume's
+ * current window, cal_min/cal_max, matching what CTvox's curve editor treats as the
+ * 0..1 domain). Voxels outside that window are forced fully transparent -- niivue
+ * clamps out-of-range samples to the table's edge texel rather than extrapolating,
+ * so without this a "flat" curve (opacity 1 at every point, CTvox's actual on-disk
+ * default) would make the *entire* volume -- background included -- fully opaque,
+ * rendering as a solid box instead of the intended windowed structure.
  */
 export function buildTransferFunctionColormap(tf: ParsedTransferFunction, dataMin: number, dataMax: number): TransferFunctionLut {
-  const min = Math.floor(dataMin)
-  const max = Math.max(min + 1, Math.ceil(dataMax))
-  const entries = max - min + 1
+  const min = dataMin
+  const max = Math.max(min + 1e-6, dataMax)
+  const entries = TABLE_RESOLUTION
   const lut = new Uint8ClampedArray(entries * 4)
 
   for (let i = 0; i < entries; i++) {
     const t = i / (entries - 1)
     const gain = interpolate(tf.luminosity, t)
-    const opacity = interpolate(tf.opacity, t)
+    const opacity = i === 0 ? 0 : interpolate(tf.opacity, t)
     const gray = Math.round(clamp01(t * gain) * 255)
     const k = i * 4
     lut[k] = gray

@@ -36,6 +36,9 @@ function App() {
     loadTransferFunction,
     clearTransferFunction,
     resetView,
+    zoomIn,
+    zoomOut,
+    resetZoom,
     clearAll
   } = useNiivue()
 
@@ -53,7 +56,12 @@ function App() {
             />
             Crosshair
           </label>
-          <button className="btn btn-secondary btn-small" onClick={resetView} disabled={!baseVolume}>
+          <button
+            className="btn btn-secondary btn-small"
+            onClick={resetView}
+            disabled={!baseVolume}
+            title="Restore the default layout, 3D orientation, and 2D zoom"
+          >
             Reset View
           </button>
           <button className="btn btn-secondary btn-small" onClick={clearAll} disabled={!baseVolume}>
@@ -84,6 +92,9 @@ function App() {
               transferFunctionActive={transferFunctionActive}
               onLoadTransferFunction={loadTransferFunction}
               onClearTransferFunction={clearTransferFunction}
+              onZoomIn={zoomIn}
+              onZoomOut={zoomOut}
+              onResetZoom={resetZoom}
             />
           )}
 

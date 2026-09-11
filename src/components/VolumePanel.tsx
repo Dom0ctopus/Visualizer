@@ -7,6 +7,9 @@ interface VolumePanelProps {
   transferFunctionActive: boolean
   onLoadTransferFunction: (file: File) => void
   onClearTransferFunction: () => void
+  onZoomIn: () => void
+  onZoomOut: () => void
+  onResetZoom: () => void
 }
 
 export function VolumePanel({
@@ -14,7 +17,10 @@ export function VolumePanel({
   onResetWindowLevel,
   transferFunctionActive,
   onLoadTransferFunction,
-  onClearTransferFunction
+  onClearTransferFunction,
+  onZoomIn,
+  onZoomOut,
+  onResetZoom
 }: VolumePanelProps) {
   const tfInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -33,6 +39,19 @@ export function VolumePanel({
         <button className="btn btn-secondary btn-small" onClick={onResetWindowLevel}>
           Reset Window/Level
         </button>
+
+        <p className="tf-hint">Slice zoom</p>
+        <div className="tf-row">
+          <button className="btn btn-secondary btn-small" onClick={onZoomOut} title="Zoom out">
+            &minus;
+          </button>
+          <button className="btn btn-secondary btn-small" onClick={onZoomIn} title="Zoom in">
+            +
+          </button>
+          <button className="btn btn-secondary btn-small" onClick={onResetZoom}>
+            Reset Zoom
+          </button>
+        </div>
 
         <div className="tf-row">
           <input
