@@ -95,7 +95,9 @@ export function useNiivue() {
       multiplanarPadPixels: 2,
       multiplanarShowRender: SHOW_RENDER.ALWAYS,
       dragAndDropEnabled: true,
-      dragMode: DRAG_MODE.contrast,
+      // Click-drag-to-window (dragMode: contrast) was inconsistent in practice --
+      // window/level is set via explicit min/max sliders instead (see VolumePanel).
+      dragMode: DRAG_MODE.none,
       dragModePrimary: DRAG_MODE.crosshair,
       // Retina/HiDPI displays otherwise render at 2x+ pixel density, which multiplies
       // the 3D view's per-frame ray-marching cost accordingly; forcing 1x keeps
@@ -116,11 +118,10 @@ export function useNiivue() {
       })
     }
 
-    // Fires once when a click-drag-to-window gesture (dragMode: contrast) completes.
-    // Syncs the displayed window and, if a transfer function is active, re-bakes it
-    // against the new cal_min/cal_max -- letting that drag double as a live, manual
-    // way to push the floor above a noisy background instead of only being usable
-    // at the moment a .tf file is first loaded.
+    // Fires whenever niivue changes cal_min/cal_max on its own (e.g. a double-click
+    // reset). Syncs the displayed window and, if a transfer function is active,
+    // re-bakes it against the new values -- the window/level sliders call
+    // setWindowLevel directly and don't depend on this.
     nv.onIntensityChange = (volume) => {
       setBaseVolume((prev) => (prev ? { ...prev, calMin: volume.cal_min ?? prev.calMin, calMax: volume.cal_max ?? prev.calMax } : prev))
       applyActiveTransferFunction()
@@ -161,13 +162,22 @@ export function useNiivue() {
       if (!nv) return
       clearAll()
       const vol = await nv.addVolumeFromUrl({ url: fileUrl(record.id), name: record.name, colormap: 'gray' })
+      // Default the window to the volume's full observed range rather than niivue's
+      // own auto-window (a robust/percentile estimate) -- for a scan dominated by
+      // background, that auto-window can clip the max well below the data's actual
+      // bright/dense material (observed directly: max landing at 167 against a real
+      // max of 255), hiding real structure by default.
+      const dataMin = vol.global_min ?? vol.cal_min ?? 0
+      const dataMax = vol.global_max ?? vol.cal_max ?? 0
+      vol.cal_min = dataMin
+      vol.cal_max = dataMax
       setBaseVolume({
         id: vol.id,
         name: record.name,
-        dataMin: vol.global_min ?? vol.cal_min ?? 0,
-        dataMax: vol.global_max ?? vol.cal_max ?? 0,
-        calMin: vol.cal_min ?? 0,
-        calMax: vol.cal_max ?? 0
+        dataMin,
+        dataMax,
+        calMin: dataMin,
+        calMax: dataMax
       })
       applyLayout(nv)
     },
@@ -560,10 +570,10 @@ export function useNiivue() {
       // niivue's own auto-window can land its floor right on the data's true
       // minimum (observed directly: a real scan with global_min === cal_min === 0),
       // giving the transfer function's dead-zone margin nothing to work with. Since
-      // the curve is otherwise baked once at load time, re-applying it here lets a
-      // manual window drag serve as a live, interactive way to push the floor above
-      // a noisy background -- dragging narrower excludes more low-end material
-      // immediately, without having to reload the .tf file.
+      // the curve is otherwise baked once at load time, re-applying it here lets the
+      // window/level sliders serve as a live, interactive way to push the floor
+      // above a noisy background -- narrowing the window excludes more low-end
+      // material immediately, without having to reload the .tf file.
       applyActiveTransferFunction()
       nv.updateGLVolume()
       setBaseVolume((prev) => (prev ? { ...prev, calMin, calMax } : prev))
@@ -575,8 +585,10 @@ export function useNiivue() {
     const nv = nvRef.current
     if (!nv || nv.volumes.length === 0) return
     const vol = nv.volumes[0]
-    vol.calMinMax()
-    setWindowLevel(vol.cal_min ?? 0, vol.cal_max ?? 0)
+    // Reset to the volume's full observed range, matching the load-time default --
+    // not niivue's own robust auto-window, which can clip well below the data's
+    // actual bright/dense material for a scan dominated by background.
+    setWindowLevel(vol.global_min ?? 0, vol.global_max ?? 0)
   }, [setWindowLevel])
 
   const loadTransferFunction = useCallback(

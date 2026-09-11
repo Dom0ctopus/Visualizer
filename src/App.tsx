@@ -31,6 +31,7 @@ function App() {
     setFileVisible,
     setFileOpacity,
     removeSegmentation,
+    setWindowLevel,
     resetWindowLevel,
     transferFunctionActive,
     loadTransferFunction,
@@ -88,6 +89,7 @@ function App() {
           {baseVolume && (
             <VolumePanel
               baseVolume={baseVolume}
+              onWindowLevel={setWindowLevel}
               onResetWindowLevel={resetWindowLevel}
               transferFunctionActive={transferFunctionActive}
               onLoadTransferFunction={loadTransferFunction}

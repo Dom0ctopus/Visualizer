@@ -206,6 +206,10 @@ body,
   margin: 0;
 }
 
+.window-slider {
+  width: 100%;
+}
+
 .field {
   display: flex;
   flex-direction: column;

@@ -3,6 +3,7 @@ import type { BaseVolumeInfo } from '../types'
 
 interface VolumePanelProps {
   baseVolume: BaseVolumeInfo
+  onWindowLevel: (calMin: number, calMax: number) => void
   onResetWindowLevel: () => void
   transferFunctionActive: boolean
   onLoadTransferFunction: (file: File) => void
@@ -14,6 +15,7 @@ interface VolumePanelProps {
 
 export function VolumePanel({
   baseVolume,
+  onWindowLevel,
   onResetWindowLevel,
   transferFunctionActive,
   onLoadTransferFunction,
@@ -23,6 +25,7 @@ export function VolumePanel({
   onResetZoom
 }: VolumePanelProps) {
   const tfInputRef = useRef<HTMLInputElement | null>(null)
+  const sliderStep = Math.max((baseVolume.dataMax - baseVolume.dataMin) / 1000, 0.01)
 
   return (
     <section className="panel">
@@ -33,8 +36,36 @@ export function VolumePanel({
         </div>
 
         <p className="tf-hint">
-          Window/level: {baseVolume.calMin.toFixed(1)} &ndash; {baseVolume.calMax.toFixed(1)} (click-drag on the image to adjust)
+          Window/level: {baseVolume.calMin.toFixed(1)} &ndash; {baseVolume.calMax.toFixed(1)}
         </p>
+
+        <label className="tf-hint" htmlFor="window-min-slider">
+          Min
+        </label>
+        <input
+          id="window-min-slider"
+          className="window-slider"
+          type="range"
+          min={baseVolume.dataMin}
+          max={baseVolume.dataMax}
+          step={sliderStep}
+          value={baseVolume.calMin}
+          onChange={(e) => onWindowLevel(Math.min(Number(e.target.value), baseVolume.calMax), baseVolume.calMax)}
+        />
+
+        <label className="tf-hint" htmlFor="window-max-slider">
+          Max
+        </label>
+        <input
+          id="window-max-slider"
+          className="window-slider"
+          type="range"
+          min={baseVolume.dataMin}
+          max={baseVolume.dataMax}
+          step={sliderStep}
+          value={baseVolume.calMax}
+          onChange={(e) => onWindowLevel(baseVolume.calMin, Math.max(Number(e.target.value), baseVolume.calMin))}
+        />
 
         <button className="btn btn-secondary btn-small" onClick={onResetWindowLevel}>
           Reset Window/Level
@@ -76,8 +107,8 @@ export function VolumePanel({
         </div>
         {transferFunctionActive && (
           <p className="tf-hint">
-            Custom opacity curve applied to the 3D render. Background still showing? Drag on the image to narrow the
-            window above it -- the curve re-applies live.
+            Custom opacity curve applied to the 3D render. Background still showing? Raise the Min slider above it --
+            the curve re-applies live.
           </p>
         )}
       </div>
