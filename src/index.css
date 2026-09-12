@@ -89,9 +89,37 @@ body,
 }
 
 .viewer-canvas {
+  display: block;
   width: 100%;
   height: 100%;
-  display: block;
+}
+
+/* Sized identically to .viewer-3d-display below (so niivue's own ResizeObserver-driven
+   canvas dimensions match what's actually shown) but painted far outside the viewport
+   via `transform`, which doesn't affect layout/percentage sizing -- only paint
+   position. See the comment on canvas3dRef in useNiivue.ts for why this must stay
+   off-screen rather than simply hidden or removed. */
+.viewer-3d-source {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 50%;
+  transform: translate(-9999px, 0);
+}
+
+.viewer-3d-display {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 50%;
+  z-index: 1;
+  cursor: grab;
+}
+
+.viewer-3d-display:active {
+  cursor: grabbing;
 }
 
 .sidebar {

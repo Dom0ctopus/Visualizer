@@ -69,8 +69,13 @@ export interface LoadedSegmentation {
    * per-volume `.opacity` (which blends correctly) can drive the visible
    * transparency -- colormapLabel's own alpha channel does not support analog
    * blending in the 3D renderer.
+   *
+   * The 2D slice views and the 3D render are separate niivue engines (so their
+   * contrast/transfer-function settings can't cross-affect each other -- see
+   * useNiivue), each holding its own copy of these bucket volumes.
    */
-  volumeIdsByBucket: Record<string, string>
+  volumeIdsByBucket2d: Record<string, string>
+  volumeIdsByBucket3d: Record<string, string>
   segments: SegmentState[]
 }
 

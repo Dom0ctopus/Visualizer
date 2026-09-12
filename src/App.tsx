@@ -3,6 +3,7 @@ import { useNiivue } from './hooks/useNiivue'
 import { Viewer } from './components/Viewer'
 import { LibraryPanel } from './components/LibraryPanel'
 import { VolumePanel } from './components/VolumePanel'
+import { RenderPanel } from './components/RenderPanel'
 import { SearchBar } from './components/SearchBar'
 import { SegmentTree } from './components/SegmentTree'
 import { CrosshairPanel } from './components/CrosshairPanel'
@@ -11,10 +12,13 @@ function App() {
   const [searchText, setSearchText] = useState('')
 
   const {
-    canvasRef,
+    canvas2dRef,
+    canvas3dRef,
+    canvas3dDisplayRef,
     busy,
     error,
     baseVolume,
+    renderVolume,
     segmentations,
     crosshair,
     crosshairVisible,
@@ -31,8 +35,10 @@ function App() {
     setFileVisible,
     setFileOpacity,
     removeSegmentation,
-    setWindowLevel,
-    resetWindowLevel,
+    setSliceWindowLevel,
+    resetSliceWindowLevel,
+    setRenderWindowLevel,
+    resetRenderWindowLevel,
     transferFunctionActive,
     loadTransferFunction,
     clearTransferFunction,
@@ -72,7 +78,7 @@ function App() {
       </header>
 
       <div className="app-body">
-        <Viewer canvasRef={canvasRef} />
+        <Viewer canvas2dRef={canvas2dRef} canvas3dRef={canvas3dRef} canvas3dDisplayRef={canvas3dDisplayRef} />
 
         <aside className="sidebar">
           {error && <div className="error-banner">{error}</div>}
@@ -89,14 +95,22 @@ function App() {
           {baseVolume && (
             <VolumePanel
               baseVolume={baseVolume}
-              onWindowLevel={setWindowLevel}
-              onResetWindowLevel={resetWindowLevel}
-              transferFunctionActive={transferFunctionActive}
-              onLoadTransferFunction={loadTransferFunction}
-              onClearTransferFunction={clearTransferFunction}
+              onWindowLevel={setSliceWindowLevel}
+              onResetWindowLevel={resetSliceWindowLevel}
               onZoomIn={zoomIn}
               onZoomOut={zoomOut}
               onResetZoom={resetZoom}
+            />
+          )}
+
+          {renderVolume && (
+            <RenderPanel
+              renderVolume={renderVolume}
+              onWindowLevel={setRenderWindowLevel}
+              onResetWindowLevel={resetRenderWindowLevel}
+              transferFunctionActive={transferFunctionActive}
+              onLoadTransferFunction={loadTransferFunction}
+              onClearTransferFunction={clearTransferFunction}
             />
           )}
 
