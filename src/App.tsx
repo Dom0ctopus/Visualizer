@@ -7,9 +7,18 @@ import { RenderPanel } from './components/RenderPanel'
 import { SearchBar } from './components/SearchBar'
 import { SegmentTree } from './components/SegmentTree'
 import { CrosshairPanel } from './components/CrosshairPanel'
+import { ItkVtkViewerPage } from './components/ItkVtkViewerPage'
+
+type Engine = 'niivue' | 'itk-vtk-viewer'
 
 function App() {
   const [searchText, setSearchText] = useState('')
+  const [engine, setEngine] = useState<Engine>('niivue')
+  // Mounted lazily (only once the user actually opens it, so the 3.6MB
+  // itk-vtk-viewer script never loads for someone who never touches the
+  // toggle) but never unmounted again afterward -- toggling back to niivue
+  // only hides it, since unmounting would tear down its loaded viewers.
+  const [itkEngineOpened, setItkEngineOpened] = useState(false)
 
   const {
     canvas2dRef,
@@ -54,30 +63,57 @@ function App() {
       <header className="app-header">
         <h1>Micro-CT Visualizer</h1>
         <div className="app-header-actions">
-          <label className="crosshair-toggle">
-            <input
-              type="checkbox"
-              checked={crosshairVisible}
-              onChange={(e) => setCrosshairVisible(e.target.checked)}
-              disabled={!baseVolume}
-            />
-            Crosshair
-          </label>
-          <button
-            className="btn btn-secondary btn-small"
-            onClick={resetView}
-            disabled={!baseVolume}
-            title="Restore the default layout, 3D orientation, and 2D zoom"
-          >
-            Reset View
-          </button>
-          <button className="btn btn-secondary btn-small" onClick={clearAll} disabled={!baseVolume}>
-            Clear All
-          </button>
+          <div className="engine-toggle">
+            <button
+              className={engine === 'niivue' ? 'btn btn-primary btn-small' : 'btn btn-secondary btn-small'}
+              onClick={() => setEngine('niivue')}
+            >
+              niivue
+            </button>
+            <button
+              className={engine === 'itk-vtk-viewer' ? 'btn btn-primary btn-small' : 'btn btn-secondary btn-small'}
+              onClick={() => {
+                setEngine('itk-vtk-viewer')
+                setItkEngineOpened(true)
+              }}
+              title="Experimental second engine on vtk.js -- less downsampling, no segmentation/TF support yet"
+            >
+              itk-vtk-viewer (experimental)
+            </button>
+          </div>
+          {engine === 'niivue' && (
+            <>
+              <label className="crosshair-toggle">
+                <input
+                  type="checkbox"
+                  checked={crosshairVisible}
+                  onChange={(e) => setCrosshairVisible(e.target.checked)}
+                  disabled={!baseVolume}
+                />
+                Crosshair
+              </label>
+              <button
+                className="btn btn-secondary btn-small"
+                onClick={resetView}
+                disabled={!baseVolume}
+                title="Restore the default layout, 3D orientation, and 2D zoom"
+              >
+                Reset View
+              </button>
+              <button className="btn btn-secondary btn-small" onClick={clearAll} disabled={!baseVolume}>
+                Clear All
+              </button>
+            </>
+          )}
         </div>
       </header>
 
-      <div className="app-body">
+      {itkEngineOpened && (
+        <div hidden={engine !== 'itk-vtk-viewer'}>
+          <ItkVtkViewerPage />
+        </div>
+      )}
+      <div className="app-body" hidden={engine !== 'niivue'}>
         <Viewer canvas2dRef={canvas2dRef} canvas3dRef={canvas3dRef} canvas3dDisplayRef={canvas3dDisplayRef} />
 
         <aside className="sidebar">
@@ -141,8 +177,8 @@ function App() {
             <section className="panel panel-hint">
               <p>Upload a volume NRRD file to begin. The viewer shows axial, coronal, sagittal, and 3D render panes.</p>
               <p>
-                Then upload one or more Slicer-exported segmentation NRRD files &mdash; each labeled segment appears in the
-                tree below, grouped by system, with its own visibility and opacity.
+                Then upload one or more Slicer-exported segmentation NRRD files &mdash; each labeled segment appears in
+                the tree below, grouped by system, with its own visibility and opacity.
               </p>
             </section>
           )}

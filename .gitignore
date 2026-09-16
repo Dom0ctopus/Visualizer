@@ -14,7 +14,12 @@ dist-ssr
 
 # Backend uploaded file storage
 server/data/files
+server/data/zarr
 server/data/index.json
+
+# itk-vtk-viewer's dist assets (100MB+ of format-decoder wasm binaries) --
+# synced from node_modules by scripts/sync-itk-vtk-viewer.mjs, not vendored
+public/itk-vtk-viewer
 
 # Editor directories and files
 .vscode/*

@@ -4,15 +4,19 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "sync:itk-vtk-viewer": "node scripts/sync-itk-vtk-viewer.mjs",
+    "predev": "npm run sync:itk-vtk-viewer",
     "dev": "vite",
     "dev:server": "npm run dev --prefix server",
     "dev:all": "concurrently -n client,server -c green,blue \"npm run dev\" \"npm run dev:server\"",
+    "prebuild": "npm run sync:itk-vtk-viewer",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
     "@niivue/niivue": "^0.69.0",
+    "itk-vtk-viewer": "^14.51.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

@@ -189,6 +189,16 @@ export function useNiivue() {
           const displayCtx = display.getContext('2d')
           if (displayCtx) {
             const tick = () => {
+              // The real canvas collapses to 0x0 whenever its ancestor is
+              // display:none (e.g. this engine hidden behind the app's
+              // engine toggle) -- niivue's own ResizeObserver reacts to the
+              // collapsed layout box. drawImage throws on a 0-sized source,
+              // so skip the copy (and the width/height sync, which would
+              // otherwise zero the display canvas right along with it).
+              if (real.width === 0 || real.height === 0) {
+                blitRafRef.current = requestAnimationFrame(tick)
+                return
+              }
               if (display.width !== real.width || display.height !== real.height) {
                 display.width = real.width
                 display.height = real.height

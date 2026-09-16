@@ -17,8 +17,16 @@ interface LibraryRecordBase {
   uploadedAt: string
 }
 
+/** State of the background NRRD -> OME-Zarr multiscale conversion the server
+ *  runs on upload, for the itk-vtk-viewer engine -- see the server's
+ *  zarrConvert.ts. Absent means conversion hasn't been attempted (e.g. an
+ *  upload from before this existed). */
+export type ZarrStatus = 'pending' | 'ready' | 'failed'
+
 export interface VolumeRecord extends LibraryRecordBase {
   kind: 'volume'
+  zarrStatus?: ZarrStatus
+  zarrError?: string
 }
 
 export interface SegmentationRecord extends LibraryRecordBase {

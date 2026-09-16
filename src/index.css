@@ -81,6 +81,14 @@ body,
   min-height: 0;
 }
 
+/* `.app-body { display: flex }` above has the same specificity as the UA
+   stylesheet's `[hidden] { display: none }` and loads later, so it would
+   otherwise win and defeat the `hidden` attribute used to toggle between the
+   niivue and itk-vtk-viewer engines without unmounting either. */
+.app-body[hidden] {
+  display: none;
+}
+
 .viewer {
   flex: 1;
   min-width: 0;
@@ -479,6 +487,47 @@ input[type='range'] {
   font-family: ui-monospace, Consolas, monospace;
   color: var(--text-h);
   flex-shrink: 0;
+}
+
+.engine-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.engine-toggle .btn {
+  width: auto;
+}
+
+.itk-viewer-split {
+  display: flex;
+  gap: 2px;
+}
+
+.itk-viewer-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.itk-viewer-pane-label {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 4px;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
+.itk-viewer-container {
+  flex: 1;
+  min-height: 0;
+  position: relative;
 }
 
 .error-banner {

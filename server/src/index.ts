@@ -5,8 +5,9 @@ import { rm } from 'node:fs/promises'
 import path from 'node:path'
 import { readNrrdHeader } from './nrrdHeader.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
-import { FILES_DIR, addRecord, getRecord, initStore, listRecords, newId, removeRecord } from './store.js'
+import { FILES_DIR, ZARR_DIR, addRecord, getRecord, initStore, listRecords, newId, removeRecord, updateRecord } from './store.js'
 import type { LibraryRecord, SegmentationRecord, StoredRecord, StoredSegmentationRecord, VolumeRecord } from './types.js'
+import { convertNrrdToOmeZarr } from './zarrConvert.js'
 
 async function enrichSegmentationRecord(stored: StoredSegmentationRecord): Promise<SegmentationRecord> {
   const header = await readNrrdHeader(path.join(FILES_DIR, stored.storedFilename))
@@ -23,8 +24,32 @@ async function toLibraryRecord(stored: StoredRecord): Promise<LibraryRecord> {
 
 await initStore()
 
+function zarrPathFor(id: string): string {
+  return path.join(ZARR_DIR, `${id}.ome.zarr`)
+}
+
+// Runs in the background after a volume upload responds -- conversion of a
+// large scan can take a while, and the point of doing this automatically is
+// to keep the upload itself fast rather than making the user wait through it.
+// The itk-vtk-viewer engine polls /api/library and only offers itself once
+// zarrStatus is 'ready'.
+function convertInBackground(id: string, nrrdPath: string): void {
+  void (async () => {
+    try {
+      await convertNrrdToOmeZarr(nrrdPath, zarrPathFor(id))
+      await updateRecord(id, { zarrStatus: 'ready' })
+    } catch (e) {
+      await updateRecord(id, { zarrStatus: 'failed', zarrError: e instanceof Error ? e.message : 'Conversion failed' })
+    }
+  })()
+}
+
 const app = express()
 app.use(cors())
+// dotfiles: 'allow' is required here -- OME-Zarr v2's own metadata files
+// (.zattrs, .zgroup, .zarray) are dotfiles, which express.static ignores
+// (404s) by default.
+app.use('/api/zarr', express.static(ZARR_DIR, { dotfiles: 'allow' }))
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -67,10 +92,12 @@ app.post('/api/volumes', upload.single('file'), async (req, res) => {
     name: file.originalname,
     storedFilename: file.filename,
     sizeBytes: file.size,
-    uploadedAt: new Date().toISOString()
+    uploadedAt: new Date().toISOString(),
+    zarrStatus: 'pending'
   }
   await addRecord(record)
   res.json(record)
+  convertInBackground(record.id, path.join(FILES_DIR, file.filename))
 })
 
 app.post('/api/segmentations', upload.single('file'), async (req, res) => {
@@ -111,6 +138,9 @@ app.delete('/api/files/:id', async (req, res) => {
     return
   }
   await rm(path.join(FILES_DIR, removed.storedFilename), { force: true })
+  if (removed.kind === 'volume') {
+    await rm(zarrPathFor(removed.id), { recursive: true, force: true })
+  }
   res.json({ ok: true })
 })
 

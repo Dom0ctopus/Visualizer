@@ -18,8 +18,16 @@ interface RecordCommon {
   uploadedAt: string
 }
 
+/** Conversion state of the background NRRD -> OME-Zarr multiscale conversion
+ *  kicked off on upload, for the itk-vtk-viewer engine -- see zarrConvert.ts.
+ *  Absent/undefined means conversion hasn't been attempted (e.g. an upload
+ *  from before this existed). */
+export type ZarrStatus = 'pending' | 'ready' | 'failed'
+
 export interface VolumeRecord extends RecordCommon {
   kind: 'volume'
+  zarrStatus?: ZarrStatus
+  zarrError?: string
 }
 
 /** What's persisted to disk for a segmentation: no parsed metadata, so

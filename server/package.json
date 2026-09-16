@@ -9,10 +9,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@itk-wasm/image-io": "^1.6.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "multer": "^2.2.0",
-    "nanoid": "^6.0.1"
+    "nanoid": "^6.0.1",
+    "numcodecs": "^0.3.2"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

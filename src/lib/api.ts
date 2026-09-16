@@ -36,3 +36,9 @@ export async function deleteLibraryFile(id: string): Promise<void> {
 export function fileUrl(id: string): string {
   return `/api/files/${id}`
 }
+
+/** Root of a volume's converted multiscale OME-Zarr store, for the
+ *  itk-vtk-viewer engine -- only valid once the record's zarrStatus is 'ready'. */
+export function zarrUrl(id: string): string {
+  return `/api/zarr/${id}.ome.zarr`
+}

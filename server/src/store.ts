@@ -6,12 +6,14 @@ import type { StoredRecord } from './types.js'
 
 export const DATA_DIR = path.resolve(import.meta.dirname, '..', 'data')
 export const FILES_DIR = path.join(DATA_DIR, 'files')
+export const ZARR_DIR = path.join(DATA_DIR, 'zarr')
 const INDEX_PATH = path.join(DATA_DIR, 'index.json')
 
 let records: StoredRecord[] = []
 
 export async function initStore(): Promise<void> {
   await mkdir(FILES_DIR, { recursive: true })
+  await mkdir(ZARR_DIR, { recursive: true })
   if (existsSync(INDEX_PATH)) {
     records = JSON.parse(await readFile(INDEX_PATH, 'utf8'))
   }
@@ -31,6 +33,13 @@ export function getRecord(id: string): StoredRecord | undefined {
 
 export async function addRecord(record: StoredRecord): Promise<void> {
   records.push(record)
+  await persist()
+}
+
+export async function updateRecord(id: string, patch: Partial<StoredRecord>): Promise<void> {
+  const idx = records.findIndex((r) => r.id === id)
+  if (idx < 0) return
+  records[idx] = { ...records[idx], ...patch } as StoredRecord
   await persist()
 }
 
