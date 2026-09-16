@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 // scripts/sync-itk-vtk-viewer.mjs) rather than `import`-ed.
 interface ItkVtkViewerInstance {
   setViewMode: (mode: 'ZPlane' | 'YPlane' | 'XPlane' | 'Volume') => void
+  setUICollapsed: (collapsed: boolean) => void
   delete: () => void
 }
 
@@ -101,6 +102,14 @@ export function useItkVtkViewer() {
         ])
         sliceViewer.setViewMode('ZPlane')
         volumeViewer.setViewMode('Volume')
+        // itk-vtk-viewer only auto-collapses its (fairly wide) native control
+        // panel on genuinely small screens (window.screen.availWidth < 768),
+        // which never applies to our side-by-side split -- each pane is
+        // narrow, but the browser window itself is normal desktop width, so
+        // its own heuristic never fires and the full panel crowds the pane.
+        // Force the same compact mode its own hamburger-menu toggle uses.
+        sliceViewer.setUICollapsed(true)
+        volumeViewer.setUICollapsed(true)
         sliceViewerRef.current = sliceViewer
         volumeViewerRef.current = volumeViewer
         setLoadedName(name)
