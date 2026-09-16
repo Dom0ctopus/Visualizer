@@ -9,13 +9,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 interface ItkVtkViewerInstance {
   setViewMode: (mode: 'ZPlane' | 'YPlane' | 'XPlane' | 'Volume') => void
   setUICollapsed: (collapsed: boolean) => void
+  setRotateEnabled: (enabled: boolean) => void
   delete: () => void
 }
 
 interface ItkVtkViewerGlobal {
   createViewer: (
     container: HTMLElement,
-    options: { image: URL; rotate?: boolean }
+    options: { image: URL; rotate?: boolean; use2D?: boolean }
   ) => Promise<ItkVtkViewerInstance>
 }
 
@@ -97,10 +98,17 @@ export function useItkVtkViewer() {
         clearViewers()
         const absoluteUrl = new URL(url, window.location.href)
         const [sliceViewer, volumeViewer] = await Promise.all([
-          window.itkVtkViewer.createViewer(sliceContainerRef.current, { image: absoluteUrl, rotate: false }),
+          // use2D switches this instance to itk-vtk-viewer's dedicated
+          // orthogonal-slice mode (à la a 3D Slicer 2D view) -- without it,
+          // the slice plane is just an object floating in the same free
+          // trackball-orbit camera the volume view uses, so scroll zooms
+          // the camera instead of paging through slices and dragging orbits
+          // around to look behind the plane rather than panning across it.
+          window.itkVtkViewer.createViewer(sliceContainerRef.current, { image: absoluteUrl, rotate: false, use2D: true }),
           window.itkVtkViewer.createViewer(volumeContainerRef.current, { image: absoluteUrl, rotate: false })
         ])
         sliceViewer.setViewMode('ZPlane')
+        sliceViewer.setRotateEnabled(false)
         volumeViewer.setViewMode('Volume')
         // itk-vtk-viewer only auto-collapses its (fairly wide) native control
         // panel on genuinely small screens (window.screen.availWidth < 768),
