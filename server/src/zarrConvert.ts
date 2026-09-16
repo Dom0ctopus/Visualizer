@@ -9,7 +9,14 @@ import path from 'node:path'
 // reasonable screen size) without walking all the way down to a 1-voxel cube.
 const MIN_LEVEL_DIMENSION = 48
 const MAX_LEVELS = 6
-const CHUNK_SIZE = 64
+// Reading even a single 2D slice out of a chunked array touches every chunk
+// spanning the full width/height at that slice's chunk-depth position -- so
+// the byte cost of "just this one slice" scales with chunk depth times the
+// full in-plane extent, not with the 2D slice's own (tiny) size. Kept
+// smaller than a volume-only store might use so the itk-vtk-viewer engine's
+// slice view (which repeatedly re-requests a slab around the current slice
+// position as it's scrolled) stays cheap for large scans.
+const CHUNK_SIZE = 32
 
 // Both itk-vtk-viewer and @itk-viewer/io's zarr readers unconditionally
 // blosc-decompress every chunk regardless of what a .zarray's own
@@ -99,6 +106,61 @@ function downsample2x(level: Level, ctor: TypedArrayConstructor): Level {
   return { data: out, size: [dx, dy, dz] }
 }
 
+// itk-wasm's `image.spacing` is always a positive magnitude per axis --
+// whether that axis's index actually increases or decreases in physical
+// space (e.g. a NRRD with a negative "space directions" component) lives
+// separately in `image.direction`, a 3x3 direction-cosine matrix. Our zarr
+// writer only ever records spacing + origin (no direction/orientation
+// metadata), so an axis stored "reversed" in the source file was silently
+// read as if it were forward -- showing up as a flipped/upside-down render
+// despite niivue (which does account for direction) displaying the same
+// file correctly. Diagonal entries are invariant to row- vs column-major
+// layout, so reading indices 0/4/8 of the flattened 3x3 matrix is safe
+// without needing to know the wasm build's convention.
+function reversedAxes(direction: ArrayLike<number>): [boolean, boolean, boolean] {
+  return [direction[0] < 0, direction[4] < 0, direction[8] < 0]
+}
+
+// Physically reverses whichever axes are flagged, so the written array
+// always increases with true physical position -- letting a plain
+// identity-direction reader (which is what every OME-Zarr consumer here
+// assumes, since we don't write RFC-4 orientation metadata) display it
+// correctly. Returns the origin adjusted to match: the new index-0 voxel
+// along a flipped axis is what used to be the last one.
+function applyAxisFlips(
+  level: Level,
+  origin: number[],
+  spacing: number[],
+  flip: [boolean, boolean, boolean],
+  ctor: TypedArrayConstructor
+): { level: Level; origin: number[] } {
+  if (!flip.some(Boolean)) return { level, origin }
+  const [sx, sy, sz] = level.size
+  const [flipX, flipY, flipZ] = flip
+  const src = level.data
+  const out = new ctor(src.length)
+  for (let z = 0; z < sz; z++) {
+    const sz2 = flipZ ? sz - 1 - z : z
+    for (let y = 0; y < sy; y++) {
+      const sy2 = flipY ? sy - 1 - y : y
+      const srcRowBase = sz2 * sy * sx + sy2 * sx
+      const dstRowBase = z * sy * sx + y * sx
+      if (flipX) {
+        for (let x = 0; x < sx; x++) out[dstRowBase + x] = src[srcRowBase + (sx - 1 - x)]
+      } else {
+        out.set(src.subarray(srcRowBase, srcRowBase + sx), dstRowBase)
+      }
+    }
+  }
+  // A reversed axis maps row -> physical position as `origin - row*spacing`
+  // (row 0 sits at `origin`, the *largest* physical coordinate on that axis).
+  // After reversing the array, the new row 0 is the old last row, whose true
+  // physical position was `origin - (N-1)*spacing` -- so that's the new
+  // origin the flipped, now-identity-direction array must use.
+  const newOrigin = origin.map((o, axis) => (flip[axis] ? o - (level.size[axis] - 1) * spacing[axis] : o))
+  return { level: { data: out, size: level.size }, origin: newOrigin }
+}
+
 function buildPyramid(base: Level, ctor: TypedArrayConstructor): Level[] {
   const levels = [base]
   const maxDim = Math.max(...base.size)
@@ -185,14 +247,20 @@ export async function convertNrrdToOmeZarr(nrrdPath: string, outputZarrPath: str
   if (!image.data) throw new Error('NRRD file has no voxel data')
   const { dtype, ctor } = zarrDtypeFor(image.imageType.componentType)
   const [sx, sy, sz] = image.size
-  const base: Level = { data: image.data as TypedArray, size: [sx, sy, sz] }
+  const rawBase: Level = { data: image.data as TypedArray, size: [sx, sy, sz] }
+
+  const spacing = image.spacing.length === 3 ? image.spacing : [1, 1, 1]
+  const rawOrigin = image.origin.length === 3 ? image.origin : [0, 0, 0]
+  // image.direction is always floating-point in practice (a 3x3 direction-
+  // cosine matrix); itk-wasm's TypedArray union is broader only to cover
+  // other fields like index arrays.
+  const direction = image.direction as unknown as Float64Array
+  const { level: base, origin } = applyAxisFlips(rawBase, rawOrigin, spacing, reversedAxes(direction), ctor)
+
   const levels = buildPyramid(base, ctor)
 
   await mkdir(outputZarrPath, { recursive: true })
   await writeFile(path.join(outputZarrPath, '.zgroup'), JSON.stringify({ zarr_format: 2 }))
-
-  const spacing = image.spacing.length === 3 ? image.spacing : [1, 1, 1]
-  const origin = image.origin.length === 3 ? image.origin : [0, 0, 0]
 
   const datasets = levels.map((_level, i) => {
     const scaleFactor = 2 ** i

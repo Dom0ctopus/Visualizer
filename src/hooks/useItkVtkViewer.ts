@@ -51,11 +51,40 @@ function loadItkVtkViewerScript(): Promise<void> {
   return scriptLoadPromise
 }
 
+// itk-vtk-viewer's own wheel handler zooms the camera even in use2D/ZPlane
+// mode -- there's no public option to repoint it at slice-stepping instead.
+// Its native Z slider (visible once setUICollapsed reveals it) already does
+// the right thing when dragged, though, so wheel events are redirected onto
+// that slider rather than reimplementing slice-stepping against the
+// viewer's internal (and unexported) slice-index API. Attached on the
+// capture phase at the outermost container -- an ancestor of everything
+// itk-vtk-viewer renders inside it -- so it intercepts before the
+// library's own bubble-phase listener (wherever exactly it's bound
+// underneath) ever sees the event.
+function attachWheelToSliceSlider(container: HTMLElement): () => void {
+  const onWheel = (e: WheelEvent) => {
+    const slider = container.querySelector<HTMLInputElement>('input[type="range"]')
+    if (!slider) return
+    e.preventDefault()
+    e.stopPropagation()
+    const min = Number(slider.min)
+    const max = Number(slider.max)
+    const step = Number(slider.step) || (max - min) / 200
+    const next = Math.min(max, Math.max(min, Number(slider.value) + step * (e.deltaY > 0 ? 1 : -1)))
+    slider.value = String(next)
+    slider.dispatchEvent(new Event('input', { bubbles: true }))
+    slider.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+  container.addEventListener('wheel', onWheel, { passive: false, capture: true })
+  return () => container.removeEventListener('wheel', onWheel, { capture: true })
+}
+
 export function useItkVtkViewer() {
   const sliceContainerRef = useRef<HTMLDivElement | null>(null)
   const volumeContainerRef = useRef<HTMLDivElement | null>(null)
   const sliceViewerRef = useRef<ItkVtkViewerInstance | null>(null)
   const volumeViewerRef = useRef<ItkVtkViewerInstance | null>(null)
+  const detachWheelRef = useRef<(() => void) | null>(null)
 
   const [scriptReady, setScriptReady] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -77,6 +106,8 @@ export function useItkVtkViewer() {
   }, [])
 
   const clearViewers = useCallback(() => {
+    detachWheelRef.current?.()
+    detachWheelRef.current = null
     sliceViewerRef.current?.delete()
     volumeViewerRef.current?.delete()
     sliceViewerRef.current = null
@@ -118,6 +149,7 @@ export function useItkVtkViewer() {
         // Force the same compact mode its own hamburger-menu toggle uses.
         sliceViewer.setUICollapsed(true)
         volumeViewer.setUICollapsed(true)
+        if (sliceContainerRef.current) detachWheelRef.current = attachWheelToSliceSlider(sliceContainerRef.current)
         sliceViewerRef.current = sliceViewer
         volumeViewerRef.current = volumeViewer
         setLoadedName(name)
