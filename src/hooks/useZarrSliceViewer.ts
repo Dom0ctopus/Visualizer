@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchVolumeInfo, readZSlice, type SliceResult, type VolumeInfo } from '../lib/zarrClient'
+import { fetchVolumeInfo, loadFullVolume, readZSlice, type FullVolumeData, type SliceResult, type VolumeInfo } from '../lib/zarrClient'
 
 // Full type-range defaults (rather than scanning the volume for its actual
 // min/max up front, which would mean downloading everything just to show a
@@ -27,11 +27,34 @@ function naturalRangeFor(dtype: string): [number, number] {
   }
 }
 
+function bytesPerElementFor(dtype: string): number {
+  switch (dtype) {
+    case '|u1':
+    case '|i1':
+      return 1
+    case '<u2':
+    case '<i2':
+      return 2
+    case '<u4':
+    case '<i4':
+    case '<f4':
+      return 4
+    case '<f8':
+      return 8
+    default:
+      return 1
+  }
+}
+
 // See the settle-timer comment inside the slice-fetch effect below for why
 // this exists. Short enough to feel immediate for a single scroll step,
 // long enough that a fast multi-step scroll only ever decodes the slice
-// actually landed on.
+// actually landed on. Not used at all once the full volume is loaded into
+// memory (see fullVolumeData below) -- there's no network/decode cost left
+// to debounce against.
 const SLICE_SETTLE_DELAY_MS = 40
+
+export type FullVolumeLoadState = 'idle' | 'loading' | 'loaded' | 'error'
 
 /**
  * Drives the custom, itk-vtk-viewer-free slice display: reads full-
@@ -42,6 +65,17 @@ const SLICE_SETTLE_DELAY_MS = 40
  * back gracefully (see the useItkVtkViewer.ts history for how that was
  * diagnosed). No multiscale/downsampling involved here: every slice comes
  * from the finest (original-resolution) level.
+ *
+ * Two modes: by default, each Z step lazily fetches+decodes just that
+ * slice's chunk (readZSlice) -- low memory, but with a real per-step
+ * latency floor that's especially visible when the underlying storage's
+ * I/O is slow or inconsistent. Calling loadFullVolumeIntoMemory switches
+ * to 3D Slicer's own strategy instead: fetch the whole volume once into a
+ * single in-memory array, after which every Z step is a synchronous
+ * subarray() view with no network call at all. That trade (one large
+ * up-front download/decode and holding the whole raw volume in browser
+ * memory, possibly several GB) is opt-in on purpose -- see
+ * loadFullVolume's own comment in zarrClient.ts.
  */
 export function useZarrSliceViewer(zarrUrl: string | null) {
   const [volumeInfo, setVolumeInfo] = useState<VolumeInfo | null>(null)
@@ -52,6 +86,10 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
   const [dataRange, setDataRange] = useState<[number, number]>([0, 255])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const [fullVolumeData, setFullVolumeData] = useState<FullVolumeData | null>(null)
+  const [fullVolumeLoadState, setFullVolumeLoadState] = useState<FullVolumeLoadState>('idle')
+  const [fullVolumeProgress, setFullVolumeProgress] = useState(0)
 
   const volumeInfoRef = useRef<VolumeInfo | null>(null)
   const requestIdRef = useRef(0)
@@ -65,6 +103,9 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     setVolumeInfo(null)
     setSlice(null)
     setError(null)
+    setFullVolumeData(null)
+    setFullVolumeLoadState('idle')
+    setFullVolumeProgress(0)
     if (!zarrUrl) return
     let cancelled = false
     fetchVolumeInfo(zarrUrl)
@@ -92,6 +133,18 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     }
     if (!zarrUrl || !volumeInfo) return
 
+    // Fast path: once the whole volume is loaded into memory, a Z slice
+    // is just a view into it -- synchronous, no debounce needed since
+    // there's no network/decode cost left to avoid wasting.
+    if (fullVolumeData) {
+      const [, shapeY, shapeX] = fullVolumeData.size
+      const planeSize = shapeY * shapeX
+      const view = fullVolumeData.data.subarray(zIndex * planeSize, (zIndex + 1) * planeSize)
+      setSlice({ width: shapeX, height: shapeY, data: view })
+      setError(null)
+      return
+    }
+
     // A fast scroll fires many zIndex changes in quick succession. Without
     // a settle delay, every intermediate one used to kick off its own
     // full-resolution fetch+decode immediately -- the requestId guard
@@ -106,15 +159,12 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     // neighboring Z indices once the main one resolved. Removed after
     // [zarr-perf] instrumentation showed individual chunk fetch times for
     // identical file sizes varying from ~5ms to 1.5+ seconds in one real
-    // session -- a signature of a cloud-sync service (iCloud Drive/
-    // Dropbox/OneDrive "optimize storage") evicting and re-downloading a
-    // scan's thousands of small chunk files on demand, not anything in
-    // this code. Under that condition, prefetching adjacent slices just
-    // adds more requests competing for the same intermittently-slow I/O
-    // that the visible, user-waited-on fetch needs -- pure downside, no
-    // upside, when fetch latency (not decode or render) is the
-    // bottleneck. It's cheap to bring back if a future profile shows
-    // fetches are consistently fast and prefetch would actually help.
+    // session -- environmental I/O variance, not anything in this code
+    // (see loadFullVolume above for the actual fix for that: load once,
+    // stop depending on per-step fetch latency entirely). Under that
+    // condition, prefetching adjacent slices just adds more requests
+    // competing for the same intermittently-slow I/O that the visible,
+    // user-waited-on fetch needs -- pure downside, no upside.
     const requestId = ++requestIdRef.current
     settleTimerRef.current = window.setTimeout(() => {
       settleTimerRef.current = null
@@ -140,7 +190,7 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
         settleTimerRef.current = null
       }
     }
-  }, [zarrUrl, volumeInfo, zIndex])
+  }, [zarrUrl, volumeInfo, zIndex, fullVolumeData])
 
   const setZIndex = useCallback((z: number) => {
     const info = volumeInfoRef.current
@@ -159,6 +209,27 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     []
   )
 
+  const loadFullVolumeIntoMemory = useCallback(async () => {
+    if (!zarrUrl || !volumeInfo || fullVolumeLoadState === 'loading') return
+    setFullVolumeLoadState('loading')
+    setFullVolumeProgress(0)
+    setError(null)
+    try {
+      const result = await loadFullVolume(zarrUrl, volumeInfo.finestLevelPath, (done, total) => {
+        setFullVolumeProgress(done / total)
+      })
+      setFullVolumeData(result)
+      setFullVolumeLoadState('loaded')
+    } catch (e) {
+      setFullVolumeLoadState('error')
+      setError(e instanceof Error ? e.message : 'Failed to load the full volume into memory')
+    }
+  }, [zarrUrl, volumeInfo, fullVolumeLoadState])
+
+  const fullVolumeBytes = volumeInfo
+    ? volumeInfo.size[0] * volumeInfo.size[1] * volumeInfo.size[2] * bytesPerElementFor(volumeInfo.dtype)
+    : 0
+
   return {
     volumeInfo,
     zIndex,
@@ -171,6 +242,10 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     setWindowMax,
     dataRange,
     loading,
-    error
+    error,
+    fullVolumeLoadState,
+    fullVolumeProgress,
+    fullVolumeBytes,
+    loadFullVolumeIntoMemory
   }
 }

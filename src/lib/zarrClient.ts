@@ -110,6 +110,12 @@ function evictChunkCacheIfNeeded(): void {
   }
 }
 
+// Silenced during loadFullVolume's bulk fetch below -- that legitimately
+// touches every chunk once, and logging each of potentially thousands of
+// them would make the console itself sluggish. Per-slice reads (the
+// normal scrolling path) still log every uncached fetch.
+let quietChunkLogs = false
+
 function fetchChunk(levelUrl: string, bz: number, by: number, bx: number, meta: ZarrArrayMeta): Promise<TypedArray> {
   const key = `${levelUrl}/${bz}.${by}.${bx}`
   if (chunkCache.has(key)) {
@@ -138,9 +144,11 @@ function fetchChunk(levelUrl: string, bz: number, by: number, bx: number, meta: 
     // already-visited chunk won't spam the console) so a slow step can be
     // attributed to network/server time vs. blosc decode time rather than
     // guessed at.
-    console.log(
-      `[zarr-perf] chunk ${key.split('/').slice(-4).join('/')}: fetch ${(t1 - t0).toFixed(1)}ms (${(compressedBuf.byteLength / 1024).toFixed(0)}KB compressed), decode ${(t2 - t1).toFixed(1)}ms (${(raw.byteLength / 1024).toFixed(0)}KB raw)`
-    )
+    if (!quietChunkLogs) {
+      console.log(
+        `[zarr-perf] chunk ${key.split('/').slice(-4).join('/')}: fetch ${(t1 - t0).toFixed(1)}ms (${(compressedBuf.byteLength / 1024).toFixed(0)}KB compressed), decode ${(t2 - t1).toFixed(1)}ms (${(raw.byteLength / 1024).toFixed(0)}KB raw)`
+      )
+    }
     chunkByteSizes.set(key, raw.byteLength)
     chunkCacheBytes += raw.byteLength
     evictChunkCacheIfNeeded()
@@ -217,4 +225,104 @@ export async function readZSlice(zarrBaseUrl: string, finestLevelPath: string, z
     `[zarr-perf] readZSlice z=${zIndex} total ${(performance.now() - sliceT0).toFixed(1)}ms (${nChunksY * nChunksX} chunk(s), ${shapeX}x${shapeY})`
   )
   return { width: shapeX, height: shapeY, data: out }
+}
+
+export interface FullVolumeData {
+  /** Flat z-major (C-order) buffer covering the whole volume: index =
+   *  z*sy*sx + y*sx + x. */
+  data: TypedArray
+  /** [z, y, x] */
+  size: [number, number, number]
+  dtype: string
+}
+
+const FULL_VOLUME_FETCH_CONCURRENCY = 8
+
+/**
+ * Fetches every chunk of the finest-resolution level and assembles them
+ * into one contiguous in-memory array -- the same strategy 3D Slicer uses
+ * (load the whole volume into RAM once), so that every subsequent Z-slice
+ * read is a synchronous subarray() view with no network round trip at all.
+ *
+ * This exists specifically because per-slice lazy fetching (readZSlice,
+ * used by default) has an inherent per-step latency floor that an
+ * in-memory read doesn't: on a real session, individual chunk fetch times
+ * for identical file sizes were observed varying from ~5ms to 1.5+ seconds
+ * (see the scroll-performance investigation in the project history) --
+ * environmental I/O variance no amount of client-side caching can fully
+ * hide when each new Z position is a fetch that hasn't happened yet. Once
+ * fully loaded here, scrolling has none of that: it's pure memory access.
+ *
+ * The cost is paid entirely up front instead: one potentially large
+ * download+decode (proportional to the whole scan, not one slice) and,
+ * critically, holding the whole raw (uncompressed) volume in browser
+ * memory for as long as it's loaded -- easily several GB for a genuinely
+ * native-resolution scan. This is opt-in (see useZarrSliceViewer.ts) for
+ * exactly that reason: the tradeoff only makes sense once instant
+ * scrolling is worth more than that memory/bandwidth cost, which is a
+ * judgment call for whoever's driving the browser, not something to
+ * decide silently on their behalf.
+ */
+export async function loadFullVolume(
+  zarrBaseUrl: string,
+  finestLevelPath: string,
+  onProgress?: (done: number, total: number) => void
+): Promise<FullVolumeData> {
+  const levelUrl = `${zarrBaseUrl}/${finestLevelPath}`
+  const meta = await fetchZarray(levelUrl)
+  const [shapeZ, shapeY, shapeX] = meta.shape
+  const [chunkZ, chunkY, chunkX] = meta.chunks
+  const nChunksZ = Math.ceil(shapeZ / chunkZ)
+  const nChunksY = Math.ceil(shapeY / chunkY)
+  const nChunksX = Math.ceil(shapeX / chunkX)
+
+  const ctor = dtypeCtor(meta.dtype)
+  const out = new ctor(shapeZ * shapeY * shapeX)
+
+  const tasks: Array<[number, number, number]> = []
+  for (let bz = 0; bz < nChunksZ; bz++) {
+    for (let by = 0; by < nChunksY; by++) {
+      for (let bx = 0; bx < nChunksX; bx++) tasks.push([bz, by, bx])
+    }
+  }
+
+  quietChunkLogs = true
+  const t0 = performance.now()
+  let completed = 0
+  let nextTaskIndex = 0
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      const taskIndex = nextTaskIndex++
+      if (taskIndex >= tasks.length) return
+      const [bz, by, bx] = tasks[taskIndex]
+      const chunkData = await fetchChunk(levelUrl, bz, by, bx, meta)
+      const rowLen = Math.min(chunkX, shapeX - bx * chunkX)
+      const rowsInChunk = Math.min(chunkY, shapeY - by * chunkY)
+      const depthInChunk = Math.min(chunkZ, shapeZ - bz * chunkZ)
+      for (let z = 0; z < depthInChunk; z++) {
+        const gz = bz * chunkZ + z
+        for (let y = 0; y < rowsInChunk; y++) {
+          const gy = by * chunkY + y
+          const srcOffset = z * chunkY * chunkX + y * chunkX
+          const dstOffset = gz * shapeY * shapeX + gy * shapeX + bx * chunkX
+          out.set(chunkData.subarray(srcOffset, srcOffset + rowLen), dstOffset)
+        }
+      }
+      completed++
+      onProgress?.(completed, tasks.length)
+    }
+  }
+
+  try {
+    await Promise.all(Array.from({ length: Math.min(FULL_VOLUME_FETCH_CONCURRENCY, tasks.length) }, () => worker()))
+  } finally {
+    quietChunkLogs = false
+  }
+
+  console.log(
+    `[zarr-perf] loadFullVolume total ${((performance.now() - t0) / 1000).toFixed(1)}s (${tasks.length} chunks, ${shapeX}x${shapeY}x${shapeZ}, ${(out.byteLength / 1024 / 1024 / 1024).toFixed(2)}GB raw)`
+  )
+
+  return { data: out, size: [shapeZ, shapeY, shapeX], dtype: meta.dtype }
 }

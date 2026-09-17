@@ -12,6 +12,12 @@ import type { LibraryRecord, SegmentationRecord, VolumeRecord } from '../types'
 const POLL_INTERVAL_MS = 1500
 const ZOOM_BUTTON_FACTOR = 1.25
 
+function formatBytes(bytes: number): string {
+  const gb = bytes / 1024 / 1024 / 1024
+  if (gb >= 0.1) return `${gb.toFixed(1)} GB`
+  return `${(bytes / 1024 / 1024).toFixed(0)} MB`
+}
+
 function statusLabel(record: VolumeRecord | SegmentationRecord): string {
   switch (record.zarrStatus) {
     case 'ready':
@@ -88,7 +94,11 @@ export function ItkVtkViewerPage() {
     setWindowMin,
     setWindowMax,
     dataRange,
-    error: sliceError
+    error: sliceError,
+    fullVolumeLoadState,
+    fullVolumeProgress,
+    fullVolumeBytes,
+    loadFullVolumeIntoMemory
   } = useZarrSliceViewer(activeZarrUrl)
 
   const zarrSeg = useZarrSegmentations()
@@ -305,6 +315,37 @@ export function ItkVtkViewerPage() {
               onFileOpacity={zarrSeg.setFileOpacity}
               onRemoveFile={zarrSeg.removeSegmentation}
             />
+          </section>
+        )}
+
+        {volumeInfo && (
+          <section className="panel">
+            <h2 className="panel-title">Slice Scroll Speed</h2>
+            <p className="panel-hint">
+              By default each Z step fetches and decodes just that slice on demand, which has a real per-step delay
+              -- especially visible if the underlying storage is slow or inconsistent. Loading the whole volume into
+              memory once (the same strategy 3D Slicer uses) makes every subsequent Z step instant, at the cost of a
+              large one-time download and holding the raw volume ({formatBytes(fullVolumeBytes)} uncompressed) in
+              browser memory.
+            </p>
+            {fullVolumeLoadState === 'loading' && (
+              <>
+                <div className="progress-bar">
+                  <div className="progress-bar-fill" style={{ width: `${Math.round(fullVolumeProgress * 100)}%` }} />
+                </div>
+                <p className="tf-hint">Loading… {Math.round(fullVolumeProgress * 100)}%</p>
+              </>
+            )}
+            {fullVolumeLoadState === 'loaded' && <p className="tf-hint">Loaded into memory -- scrolling is now instant.</p>}
+            {fullVolumeLoadState !== 'loaded' && (
+              <button
+                className="btn btn-secondary btn-small"
+                disabled={fullVolumeLoadState === 'loading'}
+                onClick={() => void loadFullVolumeIntoMemory()}
+              >
+                Load full volume into memory ({formatBytes(fullVolumeBytes)})
+              </button>
+            )}
           </section>
         )}
 
