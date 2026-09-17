@@ -108,6 +108,7 @@ export function ZarrSliceCanvas({
   )
 
   useEffect(() => {
+    const renderT0 = performance.now()
     const canvas = canvasRef.current
     if (!canvas || !slice) return
     const { width, height, data } = slice
@@ -157,7 +158,14 @@ export function ZarrSliceCanvas({
       out[o + 2] = b
       out[o + 3] = 255
     }
+    const pixelLoopDone = performance.now()
     ctx.putImageData(imageData, 0, 0)
+    // Temporary diagnostic instrumentation -- see the scroll-performance
+    // investigation in the project history. Separates the CPU pixel loop
+    // from the canvas upload so a slow frame can be attributed correctly.
+    console.log(
+      `[zarr-perf] canvas redraw ${width}x${height}, ${activeOverlays.length} overlay(s): pixel loop ${(pixelLoopDone - renderT0).toFixed(1)}ms, putImageData ${(performance.now() - pixelLoopDone).toFixed(1)}ms`
+    )
   }, [slice, windowMin, windowMax, lut, lutRange, overlays])
 
   // React's synthetic wheel handler is passive by default (a React 17+
