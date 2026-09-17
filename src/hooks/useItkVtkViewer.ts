@@ -12,6 +12,8 @@ interface ItkVtkViewerInstance {
   setRotateEnabled: (enabled: boolean) => void
   getZSlice: () => number
   setZSlice: (value: number) => void
+  getLoadedScale: () => number | undefined
+  setImageScale: (scale: number) => void
   delete: () => void
 }
 
@@ -88,6 +90,31 @@ function findSliderNear(container: HTMLElement, targetValue: number): HTMLInputE
 // itk-vtk-viewer renders inside it -- so it intercepts before the
 // library's own bubble-phase listener (wherever exactly it's bound
 // underneath) ever sees the event.
+// itk-vtk-viewer's own scale-management runs a background "progressive
+// refinement" loop after any image load: it starts at whatever scale it
+// picked to render quickly, then keeps stepping targetScale toward 0
+// (its finest/native level) for better quality. For our large scans, scale
+// 0 alone exceeds the ~268M-voxel decode cap outright (confirmed: the
+// "Requested" count in the console error is identical -- 1183820994 --
+// across every chunk-size change we tried, meaning it's the *whole* scale-0
+// image, not a chunk-dependent read), so that refinement step always fails.
+// The initial load still succeeds at whatever coarser scale it started
+// from (visible on first load), but interacting with the slice afterward
+// re-triggers a load attempt at the now-corrupted target scale (0),
+// leaving the display blank/wrong. Pinning the target scale back to
+// whatever actually loaded successfully, right after that initial load,
+// stops the refinement loop from ever reaching for scale 0.
+async function pinLoadedScale(viewer: ItkVtkViewerInstance): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const scale = viewer.getLoadedScale()
+    if (typeof scale === 'number' && Number.isFinite(scale)) {
+      viewer.setImageScale(scale)
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
 function attachWheelToZSlice(container: HTMLElement, viewer: ItkVtkViewerInstance): () => void {
   const onWheel = (e: WheelEvent) => {
     e.preventDefault()
@@ -175,6 +202,7 @@ export function useItkVtkViewer() {
         // Force the same compact mode its own hamburger-menu toggle uses.
         sliceViewer.setUICollapsed(true)
         volumeViewer.setUICollapsed(true)
+        await pinLoadedScale(sliceViewer)
         if (sliceContainerRef.current) detachWheelRef.current = attachWheelToZSlice(sliceContainerRef.current, sliceViewer)
         sliceViewerRef.current = sliceViewer
         volumeViewerRef.current = volumeViewer
