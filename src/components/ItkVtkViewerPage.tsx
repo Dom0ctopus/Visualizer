@@ -6,10 +6,11 @@ import { useZarrSegmentations } from '../hooks/useZarrSegmentations'
 import { useZarrSliceViewer } from '../hooks/useZarrSliceViewer'
 import { SearchBar } from './SearchBar'
 import { SegmentTree } from './SegmentTree'
-import { ZarrSliceCanvas } from './ZarrSliceCanvas'
+import { ZarrSliceCanvas, type CanvasPan } from './ZarrSliceCanvas'
 import type { LibraryRecord, SegmentationRecord, VolumeRecord } from '../types'
 
 const POLL_INTERVAL_MS = 1500
+const ZOOM_BUTTON_FACTOR = 1.25
 
 function statusLabel(record: VolumeRecord | SegmentationRecord): string {
   switch (record.zarrStatus) {
@@ -55,6 +56,8 @@ export function ItkVtkViewerPage() {
   const [error, setError] = useState<string | null>(null)
   const [searchText, setSearchText] = useState('')
   const [activeZarrUrl, setActiveZarrUrl] = useState<string | null>(null)
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState<CanvasPan>({ x: 0, y: 0 })
   const pollTimerRef = useRef<number | null>(null)
   // Which segmentation's label image is currently bound to the 3D viewer
   // instance, so a segment visibility/opacity edit only re-sends weights
@@ -119,10 +122,17 @@ export function ItkVtkViewerPage() {
   const handleLoad = (record: VolumeRecord) => {
     const url = zarrUrl(record.id)
     setActiveZarrUrl(url)
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
     // loadZarrUrl below tears down and recreates the whole viewer instance,
     // which drops any label image bound to the old one.
     loadedLabelRecordIdRef.current = null
     loadZarrUrl(url, record.name)
+  }
+
+  const resetSliceView = () => {
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
   }
 
   const handleLoadSegmentation = (record: SegmentationRecord) => {
@@ -168,6 +178,10 @@ export function ItkVtkViewerPage() {
               windowMax={windowMax}
               onWheelStep={stepZIndex}
               overlays={overlays}
+              zoom={zoom}
+              pan={pan}
+              onZoomChange={setZoom}
+              onPanChange={setPan}
             />
           </div>
           {volumeInfo && (
@@ -327,6 +341,28 @@ export function ItkVtkViewerPage() {
               onChange={(e) => setWindowMax(Math.max(Number(e.target.value), windowMin))}
             />
             <p className="tf-hint">Scroll the slice pane to page through Z, independently of the 3D render's own window/level.</p>
+
+            <p className="tf-hint">Slice zoom &amp; pan</p>
+            <div className="tf-row">
+              <button
+                className="btn btn-secondary btn-small"
+                onClick={() => setZoom((z) => Math.max(0.1, z / ZOOM_BUTTON_FACTOR))}
+                title="Zoom out"
+              >
+                &minus;
+              </button>
+              <button
+                className="btn btn-secondary btn-small"
+                onClick={() => setZoom((z) => Math.min(20, z * ZOOM_BUTTON_FACTOR))}
+                title="Zoom in"
+              >
+                +
+              </button>
+              <button className="btn btn-secondary btn-small" onClick={resetSliceView}>
+                Reset
+              </button>
+            </div>
+            <p className="tf-hint">Or ctrl/cmd+scroll to zoom, and drag to pan.</p>
           </section>
         )}
 

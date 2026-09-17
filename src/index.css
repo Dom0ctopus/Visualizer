@@ -528,6 +528,10 @@ input[type='range'] {
   flex: 1;
   min-height: 0;
   position: relative;
+  /* Clips the slice canvas when zoomed in (see .zarr-slice-canvas's
+     transform) so panning/zooming never visually spills into neighboring
+     panes or controls. */
+  overflow: hidden;
 }
 
 .zarr-slice-canvas {
@@ -536,7 +540,11 @@ input[type='range'] {
   display: block;
   object-fit: contain;
   background: #000;
-  cursor: ns-resize;
+  cursor: grab;
+}
+
+.zarr-slice-canvas:active {
+  cursor: grabbing;
 }
 
 .zarr-slice-controls {

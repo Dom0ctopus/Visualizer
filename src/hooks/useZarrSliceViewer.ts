@@ -27,6 +27,12 @@ function naturalRangeFor(dtype: string): [number, number] {
   }
 }
 
+// See the settle-timer comment inside the slice-fetch effect below for why
+// this exists. Short enough to feel immediate for a single scroll step,
+// long enough that a fast multi-step scroll only ever decodes the slice
+// actually landed on.
+const SLICE_SETTLE_DELAY_MS = 40
+
 /**
  * Drives the custom, itk-vtk-viewer-free slice display: reads full-
  * resolution 2D slices directly out of the same OME-Zarr store (see
@@ -49,6 +55,7 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
 
   const volumeInfoRef = useRef<VolumeInfo | null>(null)
   const requestIdRef = useRef(0)
+  const settleTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     volumeInfoRef.current = volumeInfo
@@ -79,30 +86,54 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
   }, [zarrUrl])
 
   useEffect(() => {
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current)
+      settleTimerRef.current = null
+    }
     if (!zarrUrl || !volumeInfo) return
+
+    // A fast scroll fires many zIndex changes in quick succession. Without
+    // a settle delay, every intermediate one used to kick off its own
+    // full-resolution fetch+decode immediately -- the requestId guard
+    // below only discards an already-finished *result*, it doesn't stop
+    // the decode work itself from running to completion for every
+    // discarded frame. On a native-resolution scan that's a lot of wasted
+    // large blosc decodes piling up, which is what made scrolling feel
+    // like it locked up. Only the zIndex actually settled on now triggers
+    // a fetch.
     const requestId = ++requestIdRef.current
-    setLoading(true)
-    readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex)
-      .then((result) => {
-        if (requestIdRef.current !== requestId) return
-        setSlice(result)
-        setError(null)
-        // Now that each Z index is its own chunk (see zarrConvert.ts), the
-        // adjacent slices a user is about to scroll to are cheap to warm
-        // into zarrClient's chunk cache ahead of time -- fire-and-forget,
-        // errors here don't matter since the same read is retried for real
-        // (with its own error handling) if the user actually steps there.
-        const maxZ = volumeInfo.size[0] - 1
-        if (zIndex - 1 >= 0) void readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex - 1)
-        if (zIndex + 1 <= maxZ) void readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex + 1)
-      })
-      .catch((e) => {
-        if (requestIdRef.current !== requestId) return
-        setError(e instanceof Error ? e.message : 'Failed to load slice')
-      })
-      .finally(() => {
-        if (requestIdRef.current === requestId) setLoading(false)
-      })
+    settleTimerRef.current = window.setTimeout(() => {
+      settleTimerRef.current = null
+      setLoading(true)
+      readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex)
+        .then((result) => {
+          if (requestIdRef.current !== requestId) return
+          setSlice(result)
+          setError(null)
+          // Now that each Z index is its own chunk (see zarrConvert.ts), the
+          // adjacent slices a user is about to scroll to are cheap to warm
+          // into zarrClient's chunk cache ahead of time -- fire-and-forget,
+          // errors here don't matter since the same read is retried for real
+          // (with its own error handling) if the user actually steps there.
+          const maxZ = volumeInfo.size[0] - 1
+          if (zIndex - 1 >= 0) void readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex - 1)
+          if (zIndex + 1 <= maxZ) void readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex + 1)
+        })
+        .catch((e) => {
+          if (requestIdRef.current !== requestId) return
+          setError(e instanceof Error ? e.message : 'Failed to load slice')
+        })
+        .finally(() => {
+          if (requestIdRef.current === requestId) setLoading(false)
+        })
+    }, SLICE_SETTLE_DELAY_MS)
+
+    return () => {
+      if (settleTimerRef.current !== null) {
+        window.clearTimeout(settleTimerRef.current)
+        settleTimerRef.current = null
+      }
+    }
   }, [zarrUrl, volumeInfo, zIndex])
 
   const setZIndex = useCallback((z: number) => {

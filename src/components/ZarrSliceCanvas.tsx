@@ -2,6 +2,11 @@ import { useEffect, useMemo, useRef } from 'react'
 import type { SliceOverlay } from '../hooks/useSegmentationOverlays'
 import type { SliceResult } from '../lib/zarrClient'
 
+export interface CanvasPan {
+  x: number
+  y: number
+}
+
 interface ZarrSliceCanvasProps {
   slice: SliceResult | null
   windowMin: number
@@ -13,6 +18,16 @@ interface ZarrSliceCanvasProps {
    *  pixel-for-pixel the same size as `slice`; a mismatched one is skipped
    *  since resampling isn't attempted here (see that hook's own comment). */
   overlays?: SliceOverlay[]
+  /** Display zoom/pan, applied as a CSS transform on the canvas element --
+   *  entirely separate from the pixel data drawn into it, so panning/
+   *  zooming never re-triggers the (expensive, native-resolution) redraw
+   *  loop below. Controlled from the parent so the sidebar's zoom buttons
+   *  and this component's own drag/ctrl+scroll gestures drive the same
+   *  state. */
+  zoom: number
+  pan: CanvasPan
+  onZoomChange: (zoom: number) => void
+  onPanChange: (pan: CanvasPan) => void
 }
 
 // Integer typed arrays only ever take one of a small, known set of raw
@@ -47,11 +62,43 @@ function buildLut(size: number, offset: number, windowMin: number, windowMax: nu
  * entirely -- see that hook's own comment for why) onto a plain 2D canvas,
  * applying window/level ourselves since there's no library UI doing it here.
  */
-export function ZarrSliceCanvas({ slice, windowMin, windowMax, onWheelStep, overlays }: ZarrSliceCanvasProps) {
+const ZOOM_FACTOR_PER_WHEEL_NOTCH = 1.1
+const MIN_ZOOM = 0.1
+const MAX_ZOOM = 20
+
+export function ZarrSliceCanvas({
+  slice,
+  windowMin,
+  windowMax,
+  onWheelStep,
+  overlays,
+  zoom,
+  pan,
+  onZoomChange,
+  onPanChange
+}: ZarrSliceCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   // Reused across renders so scrolling through many slices at the same
   // dimensions doesn't allocate a fresh backing buffer every frame.
   const imageDataRef = useRef<ImageData | null>(null)
+  // Mirrors of the latest zoom/pan/callback props, read from inside the
+  // wheel/drag event listeners below -- those are attached once (empty
+  // dep array) rather than re-attached on every zoom/pan change, so drag
+  // and ctrl+scroll stay responsive to the values that were current at
+  // the moment of the gesture without needing to constantly detach/
+  // reattach native listeners.
+  const zoomRef = useRef(zoom)
+  const panRef = useRef(pan)
+  const onZoomChangeRef = useRef(onZoomChange)
+  const onPanChangeRef = useRef(onPanChange)
+  const onWheelStepRef = useRef(onWheelStep)
+  useEffect(() => {
+    zoomRef.current = zoom
+    panRef.current = pan
+    onZoomChangeRef.current = onZoomChange
+    onPanChangeRef.current = onPanChange
+    onWheelStepRef.current = onWheelStep
+  }, [zoom, pan, onZoomChange, onPanChange, onWheelStep])
 
   const lutRange = slice ? lutRangeFor(slice.data) : null
   const lut = useMemo(
@@ -115,19 +162,75 @@ export function ZarrSliceCanvas({ slice, windowMin, windowMax, onWheelStep, over
 
   // React's synthetic wheel handler is passive by default (a React 17+
   // change for scroll-performance), so calling preventDefault() from a JSX
-  // onWheel prop is a no-op with a console warning -- attach a real,
-  // non-passive native listener instead so scrolling the page doesn't
-  // happen at the same time as stepping through slices.
+  // onWheel prop is a no-op with a console warning -- attach real,
+  // non-passive native listeners instead. Attached once (empty dep array)
+  // and reading the *Ref mirrors above so a scroll or drag gesture always
+  // sees the latest zoom/pan without needing to reattach listeners on
+  // every value change.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
+
+    // Plain scroll steps through Z (matching 3D-Slicer); holding
+    // ctrl/cmd -- the standard "pinch/scroll to zoom" modifier browsers
+    // themselves use for page zoom -- zooms the slice view instead, about
+    // its own center (not the cursor: this is a lightweight display
+    // transform, not a full viewport-anchored zoom, and center-anchored
+    // is simple to get right without visual verification in this
+    // sandbox's headless environment -- see the surrounding session's own
+    // WebGL-testing limitations).
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      onWheelStep(e.deltaY > 0 ? 1 : -1)
+      if (e.ctrlKey || e.metaKey) {
+        const factor = e.deltaY > 0 ? 1 / ZOOM_FACTOR_PER_WHEEL_NOTCH : ZOOM_FACTOR_PER_WHEEL_NOTCH
+        const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoomRef.current * factor))
+        onZoomChangeRef.current(nextZoom)
+      } else {
+        onWheelStepRef.current(e.deltaY > 0 ? 1 : -1)
+      }
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
-    return () => canvas.removeEventListener('wheel', onWheel)
-  }, [onWheelStep])
 
-  return <canvas ref={canvasRef} className="zarr-slice-canvas" />
+    // Plain left-button drag pans -- translate() is applied in outer
+    // (unscaled) CSS pixels regardless of the current zoom (see this
+    // component's own transform below), so a 1:1 mapping from mouse
+    // movement to pan delta is correct at any zoom level without needing
+    // to divide by zoom here.
+    let dragging = false
+    let dragStart = { x: 0, y: 0 }
+    let panStart: CanvasPan = { x: 0, y: 0 }
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      dragging = true
+      dragStart = { x: e.clientX, y: e.clientY }
+      panStart = panRef.current
+      canvas.setPointerCapture(e.pointerId)
+    }
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragging) return
+      onPanChangeRef.current({ x: panStart.x + (e.clientX - dragStart.x), y: panStart.y + (e.clientY - dragStart.y) })
+    }
+    const onPointerUp = (e: PointerEvent) => {
+      dragging = false
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
+    }
+    canvas.addEventListener('pointerdown', onPointerDown)
+    canvas.addEventListener('pointermove', onPointerMove)
+    canvas.addEventListener('pointerup', onPointerUp)
+
+    return () => {
+      canvas.removeEventListener('wheel', onWheel)
+      canvas.removeEventListener('pointerdown', onPointerDown)
+      canvas.removeEventListener('pointermove', onPointerMove)
+      canvas.removeEventListener('pointerup', onPointerUp)
+    }
+  }, [])
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="zarr-slice-canvas"
+      style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+    />
+  )
 }
