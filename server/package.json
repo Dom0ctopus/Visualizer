@@ -9,7 +9,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@itk-wasm/image-io": "^1.6.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "multer": "^2.2.0",
