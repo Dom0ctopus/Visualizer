@@ -104,15 +104,40 @@ function findSliderNear(container: HTMLElement, targetValue: number): HTMLInputE
 // leaving the display blank/wrong. Pinning the target scale back to
 // whatever actually loaded successfully, right after that initial load,
 // stops the refinement loop from ever reaching for scale 0.
-async function pinLoadedScale(viewer: ItkVtkViewerInstance): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt++) {
+// A one-time pin (call setImageScale once, right after the initial load)
+// did not hold -- reported as still broken after switching to it. If the
+// refinement loop re-fires on its own schedule rather than only once, a
+// single counter-call would get overridden again shortly after. This
+// version instead re-asserts the pin continuously and logs what it's
+// doing, so the next report can show which of these is actually true:
+// getLoadedScale() never resolving to a number at all (this loop would log
+// nothing beyond "waiting"), the scale drifting after being pinned once
+// (would show repeated "drifted ... repinning" lines), or something past
+// scale-selection entirely being the real cause (pinning holds steady in
+// the logs, but the display still breaks anyway).
+function startScalePinning(viewer: ItkVtkViewerInstance): () => void {
+  let pinnedScale: number | null = null
+  let loggedWaiting = false
+  const tick = () => {
     const scale = viewer.getLoadedScale()
-    if (typeof scale === 'number' && Number.isFinite(scale)) {
-      viewer.setImageScale(scale)
+    if (typeof scale !== 'number' || !Number.isFinite(scale)) {
+      if (!loggedWaiting) {
+        console.info('[itk-vtk-viewer] waiting for an initial loaded scale...')
+        loggedWaiting = true
+      }
       return
     }
-    await new Promise((resolve) => setTimeout(resolve, 150))
+    if (pinnedScale === null) {
+      pinnedScale = scale
+      console.info('[itk-vtk-viewer] pinning slice scale at', scale)
+    } else if (scale !== pinnedScale) {
+      console.warn('[itk-vtk-viewer] scale drifted from', pinnedScale, 'to', scale, '-- repinning')
+    }
+    viewer.setImageScale(pinnedScale)
   }
+  tick()
+  const interval = window.setInterval(tick, 500)
+  return () => window.clearInterval(interval)
 }
 
 function attachWheelToZSlice(container: HTMLElement, viewer: ItkVtkViewerInstance): () => void {
@@ -138,6 +163,7 @@ export function useItkVtkViewer() {
   const sliceViewerRef = useRef<ItkVtkViewerInstance | null>(null)
   const volumeViewerRef = useRef<ItkVtkViewerInstance | null>(null)
   const detachWheelRef = useRef<(() => void) | null>(null)
+  const stopScalePinRef = useRef<(() => void) | null>(null)
 
   const [scriptReady, setScriptReady] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -161,6 +187,8 @@ export function useItkVtkViewer() {
   const clearViewers = useCallback(() => {
     detachWheelRef.current?.()
     detachWheelRef.current = null
+    stopScalePinRef.current?.()
+    stopScalePinRef.current = null
     sliceViewerRef.current?.delete()
     volumeViewerRef.current?.delete()
     sliceViewerRef.current = null
@@ -202,7 +230,7 @@ export function useItkVtkViewer() {
         // Force the same compact mode its own hamburger-menu toggle uses.
         sliceViewer.setUICollapsed(true)
         volumeViewer.setUICollapsed(true)
-        await pinLoadedScale(sliceViewer)
+        stopScalePinRef.current = startScalePinning(sliceViewer)
         if (sliceContainerRef.current) detachWheelRef.current = attachWheelToZSlice(sliceContainerRef.current, sliceViewer)
         sliceViewerRef.current = sliceViewer
         volumeViewerRef.current = volumeViewer
