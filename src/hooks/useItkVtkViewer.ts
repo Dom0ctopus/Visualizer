@@ -10,6 +10,8 @@ interface ItkVtkViewerInstance {
   setViewMode: (mode: 'ZPlane' | 'YPlane' | 'XPlane' | 'Volume') => void
   setUICollapsed: (collapsed: boolean) => void
   setRotateEnabled: (enabled: boolean) => void
+  getZSlice: () => number
+  setZSlice: (value: number) => void
   delete: () => void
 }
 
@@ -51,29 +53,53 @@ function loadItkVtkViewerScript(): Promise<void> {
   return scriptLoadPromise
 }
 
+// Finds whichever <input type=range> in the panel currently holds the
+// closest value to `targetValue` -- used only to read a sensible min/max/
+// step for calibrating the wheel step below. The panel has several other
+// range inputs (opacity, sample distance, gradient opacity...), and there's
+// no stable selector distinguishing "the Z slider" from those without
+// depending on itk-vtk-viewer's generated class names, so matching by
+// value against the number we already trust from getZSlice() sidesteps
+// that rather than guessing.
+function findSliderNear(container: HTMLElement, targetValue: number): HTMLInputElement | null {
+  const sliders = container.querySelectorAll<HTMLInputElement>('input[type="range"]')
+  let best: HTMLInputElement | null = null
+  let bestDiff = Infinity
+  for (const slider of sliders) {
+    const diff = Math.abs(Number(slider.value) - targetValue)
+    if (diff < bestDiff) {
+      best = slider
+      bestDiff = diff
+    }
+  }
+  return best
+}
+
 // itk-vtk-viewer's own wheel handler zooms the camera even in use2D/ZPlane
 // mode -- there's no public option to repoint it at slice-stepping instead.
-// Its native Z slider (visible once setUICollapsed reveals it) already does
-// the right thing when dragged, though, so wheel events are redirected onto
-// that slider rather than reimplementing slice-stepping against the
-// viewer's internal (and unexported) slice-index API. Attached on the
+// Calls the viewer's own setZSlice/getZSlice directly rather than faking a
+// drag on the native slider: dispatching synthetic input/change events on
+// it was tried first and corrupted the viewer's internal xstate machine
+// (rapid-fire wheel events synthesizing many overlapping value changes
+// produced "Cannot read properties of undefined" and "Did not find image to
+// compare" errors) -- the public setter is the same call the slider's own
+// handler ends up making, without that state-machine risk. Attached on the
 // capture phase at the outermost container -- an ancestor of everything
 // itk-vtk-viewer renders inside it -- so it intercepts before the
 // library's own bubble-phase listener (wherever exactly it's bound
 // underneath) ever sees the event.
-function attachWheelToSliceSlider(container: HTMLElement): () => void {
+function attachWheelToZSlice(container: HTMLElement, viewer: ItkVtkViewerInstance): () => void {
   const onWheel = (e: WheelEvent) => {
-    const slider = container.querySelector<HTMLInputElement>('input[type="range"]')
-    if (!slider) return
     e.preventDefault()
     e.stopPropagation()
-    const min = Number(slider.min)
-    const max = Number(slider.max)
-    const step = Number(slider.step) || (max - min) / 200
-    const next = Math.min(max, Math.max(min, Number(slider.value) + step * (e.deltaY > 0 ? 1 : -1)))
-    slider.value = String(next)
-    slider.dispatchEvent(new Event('input', { bubbles: true }))
-    slider.dispatchEvent(new Event('change', { bubbles: true }))
+    const current = viewer.getZSlice()
+    const slider = findSliderNear(container, current)
+    const min = slider ? Number(slider.min) : -Infinity
+    const max = slider ? Number(slider.max) : Infinity
+    const range = max - min
+    const step = slider && Number(slider.step) > 0 ? Number(slider.step) : Number.isFinite(range) ? range / 200 : 1
+    const next = Math.min(max, Math.max(min, current + step * (e.deltaY > 0 ? 1 : -1)))
+    viewer.setZSlice(next)
   }
   container.addEventListener('wheel', onWheel, { passive: false, capture: true })
   return () => container.removeEventListener('wheel', onWheel, { capture: true })
@@ -149,7 +175,7 @@ export function useItkVtkViewer() {
         // Force the same compact mode its own hamburger-menu toggle uses.
         sliceViewer.setUICollapsed(true)
         volumeViewer.setUICollapsed(true)
-        if (sliceContainerRef.current) detachWheelRef.current = attachWheelToSliceSlider(sliceContainerRef.current)
+        if (sliceContainerRef.current) detachWheelRef.current = attachWheelToZSlice(sliceContainerRef.current, sliceViewer)
         sliceViewerRef.current = sliceViewer
         volumeViewerRef.current = volumeViewer
         setLoadedName(name)
