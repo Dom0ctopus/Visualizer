@@ -11,9 +11,18 @@ export interface ParsedNrrdHeader {
   keyValuePairs: Record<string, string>
 }
 
-// NRRD headers are plain text and small; this is generous headroom so we never
-// need to read the (potentially huge) voxel payload just to find the header end.
-const MAX_HEADER_BYTES = 1_000_000
+// NRRD headers are plain text and normally tiny, but a 3D Slicer
+// segmentation exported at native (rather than downsampled) resolution can
+// resolve many more distinct anatomical structures, and therefore carry
+// many more Segment0_*/Segment1_*/... key-value entries -- easily enough to
+// push a real header past a size that seemed "generous" for a simpler file.
+// This is deliberately large (headers are still minuscule next to actual
+// voxel data) so a header genuinely this size is never silently mistaken
+// for one that isn't -- see the explicit throw below, which used to be a
+// silent fallback that quietly discarded every segment past this cutoff
+// instead of erroring, showing up as a spurious "no segment metadata found"
+// on an upload that had segments, just past where this stopped looking.
+const MAX_HEADER_BYTES = 32_000_000
 
 export async function readNrrdHeader(filePath: string): Promise<ParsedNrrdHeader> {
   const handle = await open(filePath, 'r')
@@ -23,12 +32,17 @@ export async function readNrrdHeader(filePath: string): Promise<ParsedNrrdHeader
     const slice = buf.subarray(0, bytesRead)
 
     // Header ends at the first blank line (two consecutive newlines).
-    let headerEnd = slice.length
+    let headerEnd = -1
     for (let i = 1; i < slice.length; i++) {
       if (slice[i - 1] === 10 && slice[i] === 10) {
         headerEnd = i - 1
         break
       }
+    }
+    if (headerEnd < 0) {
+      throw new Error(
+        `Could not find the end of the NRRD header within the first ${MAX_HEADER_BYTES.toLocaleString()} bytes (no blank line separator found).`
+      )
     }
     const text = slice.subarray(0, headerEnd).toString('utf8')
     return parseNrrdHeaderText(text)

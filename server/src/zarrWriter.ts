@@ -45,9 +45,26 @@ function chunkSizeFor(size: readonly [number, number, number]): number {
 // chunk shape is free to be optimized purely for slice reads: one chunk per
 // Z index, spanning the full X/Y extent, so reading any slice is always
 // exactly one chunk fetch with zero wasted bytes.
-function finestChunkShape(size: readonly [number, number, number]): [number, number, number] {
+//
+// That full-extent chunk is capped in bytes, though: a genuinely native-
+// resolution scan can be tens of thousands of pixels per side, which would
+// otherwise make every single chunk write a many-hundred-megabyte blosc
+// encode call -- risking exhausting the blosc WASM module's linear memory
+// (which only ever grows, never shrinks, across the many thousands of
+// sequential calls one conversion makes) well before any single call's own
+// size would trip a hard limit. Splitting into full-width row bands once a
+// full slice would exceed this keeps every encode call bounded, at the cost
+// of a handful of chunk fetches per slice instead of one -- only for scans
+// large enough to need it; a typical scan's full slice still fits under this
+// easily and keeps the single-chunk-per-Z behavior unchanged.
+const MAX_FINEST_CHUNK_BYTES = 64 * 1024 * 1024
+
+function finestChunkShape(size: readonly [number, number, number], bytesPerElement: number): [number, number, number] {
   const [sx, sy] = size
-  return [1, sy, sx] // [z, y, x], matching writeZarrArrayV2's chunkShape order
+  const bytesPerRow = sx * bytesPerElement
+  const maxRows = Math.max(1, Math.floor(MAX_FINEST_CHUNK_BYTES / bytesPerRow))
+  const chunkY = Math.min(sy, maxRows)
+  return [1, chunkY, sx] // [z, y, x], matching writeZarrArrayV2's chunkShape order
 }
 
 // Both itk-vtk-viewer and @itk-viewer/io's zarr readers unconditionally
@@ -253,7 +270,7 @@ export async function writeZarrArrayV2(
   // multiscales metadata (z, y, x) -- see writeMultiscaleGroup below.
   const shape = [sz, sy, sx]
   const chunkShape = isFinest
-    ? finestChunkShape(level.size)
+    ? finestChunkShape(level.size, ctor.BYTES_PER_ELEMENT)
     : (() => {
         const chunkSize = chunkSizeFor(level.size)
         return [Math.min(chunkSize, sz), Math.min(chunkSize, sy), Math.min(chunkSize, sx)] as [number, number, number]

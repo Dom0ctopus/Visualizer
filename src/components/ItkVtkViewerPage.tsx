@@ -215,7 +215,10 @@ export function ItkVtkViewerPage() {
                   <div className="library-name" title={record.name}>
                     {record.name}
                   </div>
-                  <div className="library-meta">{statusLabel(record)}</div>
+                  <div className="library-meta" title={record.zarrError}>
+                    {statusLabel(record)}
+                    {record.zarrStatus === 'failed' && record.zarrError ? `: ${record.zarrError}` : ''}
+                  </div>
                 </div>
                 <button
                   className="btn btn-secondary btn-small"
@@ -250,7 +253,10 @@ export function ItkVtkViewerPage() {
                     <div className="library-name" title={record.name}>
                       {record.name}
                     </div>
-                    <div className="library-meta">{statusLabel(record)}</div>
+                    <div className="library-meta" title={record.zarrError}>
+                      {statusLabel(record)}
+                      {record.zarrStatus === 'failed' && record.zarrError ? `: ${record.zarrError}` : ''}
+                    </div>
                   </div>
                   <button
                     className="btn btn-secondary btn-small"

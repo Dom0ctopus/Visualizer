@@ -44,6 +44,10 @@ function convertInBackground(id: string, nrrdPath: string): void {
       await convertNrrdToOmeZarr(nrrdPath, zarrPathFor(id))
       await updateRecord(id, { zarrStatus: 'ready' })
     } catch (e) {
+      // Only e.message is persisted to the record (surfaced in the UI), which
+      // is often too short to diagnose from -- the full error (stack trace
+      // included) goes to the server's own console so it's not lost.
+      console.error(`Volume conversion failed for ${id}:`, e)
       await updateRecord(id, { zarrStatus: 'failed', zarrError: e instanceof Error ? e.message : 'Conversion failed' })
     }
   })()
@@ -57,6 +61,7 @@ function convertSegmentationInBackground(id: string, nrrdPath: string): void {
       await convertSegmentationNrrdToOmeZarr(nrrdPath, segZarrPathFor(id))
       await updateRecord(id, { zarrStatus: 'ready' })
     } catch (e) {
+      console.error(`Segmentation conversion failed for ${id}:`, e)
       await updateRecord(id, { zarrStatus: 'failed', zarrError: e instanceof Error ? e.message : 'Conversion failed' })
     }
   })()
