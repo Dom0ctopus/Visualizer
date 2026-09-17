@@ -150,9 +150,18 @@ export function useItkVtkViewer() {
   // setLabelWeights/setLabelNames below drive from this app's own segment
   // tree state.
   const loadLabelImageUrl = useCallback(async (url: string) => {
-    if (!volumeViewerRef.current) return
+    const viewer = volumeViewerRef.current
+    if (!viewer) return
     const absoluteUrl = new URL(url, window.location.href)
-    await volumeViewerRef.current.setLabelImage(absoluteUrl)
+    await viewer.setLabelImage(absoluteUrl)
+    // setLabelImage reveals its own dedicated UI groups (label weight
+    // sliders, a second colormap editor, etc) regardless of the earlier
+    // setUICollapsed(true) call in loadZarrUrl -- confirmed directly: the
+    // full native toolbar/histogram/opacity-editor came back the moment a
+    // label image was attached, squeezing the slice pane next to it.
+    // Re-asserting the collapse after attaching it hides those newly-shown
+    // groups the same way the initial load already hides the rest.
+    viewer.setUICollapsed(true)
   }, [])
 
   const setLabelWeights = useCallback((weights: Map<number, number>) => {
