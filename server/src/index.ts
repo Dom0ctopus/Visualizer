@@ -163,10 +163,19 @@ app.delete('/api/files/:id', async (req, res) => {
     return
   }
   await rm(path.join(FILES_DIR, removed.storedFilename), { force: true })
+  // Removing a record whose background conversion is still writing chunk
+  // files into this same directory (convertInBackground/
+  // convertSegmentationInBackground) is a real race: fs.rm's recursive
+  // delete lists a directory's contents, removes each entry, then rmdir's
+  // it -- if a new chunk file lands in between, that last rmdir fails with
+  // ENOTEMPTY. maxRetries/retryDelay make it re-list and retry instead of
+  // failing outright, which is enough to ride out a conversion's last few
+  // writes.
+  const rmOptions = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 } as const
   if (removed.kind === 'volume') {
-    await rm(zarrPathFor(removed.id), { recursive: true, force: true })
+    await rm(zarrPathFor(removed.id), rmOptions)
   } else {
-    await rm(segZarrPathFor(removed.id), { recursive: true, force: true })
+    await rm(segZarrPathFor(removed.id), rmOptions)
   }
   res.json({ ok: true })
 })
