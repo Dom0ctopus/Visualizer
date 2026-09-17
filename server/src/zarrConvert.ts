@@ -9,14 +9,34 @@ import path from 'node:path'
 // reasonable screen size) without walking all the way down to a 1-voxel cube.
 const MIN_LEVEL_DIMENSION = 48
 const MAX_LEVELS = 6
-// Reading even a single 2D slice out of a chunked array touches every chunk
-// spanning the full width/height at that slice's chunk-depth position -- so
-// the byte cost of "just this one slice" scales with chunk depth times the
-// full in-plane extent, not with the 2D slice's own (tiny) size. Kept
-// smaller than a volume-only store might use so the itk-vtk-viewer engine's
-// slice view (which repeatedly re-requests a slab around the current slice
-// position as it's scrolled) stays cheap for large scans.
-const CHUNK_SIZE = 32
+
+// itk-vtk-viewer enforces a hard cap on how many voxels it will decode for
+// a single image update -- confirmed empirically via its own console error
+// ("Voxel count over max ... Max: 268435456", exactly 2^28), not a
+// documented option. Reading even one 2D slice out of a chunked zarr array
+// touches every chunk spanning the full in-plane extent at that slice's
+// chunk-depth position, so a "just one slice" read costs chunk_depth times
+// the *larger* in-plane axis product, not the slice's own tiny size. A
+// fixed chunk size that clears this for a small test scan silently stops
+// clearing it once a real scan's in-plane extent grows large enough --
+// confirmed directly: 32 (already reduced once from 64) was still ~2.2x
+// over cap for a real ~4300x4300 scan, which is what caused the slice
+// view to get stuck displaying a small edge region instead of paging
+// through the volume. Compute chunk depth per pyramid level from that
+// level's own in-plane extent instead, so it stays under the cap (with a
+// safety margin, since other work may share the same budget) regardless
+// of how large a future scan is.
+const VOXEL_COUNT_MAX = 268_435_456
+const VOXEL_COUNT_SAFETY_MARGIN = 0.5
+const MIN_CHUNK_SIZE = 4
+const MAX_CHUNK_SIZE = 64
+
+function chunkSizeFor(size: readonly [number, number, number]): number {
+  const [a, b] = [...size].sort((x, y) => y - x)
+  const largestInPlaneProduct = a * b
+  const budget = Math.floor((VOXEL_COUNT_MAX * VOXEL_COUNT_SAFETY_MARGIN) / largestInPlaneProduct)
+  return Math.max(MIN_CHUNK_SIZE, Math.min(MAX_CHUNK_SIZE, budget))
+}
 
 // Both itk-vtk-viewer and @itk-viewer/io's zarr readers unconditionally
 // blosc-decompress every chunk regardless of what a .zarray's own
@@ -179,10 +199,11 @@ function buildPyramid(base: Level, ctor: TypedArrayConstructor): Level[] {
 // chunks padded with the fill value (0) up to the full chunk shape.
 async function writeZarrArrayV2(dirPath: string, level: Level, dtype: string, ctor: TypedArrayConstructor): Promise<void> {
   const [sx, sy, sz] = level.size
+  const chunkSize = chunkSizeFor(level.size)
   // Zarr array shape/chunk order matches the axis order in the OME-NGFF
   // multiscales metadata (z, y, x) -- see convertNrrdToOmeZarr below.
   const shape = [sz, sy, sx]
-  const chunkShape = [Math.min(CHUNK_SIZE, sz), Math.min(CHUNK_SIZE, sy), Math.min(CHUNK_SIZE, sx)]
+  const chunkShape = [Math.min(chunkSize, sz), Math.min(chunkSize, sy), Math.min(chunkSize, sx)]
   await mkdir(dirPath, { recursive: true })
   await writeFile(
     path.join(dirPath, '.zarray'),
