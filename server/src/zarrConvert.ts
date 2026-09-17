@@ -13,29 +13,42 @@ const MAX_LEVELS = 6
 // itk-vtk-viewer enforces a hard cap on how many voxels it will decode for
 // a single image update -- confirmed empirically via its own console error
 // ("Voxel count over max ... Max: 268435456", exactly 2^28), not a
-// documented option. Reading even one 2D slice out of a chunked zarr array
-// touches every chunk spanning the full in-plane extent at that slice's
-// chunk-depth position, so a "just one slice" read costs chunk_depth times
-// the *larger* in-plane axis product, not the slice's own tiny size. A
-// fixed chunk size that clears this for a small test scan silently stops
-// clearing it once a real scan's in-plane extent grows large enough --
-// confirmed directly: 32 (already reduced once from 64) was still ~2.2x
-// over cap for a real ~4300x4300 scan, which is what caused the slice
-// view to get stuck displaying a small edge region instead of paging
-// through the volume. Compute chunk depth per pyramid level from that
-// level's own in-plane extent instead, so it stays under the cap (with a
-// safety margin, since other work may share the same budget) regardless
-// of how large a future scan is.
-const VOXEL_COUNT_MAX = 268_435_456
-const VOXEL_COUNT_SAFETY_MARGIN = 0.5
+// documented option. This was originally (mis-)understood to be sensitive to
+// chunk size -- it isn't: rigorous testing (changing chunk size while
+// holding everything else fixed) showed the exact same "Requested" voxel
+// count regardless of chunk size, proving the cap is on a pyramid *level*'s
+// total voxel count, not on how that level happens to be chunked. It governs
+// which level the Volume pane can load, so cube-ish chunk sizing here is
+// purely about making a whole level's worth of chunks cheap to fetch
+// together for that pane -- it has no bearing on the cap itself. Only
+// coarser (non-finest) levels use this: the finest level is chunked for
+// slice reads instead (see finestChunkShape below), since the Volume pane
+// never loads scale0 on real-world scan sizes anyway.
 const MIN_CHUNK_SIZE = 4
 const MAX_CHUNK_SIZE = 64
+const CUBE_CHUNK_VOXEL_BUDGET = 268_435_456 * 0.5
 
 function chunkSizeFor(size: readonly [number, number, number]): number {
   const [a, b] = [...size].sort((x, y) => y - x)
   const largestInPlaneProduct = a * b
-  const budget = Math.floor((VOXEL_COUNT_MAX * VOXEL_COUNT_SAFETY_MARGIN) / largestInPlaneProduct)
+  const budget = Math.floor(CUBE_CHUNK_VOXEL_BUDGET / largestInPlaneProduct)
   return Math.max(MIN_CHUNK_SIZE, Math.min(MAX_CHUNK_SIZE, budget))
+}
+
+// The finest pyramid level is the only one the custom slice viewer reads
+// (src/lib/zarrClient.ts's readZSlice, one Z-slice at a time) -- everything
+// coarser is only ever read by the itk-vtk-viewer Volume pane. Chunking it
+// in small cubes (like the coarser levels) meant a single slice read had to
+// fetch+blosc-decode every small X/Y tile spanning the slice's full width
+// and height -- dozens of small requests for one slice, which is what made
+// scrolling slow. Since chunk size has no bearing on the Volume pane's
+// voxel cap (see above) and this level is never read by that pane, its
+// chunk shape is free to be optimized purely for slice reads: one chunk per
+// Z index, spanning the full X/Y extent, so reading any slice is always
+// exactly one chunk fetch with zero wasted bytes.
+function finestChunkShape(size: readonly [number, number, number]): [number, number, number] {
+  const [sx, sy] = size
+  return [1, sy, sx] // [z, y, x], matching writeZarrArrayV2's chunkShape order
 }
 
 // Both itk-vtk-viewer and @itk-viewer/io's zarr readers unconditionally
@@ -197,13 +210,23 @@ function buildPyramid(base: Level, ctor: TypedArrayConstructor): Level[] {
 // Zarr v2 requires every stored chunk file to hold exactly `chunks`-shaped
 // data, so a level whose dimensions don't divide evenly needs its edge
 // chunks padded with the fill value (0) up to the full chunk shape.
-async function writeZarrArrayV2(dirPath: string, level: Level, dtype: string, ctor: TypedArrayConstructor): Promise<void> {
+async function writeZarrArrayV2(
+  dirPath: string,
+  level: Level,
+  dtype: string,
+  ctor: TypedArrayConstructor,
+  isFinest: boolean
+): Promise<void> {
   const [sx, sy, sz] = level.size
-  const chunkSize = chunkSizeFor(level.size)
   // Zarr array shape/chunk order matches the axis order in the OME-NGFF
   // multiscales metadata (z, y, x) -- see convertNrrdToOmeZarr below.
   const shape = [sz, sy, sx]
-  const chunkShape = [Math.min(chunkSize, sz), Math.min(chunkSize, sy), Math.min(chunkSize, sx)]
+  const chunkShape = isFinest
+    ? finestChunkShape(level.size)
+    : (() => {
+        const chunkSize = chunkSizeFor(level.size)
+        return [Math.min(chunkSize, sz), Math.min(chunkSize, sy), Math.min(chunkSize, sx)] as [number, number, number]
+      })()
   await mkdir(dirPath, { recursive: true })
   await writeFile(
     path.join(dirPath, '.zarray'),
@@ -312,6 +335,6 @@ export async function convertNrrdToOmeZarr(nrrdPath: string, outputZarrPath: str
   await writeFile(path.join(outputZarrPath, '.zattrs'), JSON.stringify(zattrs))
 
   for (let i = 0; i < levels.length; i++) {
-    await writeZarrArrayV2(path.join(outputZarrPath, `scale${i}`), levels[i], dtype, ctor)
+    await writeZarrArrayV2(path.join(outputZarrPath, `scale${i}`), levels[i], dtype, ctor, i === 0)
   }
 }

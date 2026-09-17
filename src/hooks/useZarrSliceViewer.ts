@@ -87,6 +87,14 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
         if (requestIdRef.current !== requestId) return
         setSlice(result)
         setError(null)
+        // Now that each Z index is its own chunk (see zarrConvert.ts), the
+        // adjacent slices a user is about to scroll to are cheap to warm
+        // into zarrClient's chunk cache ahead of time -- fire-and-forget,
+        // errors here don't matter since the same read is retried for real
+        // (with its own error handling) if the user actually steps there.
+        const maxZ = volumeInfo.size[0] - 1
+        if (zIndex - 1 >= 0) void readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex - 1)
+        if (zIndex + 1 <= maxZ) void readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex + 1)
       })
       .catch((e) => {
         if (requestIdRef.current !== requestId) return
