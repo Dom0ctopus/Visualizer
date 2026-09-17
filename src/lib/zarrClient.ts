@@ -79,13 +79,45 @@ function fetchZarray(levelUrl: string): Promise<ZarrArrayMeta> {
 // Keyed by chunk URL, so scrolling within the same chunk (the common case --
 // a chunk spans many Z slices at once) never re-fetches; crossing into a new
 // chunk only fetches the handful of chunk files that cover it.
+//
+// Bounded by total decoded bytes (not entry count): at native resolution a
+// single finest-level chunk is now a full Z-slice (see server/src/zarrWriter.ts's
+// finestChunkShape), potentially tens of MB each, and scrolling through a
+// long stack -- especially with prefetch (useZarrSliceViewer.ts) and a
+// segmentation overlay's own separate chunks (useSegmentationOverlays.ts)
+// both adding to this same cache -- would otherwise grow it without bound
+// for the lifetime of the page. Evicts least-recently-used entries (a Map
+// iterates in insertion order, and re-set-ing an accessed entry moves it to
+// the end) once the budget is exceeded.
+const CHUNK_CACHE_BYTE_BUDGET = 512 * 1024 * 1024
 const chunkCache = new Map<string, Promise<TypedArray>>()
+let chunkCacheBytes = 0
+const chunkByteSizes = new Map<string, number>()
+
+function touchChunkCache(key: string): void {
+  const p = chunkCache.get(key)
+  if (!p) return
+  chunkCache.delete(key)
+  chunkCache.set(key, p)
+}
+
+function evictChunkCacheIfNeeded(): void {
+  for (const key of chunkCache.keys()) {
+    if (chunkCacheBytes <= CHUNK_CACHE_BYTE_BUDGET) break
+    chunkCache.delete(key)
+    chunkCacheBytes -= chunkByteSizes.get(key) ?? 0
+    chunkByteSizes.delete(key)
+  }
+}
+
 function fetchChunk(levelUrl: string, bz: number, by: number, bx: number, meta: ZarrArrayMeta): Promise<TypedArray> {
   const key = `${levelUrl}/${bz}.${by}.${bx}`
-  let p = chunkCache.get(key)
-  if (p) return p
+  if (chunkCache.has(key)) {
+    touchChunkCache(key)
+    return chunkCache.get(key)!
+  }
   const ctor = dtypeCtor(meta.dtype)
-  p = (async () => {
+  const p = (async () => {
     const res = await fetch(key)
     if (!res.ok) throw new Error(`Failed to fetch chunk ${key} (${res.status})`)
     const compressed = new Uint8Array(await res.arrayBuffer())
@@ -96,6 +128,9 @@ function fetchChunk(levelUrl: string, bz: number, by: number, bx: number, meta: 
     } else {
       raw = compressed
     }
+    chunkByteSizes.set(key, raw.byteLength)
+    chunkCacheBytes += raw.byteLength
+    evictChunkCacheIfNeeded()
     return new ctor(raw.buffer, raw.byteOffset, raw.byteLength / ctor.BYTES_PER_ELEMENT)
   })()
   chunkCache.set(key, p)

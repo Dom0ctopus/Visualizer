@@ -89,7 +89,7 @@ export function ItkVtkViewerPage() {
   } = useZarrSliceViewer(activeZarrUrl)
 
   const zarrSeg = useZarrSegmentations()
-  const { overlays, error: overlayError } = useSegmentationOverlays(zarrSeg.segmentations, zIndex)
+  const { overlays, error: overlayError } = useSegmentationOverlays(zarrSeg.segmentations, zIndex, volumeInfo)
 
   useEffect(() => {
     let cancelled = false

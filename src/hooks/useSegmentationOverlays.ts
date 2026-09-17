@@ -19,19 +19,39 @@ export interface SliceOverlay {
  *
  * A segmentation's label-map grid is assumed to exactly match its source
  * volume's grid (true for a 3D Slicer segmentation exported against the
- * loaded scan, which is the only way this app's upload flow produces one) --
- * an overlay whose width/height don't match the base slice is dropped
- * rather than resampled, since that mismatch would mean the files don't
- * actually describe the same volume.
+ * loaded scan, which is the only way this app's upload flow produces one).
+ * `baseVolumeInfo` (the loaded volume's own VolumeInfo, from
+ * useZarrSliceViewer) is compared against each layer's own size up front so
+ * a genuine mismatch -- e.g. a segmentation uploaded that doesn't actually
+ * correspond to the loaded volume -- surfaces as a clear, persistent error
+ * instead of the overlay just silently never appearing on every frame with
+ * nothing to explain why.
  */
-export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[], zIndex: number) {
+// A fast scroll fires many zIndex changes in quick succession; without a
+// settle delay, every one of them used to kick off a full-resolution
+// decode chain immediately -- and unlike the requestId guard below (which
+// only discards an already-finished result), the decode work itself still
+// ran to completion for every discarded frame. On a native-resolution
+// scan that's a lot of wasted large blosc decodes piling up, which is
+// exactly what made scrolling feel like it "locked up" once a
+// segmentation was loaded. Only the zIndex the user actually settles on
+// now triggers a fetch.
+const SETTLE_DELAY_MS = 80
+
+export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[], zIndex: number, baseVolumeInfo: VolumeInfo | null) {
   const [overlays, setOverlays] = useState<SliceOverlay[]>([])
   const [error, setError] = useState<string | null>(null)
   const volumeInfoCacheRef = useRef(new Map<string, Promise<VolumeInfo>>())
   const requestIdRef = useRef(0)
+  const settleTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
-    if (segmentations.length === 0) {
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current)
+      settleTimerRef.current = null
+    }
+
+    if (segmentations.length === 0 || !baseVolumeInfo) {
       setOverlays([])
       setError(null)
       return
@@ -59,6 +79,12 @@ export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[],
 
           try {
             const info = await infoPromise
+            const [, baseY, baseX] = baseVolumeInfo!.size
+            const [, segY, segX] = info.size
+            if (segY !== baseY || segX !== baseX) {
+              lastError = `Segmentation "${seg.name}" (layer ${layer}) is ${segX}x${segY} in X/Y, but the loaded volume is ${baseX}x${baseY} -- they don't appear to be the same scan, so this overlay can't be aligned to it.`
+              continue
+            }
             if (zIndex < 0 || zIndex >= info.size[0]) continue
             const slice = await readZSlice(layerUrl, info.finestLevelPath, zIndex)
             const { lut } = buildLabelLut(segsInLayer)
@@ -75,11 +101,19 @@ export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[],
       setError(lastError)
     }
 
-    void run()
+    settleTimerRef.current = window.setTimeout(() => {
+      settleTimerRef.current = null
+      void run()
+    }, SETTLE_DELAY_MS)
+
     return () => {
       cancelled = true
+      if (settleTimerRef.current !== null) {
+        window.clearTimeout(settleTimerRef.current)
+        settleTimerRef.current = null
+      }
     }
-  }, [segmentations, zIndex])
+  }, [segmentations, zIndex, baseVolumeInfo])
 
   return { overlays, error }
 }
