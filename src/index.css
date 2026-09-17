@@ -530,6 +530,28 @@ input[type='range'] {
   position: relative;
 }
 
+.zarr-slice-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: #000;
+  cursor: ns-resize;
+}
+
+.zarr-slice-controls {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-1);
+}
+
+.zarr-slice-controls .window-slider {
+  flex: 1;
+}
+
 .error-banner {
   background: var(--danger-bg);
   border: 1px solid var(--danger);
