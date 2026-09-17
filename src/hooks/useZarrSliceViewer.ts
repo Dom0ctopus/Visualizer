@@ -101,6 +101,20 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     // large blosc decodes piling up, which is what made scrolling feel
     // like it locked up. Only the zIndex actually settled on now triggers
     // a fetch.
+    //
+    // This used to also fire-and-forget prefetch reads for the two
+    // neighboring Z indices once the main one resolved. Removed after
+    // [zarr-perf] instrumentation showed individual chunk fetch times for
+    // identical file sizes varying from ~5ms to 1.5+ seconds in one real
+    // session -- a signature of a cloud-sync service (iCloud Drive/
+    // Dropbox/OneDrive "optimize storage") evicting and re-downloading a
+    // scan's thousands of small chunk files on demand, not anything in
+    // this code. Under that condition, prefetching adjacent slices just
+    // adds more requests competing for the same intermittently-slow I/O
+    // that the visible, user-waited-on fetch needs -- pure downside, no
+    // upside, when fetch latency (not decode or render) is the
+    // bottleneck. It's cheap to bring back if a future profile shows
+    // fetches are consistently fast and prefetch would actually help.
     const requestId = ++requestIdRef.current
     settleTimerRef.current = window.setTimeout(() => {
       settleTimerRef.current = null
@@ -110,14 +124,6 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
           if (requestIdRef.current !== requestId) return
           setSlice(result)
           setError(null)
-          // Now that each Z index is its own chunk (see zarrConvert.ts), the
-          // adjacent slices a user is about to scroll to are cheap to warm
-          // into zarrClient's chunk cache ahead of time -- fire-and-forget,
-          // errors here don't matter since the same read is retried for real
-          // (with its own error handling) if the user actually steps there.
-          const maxZ = volumeInfo.size[0] - 1
-          if (zIndex - 1 >= 0) void readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex - 1)
-          if (zIndex + 1 <= maxZ) void readZSlice(zarrUrl, volumeInfo.finestLevelPath, zIndex + 1)
         })
         .catch((e) => {
           if (requestIdRef.current !== requestId) return
