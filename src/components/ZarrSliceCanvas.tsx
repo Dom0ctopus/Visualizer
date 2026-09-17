@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
+import type { SliceOverlay } from '../hooks/useSegmentationOverlays'
 import type { SliceResult } from '../lib/zarrClient'
 
 interface ZarrSliceCanvasProps {
@@ -6,6 +7,12 @@ interface ZarrSliceCanvasProps {
   windowMin: number
   windowMax: number
   onWheelStep: (delta: number) => void
+  /** Segmentation label-map overlays to alpha-composite on top of the base
+   *  grayscale slice, in order (later entries painted over earlier ones) --
+   *  see useSegmentationOverlays.ts. Each overlay's own array must be
+   *  pixel-for-pixel the same size as `slice`; a mismatched one is skipped
+   *  since resampling isn't attempted here (see that hook's own comment). */
+  overlays?: SliceOverlay[]
 }
 
 // Integer typed arrays only ever take one of a small, known set of raw
@@ -40,7 +47,7 @@ function buildLut(size: number, offset: number, windowMin: number, windowMax: nu
  * entirely -- see that hook's own comment for why) onto a plain 2D canvas,
  * applying window/level ourselves since there's no library UI doing it here.
  */
-export function ZarrSliceCanvas({ slice, windowMin, windowMax, onWheelStep }: ZarrSliceCanvasProps) {
+export function ZarrSliceCanvas({ slice, windowMin, windowMax, onWheelStep, overlays }: ZarrSliceCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   // Reused across renders so scrolling through many slices at the same
   // dimensions doesn't allocate a fresh backing buffer every frame.
@@ -69,30 +76,42 @@ export function ZarrSliceCanvas({ slice, windowMin, windowMax, onWheelStep }: Za
       imageDataRef.current = imageData
     }
     const out = imageData.data
-    if (lut) {
-      const offset = lutRange!.offset
-      for (let i = 0; i < data.length; i++) {
-        const gray = lut[data[i] + offset]
-        const o = i * 4
-        out[o] = gray
-        out[o + 1] = gray
-        out[o + 2] = gray
-        out[o + 3] = 255
-      }
-    } else {
-      const range = Math.max(1e-6, windowMax - windowMin)
-      for (let i = 0; i < data.length; i++) {
+    // Only overlays that describe the exact same pixel grid as the base
+    // slice can be indexed in lockstep with it below -- see this
+    // component's own prop comment for why a mismatched one is dropped
+    // rather than resampled.
+    const activeOverlays = (overlays ?? []).filter((o) => o.width === width && o.height === height)
+
+    for (let i = 0; i < data.length; i++) {
+      let gray: number
+      if (lut) {
+        gray = lut[data[i] + lutRange!.offset]
+      } else {
+        const range = Math.max(1e-6, windowMax - windowMin)
         const t = Math.min(1, Math.max(0, (data[i] - windowMin) / range))
-        const gray = Math.round(t * 255)
-        const o = i * 4
-        out[o] = gray
-        out[o + 1] = gray
-        out[o + 2] = gray
-        out[o + 3] = 255
+        gray = Math.round(t * 255)
       }
+      let r = gray
+      let g = gray
+      let b = gray
+      for (const overlay of activeOverlays) {
+        const label = overlay.data[i]
+        const lutOffset = label * 4
+        const alphaByte = overlay.lut[lutOffset + 3]
+        if (alphaByte === 0) continue
+        const alpha = alphaByte / 255
+        r = overlay.lut[lutOffset] * alpha + r * (1 - alpha)
+        g = overlay.lut[lutOffset + 1] * alpha + g * (1 - alpha)
+        b = overlay.lut[lutOffset + 2] * alpha + b * (1 - alpha)
+      }
+      const o = i * 4
+      out[o] = r
+      out[o + 1] = g
+      out[o + 2] = b
+      out[o + 3] = 255
     }
     ctx.putImageData(imageData, 0, 0)
-  }, [slice, windowMin, windowMax, lut, lutRange])
+  }, [slice, windowMin, windowMax, lut, lutRange, overlays])
 
   // React's synthetic wheel handler is passive by default (a React 17+
   // change for scroll-performance), so calling preventDefault() from a JSX

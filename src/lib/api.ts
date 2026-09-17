@@ -42,3 +42,10 @@ export function fileUrl(id: string): string {
 export function zarrUrl(id: string): string {
   return `/api/zarr/${id}.ome.zarr`
 }
+
+/** Root of a segmentation's converted per-layer OME-Zarr label-map store --
+ *  each layer is a full multiscale group at `${segZarrUrl(id)}/layer${n}`,
+ *  only valid once the record's zarrStatus is 'ready'. */
+export function segZarrUrl(id: string): string {
+  return `/api/zarr/${id}.seg.ome.zarr`
+}

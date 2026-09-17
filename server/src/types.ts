@@ -32,9 +32,14 @@ export interface VolumeRecord extends RecordCommon {
 
 /** What's persisted to disk for a segmentation: no parsed metadata, so
  *  improvements to the parser/grouping logic apply to existing uploads
- *  without needing a re-upload. */
+ *  without needing a re-upload. zarrStatus mirrors VolumeRecord's -- see
+ *  segmentationZarrConvert.ts for the background NRRD -> OME-Zarr label-map
+ *  conversion this tracks, for the itk-vtk-viewer engine's segmentation
+ *  overlays. */
 export interface StoredSegmentationRecord extends RecordCommon {
   kind: 'segmentation'
+  zarrStatus?: ZarrStatus
+  zarrError?: string
 }
 
 export type StoredRecord = VolumeRecord | StoredSegmentationRecord

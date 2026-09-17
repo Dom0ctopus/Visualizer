@@ -1,4 +1,8 @@
-import { open } from 'node:fs/promises'
+import { gunzip } from 'node:zlib'
+import { open, readFile } from 'node:fs/promises'
+import { promisify } from 'node:util'
+
+const gunzipAsync = promisify(gunzip)
 
 export interface ParsedNrrdHeader {
   /** Standard "key: value" field descriptors, lowercased keys. */
@@ -61,4 +65,43 @@ export function parseNrrdHeaderText(text: string): ParsedNrrdHeader {
   }
 
   return { fields, keyValuePairs }
+}
+
+/**
+ * Reads a whole (single-file, attached-data) NRRD's header and raw voxel
+ * payload -- for the segmentation converter, which needs the actual voxel
+ * data (to slice out each layer of a multi-layer label map itself), unlike
+ * readNrrdHeader above which only needs the first ~1MB to find field/segment
+ * metadata. Regular intensity volumes go through itk-wasm's own reader
+ * instead (see zarrConvert.ts) for its broader format/edge-case handling;
+ * this direct reader exists only because 3D Slicer's multi-layer label map
+ * convention (extra "list"-kind axes holding independent 3D layers) isn't
+ * something itk-wasm's generic NRRD reader is exercised against here, while
+ * this file's own field parsing already has everything needed to read it
+ * directly and unambiguously.
+ */
+export async function readNrrdHeaderAndData(filePath: string): Promise<{ header: ParsedNrrdHeader; data: Buffer }> {
+  const buf = await readFile(filePath)
+  let headerEnd = -1
+  for (let i = 1; i < buf.length; i++) {
+    if (buf[i - 1] === 10 && buf[i] === 10) {
+      headerEnd = i - 1
+      break
+    }
+  }
+  if (headerEnd < 0) throw new Error('Could not find end of NRRD header (no blank line separator)')
+  const text = buf.subarray(0, headerEnd).toString('utf8')
+  const header = parseNrrdHeaderText(text)
+  if (header.fields['data file']) {
+    throw new Error('Detached NRRD data files (.nhdr) are not supported for segmentations')
+  }
+  const rawPayload = buf.subarray(headerEnd + 2)
+  const encoding = (header.fields['encoding'] ?? 'raw').toLowerCase()
+  if (encoding.includes('raw')) {
+    return { header, data: rawPayload }
+  }
+  if (encoding.includes('gz')) {
+    return { header, data: await gunzipAsync(rawPayload) }
+  }
+  throw new Error(`Unsupported NRRD encoding for segmentation: ${encoding}`)
 }

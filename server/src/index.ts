@@ -4,6 +4,7 @@ import multer from 'multer'
 import { rm } from 'node:fs/promises'
 import path from 'node:path'
 import { readNrrdHeader } from './nrrdHeader.js'
+import { convertSegmentationNrrdToOmeZarr } from './segmentationZarrConvert.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
 import { FILES_DIR, ZARR_DIR, addRecord, getRecord, initStore, listRecords, newId, removeRecord, updateRecord } from './store.js'
 import type { LibraryRecord, SegmentationRecord, StoredRecord, StoredSegmentationRecord, VolumeRecord } from './types.js'
@@ -28,6 +29,10 @@ function zarrPathFor(id: string): string {
   return path.join(ZARR_DIR, `${id}.ome.zarr`)
 }
 
+function segZarrPathFor(id: string): string {
+  return path.join(ZARR_DIR, `${id}.seg.ome.zarr`)
+}
+
 // Runs in the background after a volume upload responds -- conversion of a
 // large scan can take a while, and the point of doing this automatically is
 // to keep the upload itself fast rather than making the user wait through it.
@@ -37,6 +42,19 @@ function convertInBackground(id: string, nrrdPath: string): void {
   void (async () => {
     try {
       await convertNrrdToOmeZarr(nrrdPath, zarrPathFor(id))
+      await updateRecord(id, { zarrStatus: 'ready' })
+    } catch (e) {
+      await updateRecord(id, { zarrStatus: 'failed', zarrError: e instanceof Error ? e.message : 'Conversion failed' })
+    }
+  })()
+}
+
+// Same fire-and-forget pattern as convertInBackground, for a segmentation's
+// per-layer label-map conversion (segmentationZarrConvert.ts).
+function convertSegmentationInBackground(id: string, nrrdPath: string): void {
+  void (async () => {
+    try {
+      await convertSegmentationNrrdToOmeZarr(nrrdPath, segZarrPathFor(id))
       await updateRecord(id, { zarrStatus: 'ready' })
     } catch (e) {
       await updateRecord(id, { zarrStatus: 'failed', zarrError: e instanceof Error ? e.message : 'Conversion failed' })
@@ -113,7 +131,8 @@ app.post('/api/segmentations', upload.single('file'), async (req, res) => {
     name: file.originalname,
     storedFilename: file.filename,
     sizeBytes: file.size,
-    uploadedAt: new Date().toISOString()
+    uploadedAt: new Date().toISOString(),
+    zarrStatus: 'pending'
   }
   try {
     const header = await readNrrdHeader(filePath)
@@ -125,6 +144,7 @@ app.post('/api/segmentations', upload.single('file'), async (req, res) => {
     }
     await addRecord(stored)
     res.json(await enrichSegmentationRecord(stored))
+    convertSegmentationInBackground(stored.id, filePath)
   } catch (e) {
     await rm(filePath, { force: true })
     res.status(422).json({ error: e instanceof Error ? e.message : 'Failed to parse segmentation' })
@@ -140,6 +160,8 @@ app.delete('/api/files/:id', async (req, res) => {
   await rm(path.join(FILES_DIR, removed.storedFilename), { force: true })
   if (removed.kind === 'volume') {
     await rm(zarrPathFor(removed.id), { recursive: true, force: true })
+  } else {
+    await rm(segZarrPathFor(removed.id), { recursive: true, force: true })
   }
   res.json({ ok: true })
 })

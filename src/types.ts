@@ -34,6 +34,11 @@ export interface SegmentationRecord extends LibraryRecordBase {
   dimension: number
   layerCount: number
   systems: SystemInfo[]
+  /** State of the background NRRD -> per-layer OME-Zarr label-map
+   *  conversion the server runs on upload, for the itk-vtk-viewer engine --
+   *  see the server's segmentationZarrConvert.ts. */
+  zarrStatus?: ZarrStatus
+  zarrError?: string
 }
 
 export type LibraryRecord = VolumeRecord | SegmentationRecord
@@ -64,6 +69,31 @@ export function groupBySystem(segments: SegmentState[]): SystemGroup[] {
     map.set(seg.system, list)
   }
   return [...map.entries()].map(([name, segs]) => ({ name, segments: segs }))
+}
+
+export function groupByLayer(segments: SegmentState[]): Map<number, SegmentState[]> {
+  const map = new Map<number, SegmentState[]>()
+  for (const seg of segments) {
+    const list = map.get(seg.layer) ?? []
+    list.push(seg)
+    map.set(seg.layer, list)
+  }
+  return map
+}
+
+/**
+ * The itk-vtk-viewer engine's own loaded-segmentation state -- deliberately
+ * lighter than niivue's LoadedSegmentation (no per-bucket niivue volume ids,
+ * since this engine's rendering isn't niivue-based): the slice pane
+ * composites segment colors directly from `segments` itself (see
+ * useSegmentationOverlays.ts), and the 3D pane drives itk-vtk-viewer's own
+ * built-in labelImage overlay from the same state (see useItkVtkViewer.ts).
+ */
+export interface ZarrLoadedSegmentation {
+  recordId: string
+  name: string
+  layerCount: number
+  segments: SegmentState[]
 }
 
 export interface LoadedSegmentation {

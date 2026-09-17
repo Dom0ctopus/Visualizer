@@ -1,9 +1,9 @@
-import type { LoadedSegmentation } from '../types'
+import type { SegmentTreeItem } from './SegmentTree'
 
 interface SearchBarProps {
   value: string
   onChange: (value: string) => void
-  segmentations: LoadedSegmentation[]
+  segmentations: SegmentTreeItem[]
   onSegmentVisible: (recordId: string, key: string, visible: boolean) => void
 }
 

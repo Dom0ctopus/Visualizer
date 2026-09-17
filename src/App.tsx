@@ -76,7 +76,7 @@ function App() {
                 setEngine('itk-vtk-viewer')
                 setItkEngineOpened(true)
               }}
-              title="Experimental second engine on vtk.js -- less downsampling, no segmentation/TF support yet"
+              title="Experimental second engine on vtk.js -- less downsampling, segmentation overlays supported, no custom transfer function yet"
             >
               itk-vtk-viewer (experimental)
             </button>

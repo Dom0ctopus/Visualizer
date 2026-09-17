@@ -9,6 +9,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 interface ItkVtkViewerInstance {
   setViewMode: (mode: 'ZPlane' | 'YPlane' | 'XPlane' | 'Volume') => void
   setUICollapsed: (collapsed: boolean) => void
+  // Label-image (segmentation) overlay API, confirmed by reading
+  // itk-vtk-viewer's own bundled source (its TypeScript types don't cover
+  // this) -- see useItkVtkViewer's own loadLabelImageUrl/setLabelWeights
+  // comments for what each one actually does and the real limits found
+  // there (single label image, preset-only colors, no arbitrary per-label
+  // RGB).
+  setLabelImage: (image: URL) => Promise<void>
+  setLabelImageWeights: (weights: Map<number, number>) => void
+  setLabelImageLabelNames: (names: Map<number, string>) => void
   delete: () => void
 }
 
@@ -123,12 +132,46 @@ export function useItkVtkViewer() {
     [clearViewer]
   )
 
+  // Loads one segmentation layer as itk-vtk-viewer's built-in labelImage
+  // overlay on the currently-loaded volume. Real limits found by reading
+  // the library's own source (its public types don't document any of
+  // this): a viewer instance holds exactly one label image, so only one
+  // segmentation layer can show here at a time -- see
+  // ItkVtkViewerPage.tsx's own comment for which one it picks. Colors also
+  // can't be set per-label through any public method: setLabelImageLookupTable
+  // only accepts the *name* of a built-in categorical palette (e.g.
+  // "glasbey", its own default), assigned by rank order of each unique
+  // label value present in the data -- there is no arbitrary-RGB path, so
+  // colors here will not match the segment's own 3D-Slicer-defined color
+  // the way the slice pane's own compositing does (see
+  // useSegmentationOverlays.ts). What *is* fully controllable per label is
+  // visibility/opacity (setLabelImageWeights, a Map<labelValue, 0-1>) and
+  // display names (setLabelImageLabelNames), which is what
+  // setLabelWeights/setLabelNames below drive from this app's own segment
+  // tree state.
+  const loadLabelImageUrl = useCallback(async (url: string) => {
+    if (!volumeViewerRef.current) return
+    const absoluteUrl = new URL(url, window.location.href)
+    await volumeViewerRef.current.setLabelImage(absoluteUrl)
+  }, [])
+
+  const setLabelWeights = useCallback((weights: Map<number, number>) => {
+    volumeViewerRef.current?.setLabelImageWeights(weights)
+  }, [])
+
+  const setLabelNames = useCallback((names: Map<number, string>) => {
+    volumeViewerRef.current?.setLabelImageLabelNames(names)
+  }, [])
+
   return {
     volumeContainerRef,
     scriptReady,
     busy,
     error,
     loadedName,
-    loadZarrUrl
+    loadZarrUrl,
+    loadLabelImageUrl,
+    setLabelWeights,
+    setLabelNames
   }
 }
