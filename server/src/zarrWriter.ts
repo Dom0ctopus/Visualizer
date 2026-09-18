@@ -34,17 +34,29 @@ function chunkSizeFor(size: readonly [number, number, number]): number {
   return Math.max(MIN_CHUNK_SIZE, Math.min(MAX_CHUNK_SIZE, budget))
 }
 
-// The finest pyramid level is the only one the custom slice viewer reads
-// (src/lib/zarrClient.ts's readZSlice, one Z-slice at a time) -- everything
-// coarser is only ever read by the itk-vtk-viewer Volume pane. Chunking it
-// in small cubes (like the coarser levels) meant a single slice read had to
-// fetch+blosc-decode every small X/Y tile spanning the slice's full width
-// and height -- dozens of small requests for one slice, which is what made
-// scrolling slow. Since chunk size has no bearing on the Volume pane's
-// voxel cap (see above) and this level is never read by that pane, its
-// chunk shape is free to be optimized purely for slice reads: one chunk per
-// Z index, spanning the full X/Y extent, so reading any slice is always
-// exactly one chunk fetch with zero wasted bytes.
+// The custom slice viewer (src/lib/zarrClient.ts's readZSlice) reads from
+// pyramid level 1 (2x downsampled in each axis), not level 0 -- a
+// deliberate tradeoff: true native-resolution per-slice reads had a real
+// per-step latency floor that turned out to persist even after ruling out
+// every specific cause found (chunk layout, cache growth, cloud-sync
+// storage, Node's I/O thread pool size), so level 1 trades a modest,
+// accepted loss of resolution in the 2D pane for a 4x-in-plane-smaller (8x
+// total-voxel) slice, while the itk-vtk-viewer Volume pane keeps auto-
+// selecting whichever coarser level it needs regardless. See
+// zarrClient.ts's own SLICE_LEVEL_INDEX for the client-side half of this.
+//
+// Both level 0 and level 1 get this chunking (one chunk per Z, spanning
+// the full X/Y extent) rather than just whichever one the slice viewer
+// currently reads, so a future change back to level 0 doesn't silently
+// reintroduce the many-small-chunks-per-slice problem this fixed in the
+// first place: chunking small cubes (like the coarser levels still use)
+// meant a single slice read had to fetch+blosc-decode every small X/Y tile
+// spanning the slice's full width and height -- dozens of small requests
+// for one slice. Since chunk size has no bearing on the Volume pane's
+// voxel cap (see above) and neither level is read by that pane, both are
+// free to be optimized purely for slice reads instead: one chunk per Z
+// index, so reading any slice is always exactly one chunk fetch with zero
+// wasted bytes.
 //
 // That full-extent chunk is capped in bytes, though: a genuinely native-
 // resolution scan can be tens of thousands of pixels per side, which would
@@ -57,12 +69,18 @@ function chunkSizeFor(size: readonly [number, number, number]): number {
 // of a handful of chunk fetches per slice instead of one -- only for scans
 // large enough to need it; a typical scan's full slice still fits under this
 // easily and keeps the single-chunk-per-Z behavior unchanged.
-const MAX_FINEST_CHUNK_BYTES = 64 * 1024 * 1024
+const MAX_SLICE_CHUNK_BYTES = 64 * 1024 * 1024
 
-function finestChunkShape(size: readonly [number, number, number], bytesPerElement: number): [number, number, number] {
+// How many of the finest pyramid levels (0-indexed, counting from the
+// finest) get the slice-optimized chunking above -- must be at least
+// SLICE_LEVEL_INDEX + 1 from zarrClient.ts (currently 1, i.e. levels 0
+// and 1 both need it).
+const SLICE_OPTIMIZED_LEVEL_COUNT = 2
+
+function sliceOptimizedChunkShape(size: readonly [number, number, number], bytesPerElement: number): [number, number, number] {
   const [sx, sy] = size
   const bytesPerRow = sx * bytesPerElement
-  const maxRows = Math.max(1, Math.floor(MAX_FINEST_CHUNK_BYTES / bytesPerRow))
+  const maxRows = Math.max(1, Math.floor(MAX_SLICE_CHUNK_BYTES / bytesPerRow))
   const chunkY = Math.min(sy, maxRows)
   return [1, chunkY, sx] // [z, y, x], matching writeZarrArrayV2's chunkShape order
 }
@@ -263,14 +281,14 @@ export async function writeZarrArrayV2(
   level: Level,
   dtype: string,
   ctor: TypedArrayConstructor,
-  isFinest: boolean
+  sliceOptimized: boolean
 ): Promise<void> {
   const [sx, sy, sz] = level.size
   // Zarr array shape/chunk order matches the axis order in the OME-NGFF
   // multiscales metadata (z, y, x) -- see writeMultiscaleGroup below.
   const shape = [sz, sy, sx]
-  const chunkShape = isFinest
-    ? finestChunkShape(level.size, ctor.BYTES_PER_ELEMENT)
+  const chunkShape = sliceOptimized
+    ? sliceOptimizedChunkShape(level.size, ctor.BYTES_PER_ELEMENT)
     : (() => {
         const chunkSize = chunkSizeFor(level.size)
         return [Math.min(chunkSize, sz), Math.min(chunkSize, sy), Math.min(chunkSize, sx)] as [number, number, number]
@@ -370,6 +388,6 @@ export async function writeMultiscaleGroup(
   await writeFile(path.join(outputPath, '.zattrs'), JSON.stringify(zattrs))
 
   for (let i = 0; i < levels.length; i++) {
-    await writeZarrArrayV2(path.join(outputPath, `scale${i}`), levels[i], dtype, ctor, i === 0)
+    await writeZarrArrayV2(path.join(outputPath, `scale${i}`), levels[i], dtype, ctor, i < SLICE_OPTIMIZED_LEVEL_COUNT)
   }
 }

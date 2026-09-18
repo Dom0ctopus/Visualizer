@@ -86,7 +86,7 @@ export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[],
               continue
             }
             if (zIndex < 0 || zIndex >= info.size[0]) continue
-            const slice = await readZSlice(layerUrl, info.finestLevelPath, zIndex)
+            const slice = await readZSlice(layerUrl, info.levelPath, zIndex)
             const { lut } = buildLabelLut(segsInLayer)
             results.push({ width: slice.width, height: slice.height, data: slice.data, lut })
           } catch (e) {

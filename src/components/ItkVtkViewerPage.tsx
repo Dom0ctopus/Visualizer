@@ -12,12 +12,6 @@ import type { LibraryRecord, SegmentationRecord, VolumeRecord } from '../types'
 const POLL_INTERVAL_MS = 1500
 const ZOOM_BUTTON_FACTOR = 1.25
 
-function formatBytes(bytes: number): string {
-  const gb = bytes / 1024 / 1024 / 1024
-  if (gb >= 0.1) return `${gb.toFixed(1)} GB`
-  return `${(bytes / 1024 / 1024).toFixed(0)} MB`
-}
-
 function statusLabel(record: VolumeRecord | SegmentationRecord): string {
   switch (record.zarrStatus) {
     case 'ready':
@@ -37,10 +31,16 @@ function statusLabel(record: VolumeRecord | SegmentationRecord): string {
  * conversation history for why the slice side isn't itk-vtk-viewer too:
  * its use2D/ZPlane mode hits a hard internal voxel-count cap on scans this
  * large and corrupts the display when the slice position changes, with no
- * public API workaround found. useZarrSliceViewer reads full-resolution 2D
- * slices directly out of the same OME-Zarr store instead, sidestepping
- * that mode entirely -- true zero-downsampling for slices, at the cost of
- * building the window/level and scroll-to-slice UI ourselves.
+ * public API workaround found. useZarrSliceViewer reads 2D slices directly
+ * out of the same OME-Zarr store instead, sidestepping that mode entirely
+ * -- at the cost of building the window/level and scroll-to-slice UI
+ * ourselves. It deliberately reads pyramid level 1 (2x downsampled in each
+ * axis), not the true finest level: native-resolution per-slice reads had
+ * a real per-step latency floor that persisted even after ruling out every
+ * specific cause found (chunk layout, cache growth, cloud-sync storage,
+ * Node's I/O thread pool size) -- see zarrClient.ts's SLICE_LEVEL_INDEX.
+ * The 3D Volume pane is unaffected either way, since it already
+ * auto-selects whichever level fits its own voxel budget.
  *
  * Segmentation overlays: the slice pane composites every loaded
  * segmentation's own layers directly (useSegmentationOverlays.ts), with
@@ -94,11 +94,7 @@ export function ItkVtkViewerPage() {
     setWindowMin,
     setWindowMax,
     dataRange,
-    error: sliceError,
-    fullVolumeLoadState,
-    fullVolumeProgress,
-    fullVolumeBytes,
-    loadFullVolumeIntoMemory
+    error: sliceError
   } = useZarrSliceViewer(activeZarrUrl)
 
   const zarrSeg = useZarrSegmentations()
@@ -225,8 +221,8 @@ export function ItkVtkViewerPage() {
           <p className="panel-hint">
             Each volume is converted on upload into a chunked, multiscale OME-Zarr pyramid. The 3D render picks a
             resolution level that fits in memory instead of requiring the whole scan to fit in one GPU texture up
-            front the way the niivue engine does; the slice view reads full native-resolution 2D slices directly
-            from the same store.
+            front the way the niivue engine does; the slice view reads 2D slices from the same store's 2x-downsampled
+            level, traded for scrolling that keeps up regardless of the source scan's native resolution.
           </p>
           {volumes.length === 0 && (
             <p className="empty-hint">Upload a volume from the main viewer's library panel -- it'll show up here once converted.</p>
@@ -315,37 +311,6 @@ export function ItkVtkViewerPage() {
               onFileOpacity={zarrSeg.setFileOpacity}
               onRemoveFile={zarrSeg.removeSegmentation}
             />
-          </section>
-        )}
-
-        {volumeInfo && (
-          <section className="panel">
-            <h2 className="panel-title">Slice Scroll Speed</h2>
-            <p className="panel-hint">
-              By default each Z step fetches and decodes just that slice on demand, which has a real per-step delay
-              -- especially visible if the underlying storage is slow or inconsistent. Loading the whole volume into
-              memory once (the same strategy 3D Slicer uses) makes every subsequent Z step instant, at the cost of a
-              large one-time download and holding the raw volume ({formatBytes(fullVolumeBytes)} uncompressed) in
-              browser memory.
-            </p>
-            {fullVolumeLoadState === 'loading' && (
-              <>
-                <div className="progress-bar">
-                  <div className="progress-bar-fill" style={{ width: `${Math.round(fullVolumeProgress * 100)}%` }} />
-                </div>
-                <p className="tf-hint">Loading… {Math.round(fullVolumeProgress * 100)}%</p>
-              </>
-            )}
-            {fullVolumeLoadState === 'loaded' && <p className="tf-hint">Loaded into memory -- scrolling is now instant.</p>}
-            {fullVolumeLoadState !== 'loaded' && (
-              <button
-                className="btn btn-secondary btn-small"
-                disabled={fullVolumeLoadState === 'loading'}
-                onClick={() => void loadFullVolumeIntoMemory()}
-              >
-                Load full volume into memory ({formatBytes(fullVolumeBytes)})
-              </button>
-            )}
           </section>
         )}
 
