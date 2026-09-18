@@ -34,29 +34,26 @@ function chunkSizeFor(size: readonly [number, number, number]): number {
   return Math.max(MIN_CHUNK_SIZE, Math.min(MAX_CHUNK_SIZE, budget))
 }
 
-// The custom slice viewer (src/lib/zarrClient.ts's readZSlice) reads from
-// pyramid level 1 (2x downsampled in each axis), not level 0 -- a
-// deliberate tradeoff: true native-resolution per-slice reads had a real
-// per-step latency floor that turned out to persist even after ruling out
-// every specific cause found (chunk layout, cache growth, cloud-sync
-// storage, Node's I/O thread pool size), so level 1 trades a modest,
-// accepted loss of resolution in the 2D pane for a 4x-in-plane-smaller (8x
-// total-voxel) slice, while the itk-vtk-viewer Volume pane keeps auto-
-// selecting whichever coarser level it needs regardless. See
-// zarrClient.ts's own SLICE_LEVEL_INDEX for the client-side half of this.
+// The custom slice viewer (src/lib/zarrClient.ts's readZSlice) starts at
+// pyramid level 1 (2x downsampled) rather than level 0 -- native-resolution
+// per-slice reads had a real per-step latency floor that turned out to
+// persist even after ruling out every specific cause found (chunk layout,
+// cache growth, cloud-sync storage, Node's I/O thread pool size). It's
+// since grown a level picker (native/2x/4x/8x, for fast fly-through
+// browsing at whichever resolution the user wants) plus the ability to
+// drill into a bounded native-resolution window around a chosen slice --
+// see useZarrSliceViewer.ts's setLevel/inspectNativeHere. Every level that
+// picker exposes needs this same chunking, or switching to it would
+// silently reintroduce the many-small-chunks-per-slice problem below.
 //
-// Both level 0 and level 1 get this chunking (one chunk per Z, spanning
-// the full X/Y extent) rather than just whichever one the slice viewer
-// currently reads, so a future change back to level 0 doesn't silently
-// reintroduce the many-small-chunks-per-slice problem this fixed in the
-// first place: chunking small cubes (like the coarser levels still use)
-// meant a single slice read had to fetch+blosc-decode every small X/Y tile
-// spanning the slice's full width and height -- dozens of small requests
-// for one slice. Since chunk size has no bearing on the Volume pane's
-// voxel cap (see above) and neither level is read by that pane, both are
-// free to be optimized purely for slice reads instead: one chunk per Z
-// index, so reading any slice is always exactly one chunk fetch with zero
-// wasted bytes.
+// Chunking small cubes (like the levels past SLICE_OPTIMIZED_LEVEL_COUNT
+// still use) meant a single slice read had to fetch+blosc-decode every
+// small X/Y tile spanning the slice's full width and height -- dozens of
+// small requests for one slice. Since chunk size has no bearing on the
+// Volume pane's voxel cap (see above) and these levels are never read by
+// that pane, they're free to be optimized purely for slice reads instead:
+// one chunk per Z index, so reading any slice is always exactly one chunk
+// fetch with zero wasted bytes.
 //
 // That full-extent chunk is capped in bytes, though: a genuinely native-
 // resolution scan can be tens of thousands of pixels per side, which would
@@ -72,10 +69,14 @@ function chunkSizeFor(size: readonly [number, number, number]): number {
 const MAX_SLICE_CHUNK_BYTES = 64 * 1024 * 1024
 
 // How many of the finest pyramid levels (0-indexed, counting from the
-// finest) get the slice-optimized chunking above -- must be at least
-// SLICE_LEVEL_INDEX + 1 from zarrClient.ts (currently 1, i.e. levels 0
-// and 1 both need it).
-const SLICE_OPTIMIZED_LEVEL_COUNT = 2
+// finest) get the slice-optimized chunking above -- must cover every level
+// the slice viewer's level picker exposes (native/2x/4x/8x -- see
+// src/lib/zarrClient.ts and useZarrSliceViewer.ts). Levels past this stay
+// on the cube-ish chunking below, unaffected (they're deep enough into the
+// pyramid that the Volume pane picking one to load whole is far more
+// likely, and cube chunking is friendlier to loading a whole level's worth
+// of chunks together than one-chunk-per-Z is).
+const SLICE_OPTIMIZED_LEVEL_COUNT = 4
 
 function sliceOptimizedChunkShape(size: readonly [number, number, number], bytesPerElement: number): [number, number, number] {
   const [sx, sy] = size

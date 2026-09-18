@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchVolumeInfo, readZSlice, type SliceResult, type VolumeInfo } from '../lib/zarrClient'
+import { DEFAULT_LEVEL_INDEX, fetchPyramidLevels, readZSlice, type PyramidLevel, type SliceResult } from '../lib/zarrClient'
 
 // Full type-range defaults (rather than scanning the volume for its actual
 // min/max up front, which would mean downloading everything just to show a
@@ -33,6 +33,22 @@ function naturalRangeFor(dtype: string): [number, number] {
 // actually landed on.
 const SLICE_SETTLE_DELAY_MS = 40
 
+// How many native-resolution (level 0) slices to load on each side of the
+// current position when "inspecting" -- see inspectNativeHere below.
+const DEFAULT_INSPECT_RADIUS = 50
+
+export interface DetailWindow {
+  /** Z bounds (in level 0's own coordinates) the user can navigate within
+   *  while inspecting -- native-resolution reads outside this range are
+   *  never requested, so the cost of "drilling in" stays bounded to
+   *  roughly 2*radius+1 slices regardless of how deep the full stack is. */
+  zMin: number
+  zMax: number
+  /** Where to snap back to on exitDetailWindow(). */
+  returnLevelIndex: number
+  returnZIndex: number
+}
+
 /**
  * Drives the custom, itk-vtk-viewer-free slice display: reads 2D slices
  * directly out of the same OME-Zarr store (see src/lib/zarrClient.ts),
@@ -41,18 +57,25 @@ const SLICE_SETTLE_DELAY_MS = 40
  * corrupts the display rather than falling back gracefully (see the
  * useItkVtkViewer.ts history for how that was diagnosed).
  *
- * Reads from zarrClient.ts's chosen slice level (2x downsampled in each
- * axis, not the true finest level) -- per-slice reads at native resolution
- * had a real per-step latency floor that persisted after ruling out every
- * specific cause found (chunk layout, cache growth, cloud-sync storage,
- * Node's I/O thread pool size), so this trades a modest, accepted loss of
- * resolution in the 2D pane for scrolling that actually keeps up. The 3D
- * Volume pane is unaffected either way -- it always auto-selects whichever
- * level it needs on its own.
+ * Starts at a downsampled pyramid level (see zarrClient.ts's
+ * DEFAULT_LEVEL_INDEX) rather than true native resolution, for scrolling
+ * responsiveness -- native per-slice reads had a real per-step latency
+ * floor that persisted after ruling out every specific cause found (chunk
+ * layout, cache growth, cloud-sync storage, Node's I/O thread pool size).
+ * Rather than lose native detail entirely, this exposes every pyramid
+ * level as a pickable "fly-through" resolution (setLevel) plus a way to
+ * drill into native resolution for a bounded neighborhood around wherever
+ * the user actually wants detail (inspectNativeHere) -- browse fast at a
+ * coarse level, then zoom in only where it matters, at a cost proportional
+ * to that neighborhood's size, not the whole stack. The 3D Volume pane is
+ * unaffected either way, since it already auto-selects whichever level it
+ * needs on its own.
  */
 export function useZarrSliceViewer(zarrUrl: string | null) {
-  const [volumeInfo, setVolumeInfo] = useState<VolumeInfo | null>(null)
+  const [levels, setLevels] = useState<PyramidLevel[] | null>(null)
+  const [levelIndex, setLevelIndexState] = useState(DEFAULT_LEVEL_INDEX)
   const [zIndex, setZIndexState] = useState(0)
+  const [detailWindow, setDetailWindow] = useState<DetailWindow | null>(null)
   const [slice, setSlice] = useState<SliceResult | null>(null)
   const [windowMin, setWindowMin] = useState(0)
   const [windowMax, setWindowMax] = useState(255)
@@ -60,29 +83,51 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const volumeInfoRef = useRef<VolumeInfo | null>(null)
+  // Mirrors of state read from inside callbacks (setZIndex/stepZIndex/
+  // setLevel/inspectNativeHere) without depending on them in a way that'd
+  // make those callbacks' identities change every render.
+  const levelsRef = useRef<PyramidLevel[] | null>(null)
+  const levelIndexRef = useRef(levelIndex)
+  const zIndexRef = useRef(zIndex)
+  const detailWindowRef = useRef<DetailWindow | null>(null)
   const requestIdRef = useRef(0)
   const settleTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
-    volumeInfoRef.current = volumeInfo
-  }, [volumeInfo])
+    levelsRef.current = levels
+  }, [levels])
+  useEffect(() => {
+    levelIndexRef.current = levelIndex
+  }, [levelIndex])
+  useEffect(() => {
+    zIndexRef.current = zIndex
+  }, [zIndex])
+  useEffect(() => {
+    detailWindowRef.current = detailWindow
+  }, [detailWindow])
+
+  const currentLevel = levels?.[Math.min(levelIndex, levels.length - 1)] ?? null
 
   useEffect(() => {
-    setVolumeInfo(null)
+    setLevels(null)
+    setLevelIndexState(DEFAULT_LEVEL_INDEX)
+    setDetailWindow(null)
     setSlice(null)
     setError(null)
     if (!zarrUrl) return
     let cancelled = false
-    fetchVolumeInfo(zarrUrl)
-      .then((info) => {
+    fetchPyramidLevels(zarrUrl)
+      .then((ls) => {
         if (cancelled) return
-        setVolumeInfo(info)
-        const range = naturalRangeFor(info.dtype)
+        setLevels(ls)
+        const initialIndex = Math.min(DEFAULT_LEVEL_INDEX, ls.length - 1)
+        setLevelIndexState(initialIndex)
+        const initial = ls[initialIndex]
+        const range = naturalRangeFor(initial.dtype)
         setDataRange(range)
         setWindowMin(range[0])
         setWindowMax(range[1])
-        setZIndexState(Math.floor(info.size[0] / 2))
+        setZIndexState(Math.floor(initial.size[0] / 2))
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load volume info')
@@ -97,7 +142,7 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
       window.clearTimeout(settleTimerRef.current)
       settleTimerRef.current = null
     }
-    if (!zarrUrl || !volumeInfo) return
+    if (!zarrUrl || !currentLevel) return
 
     // A fast scroll fires many zIndex changes in quick succession. Without
     // a settle delay, every intermediate one used to kick off its own
@@ -109,7 +154,7 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     settleTimerRef.current = window.setTimeout(() => {
       settleTimerRef.current = null
       setLoading(true)
-      readZSlice(zarrUrl, volumeInfo.levelPath, zIndex)
+      readZSlice(zarrUrl, currentLevel.levelPath, zIndex)
         .then((result) => {
           if (requestIdRef.current !== requestId) return
           setSlice(result)
@@ -130,30 +175,97 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
         settleTimerRef.current = null
       }
     }
-  }, [zarrUrl, volumeInfo, zIndex])
+  }, [zarrUrl, currentLevel, zIndex])
 
-  const setZIndex = useCallback((z: number) => {
-    const info = volumeInfoRef.current
-    const maxZ = info ? info.size[0] - 1 : 0
-    setZIndexState(Math.min(maxZ, Math.max(0, Math.round(z))))
+  const clampZ = useCallback((z: number, levelIdx: number, window: DetailWindow | null) => {
+    const ls = levelsRef.current
+    const level = ls?.[Math.min(levelIdx, ls.length - 1)]
+    const hardMax = level ? level.size[0] - 1 : 0
+    const lo = window && levelIdx === 0 ? Math.max(0, window.zMin) : 0
+    const hi = window && levelIdx === 0 ? Math.min(hardMax, window.zMax) : hardMax
+    return Math.min(hi, Math.max(lo, Math.round(z)))
   }, [])
+
+  const setZIndex = useCallback(
+    (z: number) => {
+      setZIndexState(clampZ(z, levelIndexRef.current, detailWindowRef.current))
+    },
+    [clampZ]
+  )
 
   const stepZIndex = useCallback(
     (delta: number) => {
-      setZIndexState((prev) => {
-        const info = volumeInfoRef.current
-        const maxZ = info ? info.size[0] - 1 : 0
-        return Math.min(maxZ, Math.max(0, prev + delta))
-      })
+      setZIndexState((prev) => clampZ(prev + delta, levelIndexRef.current, detailWindowRef.current))
     },
-    []
+    [clampZ]
   )
 
+  /** Switches the fly-through level, remapping the current Z position
+   *  proportionally so the view stays roughly centered on the same
+   *  physical slice. Exits any active detail window -- deliberately
+   *  picking a level manually means leaving inspection mode. */
+  const setLevel = useCallback(
+    (newIndex: number) => {
+      const ls = levelsRef.current
+      if (!ls) return
+      const clampedIndex = Math.max(0, Math.min(ls.length - 1, newIndex))
+      const oldLevel = ls[Math.min(levelIndexRef.current, ls.length - 1)]
+      const newLevel = ls[clampedIndex]
+      const factorRatio = oldLevel.downsampleFactor / newLevel.downsampleFactor
+      setDetailWindow(null)
+      setLevelIndexState(clampedIndex)
+      setZIndexState(clampZ(zIndexRef.current * factorRatio, clampedIndex, null))
+    },
+    [clampZ]
+  )
+
+  /** Drills into native resolution (level 0) for a bounded neighborhood
+   *  around the current position -- radius slices on each side, mapped
+   *  from the current level's Z coordinate into level 0's. Reading is
+   *  still one slice at a time (readZSlice), same as always; this only
+   *  bounds which Z values the UI lets the user navigate to, so a native-
+   *  resolution read is never requested outside that neighborhood. */
+  const inspectNativeHere = useCallback(
+    (radius: number = DEFAULT_INSPECT_RADIUS) => {
+      const ls = levelsRef.current
+      if (!ls || ls.length === 0) return
+      const current = ls[Math.min(levelIndexRef.current, ls.length - 1)]
+      const native = ls[0]
+      const nativeZ = Math.round(zIndexRef.current * current.downsampleFactor)
+      const zMin = Math.max(0, nativeZ - radius)
+      const zMax = Math.min(native.size[0] - 1, nativeZ + radius)
+      const window: DetailWindow = {
+        zMin,
+        zMax,
+        returnLevelIndex: levelIndexRef.current,
+        returnZIndex: zIndexRef.current
+      }
+      setDetailWindow(window)
+      setLevelIndexState(0)
+      setZIndexState(clampZ(nativeZ, 0, window))
+    },
+    [clampZ]
+  )
+
+  const exitDetailWindow = useCallback(() => {
+    const window = detailWindowRef.current
+    if (!window) return
+    setDetailWindow(null)
+    setLevelIndexState(window.returnLevelIndex)
+    setZIndexState(clampZ(window.returnZIndex, window.returnLevelIndex, null))
+  }, [clampZ])
+
   return {
-    volumeInfo,
+    levels,
+    levelIndex,
+    volumeInfo: currentLevel,
+    detailWindow,
     zIndex,
     setZIndex,
     stepZIndex,
+    setLevel,
+    inspectNativeHere,
+    exitDetailWindow,
     slice,
     windowMin,
     windowMax,

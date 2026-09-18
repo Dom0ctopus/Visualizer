@@ -34,13 +34,17 @@ function statusLabel(record: VolumeRecord | SegmentationRecord): string {
  * public API workaround found. useZarrSliceViewer reads 2D slices directly
  * out of the same OME-Zarr store instead, sidestepping that mode entirely
  * -- at the cost of building the window/level and scroll-to-slice UI
- * ourselves. It deliberately reads pyramid level 1 (2x downsampled in each
- * axis), not the true finest level: native-resolution per-slice reads had
- * a real per-step latency floor that persisted even after ruling out every
+ * ourselves. It starts at pyramid level 1 (2x downsampled in each axis),
+ * not the true finest level: native-resolution per-slice reads had a real
+ * per-step latency floor that persisted even after ruling out every
  * specific cause found (chunk layout, cache growth, cloud-sync storage,
- * Node's I/O thread pool size) -- see zarrClient.ts's SLICE_LEVEL_INDEX.
- * The 3D Volume pane is unaffected either way, since it already
- * auto-selects whichever level fits its own voxel budget.
+ * Node's I/O thread pool size). Every pyramid level is pickable from the
+ * "Resolution" panel below for fast fly-through browsing, and
+ * "Inspect here" drills into native resolution for a bounded neighborhood
+ * (see useZarrSliceViewer.ts's inspectNativeHere) around wherever the user
+ * actually wants detail, rather than paying native-resolution cost across
+ * the whole stack. The 3D Volume pane is unaffected either way, since it
+ * already auto-selects whichever level fits its own voxel budget.
  *
  * Segmentation overlays: the slice pane composites every loaded
  * segmentation's own layers directly (useSegmentationOverlays.ts), with
@@ -84,10 +88,16 @@ export function ItkVtkViewerPage() {
     setLabelNames
   } = useItkVtkViewer()
   const {
+    levels,
+    levelIndex,
     volumeInfo,
+    detailWindow,
     zIndex,
     setZIndex,
     stepZIndex,
+    setLevel,
+    inspectNativeHere,
+    exitDetailWindow,
     slice,
     windowMin,
     windowMax,
@@ -98,7 +108,7 @@ export function ItkVtkViewerPage() {
   } = useZarrSliceViewer(activeZarrUrl)
 
   const zarrSeg = useZarrSegmentations()
-  const { overlays, error: overlayError } = useSegmentationOverlays(zarrSeg.segmentations, zIndex, volumeInfo)
+  const { overlays, error: overlayError } = useSegmentationOverlays(zarrSeg.segmentations, zIndex, volumeInfo, levelIndex)
 
   useEffect(() => {
     let cancelled = false
@@ -193,17 +203,27 @@ export function ItkVtkViewerPage() {
           {volumeInfo && (
             <div className="zarr-slice-controls">
               <span className="tf-hint">
-                Z: {zIndex} / {volumeInfo.size[0] - 1}
+                Z: {zIndex} / {detailWindow ? detailWindow.zMax : volumeInfo.size[0] - 1}
+                {detailWindow ? ` (native, ${detailWindow.zMin}-${detailWindow.zMax})` : ''}
               </span>
               <input
                 type="range"
                 className="window-slider"
-                min={0}
-                max={volumeInfo.size[0] - 1}
+                min={detailWindow ? detailWindow.zMin : 0}
+                max={detailWindow ? detailWindow.zMax : volumeInfo.size[0] - 1}
                 step={1}
                 value={zIndex}
                 onChange={(e) => setZIndex(Number(e.target.value))}
               />
+              {detailWindow ? (
+                <button className="btn btn-secondary btn-small" onClick={exitDetailWindow}>
+                  Back to overview
+                </button>
+              ) : (
+                <button className="btn btn-secondary btn-small" onClick={() => inspectNativeHere()} title="Load native resolution for the 50 slices on each side of this one">
+                  Inspect here
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -311,6 +331,28 @@ export function ItkVtkViewerPage() {
               onFileOpacity={zarrSeg.setFileOpacity}
               onRemoveFile={zarrSeg.removeSegmentation}
             />
+          </section>
+        )}
+
+        {levels && levels.length > 1 && (
+          <section className="panel">
+            <h2 className="panel-title">Resolution</h2>
+            <p className="panel-hint">
+              Fly through at a coarser level for speed, then "Inspect here" (above) to drill into native resolution
+              around wherever you land.
+            </p>
+            <div className="tf-row resolution-levels">
+              {levels.map((level) => (
+                <button
+                  key={level.index}
+                  className={level.index === levelIndex ? 'btn btn-primary btn-small' : 'btn btn-secondary btn-small'}
+                  onClick={() => setLevel(level.index)}
+                  title={`${level.size[2]}x${level.size[1]}x${level.size[0]}`}
+                >
+                  {level.index === 0 ? 'Native' : `${level.downsampleFactor}x`}
+                </button>
+              ))}
+            </div>
           </section>
         )}
 

@@ -20,12 +20,19 @@ export interface SliceOverlay {
  * A segmentation's label-map grid is assumed to exactly match its source
  * volume's grid (true for a 3D Slicer segmentation exported against the
  * loaded scan, which is the only way this app's upload flow produces one).
- * `baseVolumeInfo` (the loaded volume's own VolumeInfo, from
+ * `baseVolumeInfo` (the loaded volume's current level, from
  * useZarrSliceViewer) is compared against each layer's own size up front so
  * a genuine mismatch -- e.g. a segmentation uploaded that doesn't actually
  * correspond to the loaded volume -- surfaces as a clear, persistent error
  * instead of the overlay just silently never appearing on every frame with
  * nothing to explain why.
+ *
+ * `levelIndex` must be the same pyramid level the base volume is currently
+ * showing (useZarrSliceViewer's own levelIndex) -- since the user can now
+ * switch levels or drill into a native-resolution detail window, the
+ * overlay has to follow along to whichever level's dimensions
+ * baseVolumeInfo actually describes, or every frame would look like a
+ * mismatch.
  */
 // A fast scroll fires many zIndex changes in quick succession; without a
 // settle delay, every one of them used to kick off a full-resolution
@@ -38,7 +45,12 @@ export interface SliceOverlay {
 // now triggers a fetch.
 const SETTLE_DELAY_MS = 80
 
-export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[], zIndex: number, baseVolumeInfo: VolumeInfo | null) {
+export function useSegmentationOverlays(
+  segmentations: ZarrLoadedSegmentation[],
+  zIndex: number,
+  baseVolumeInfo: VolumeInfo | null,
+  levelIndex: number
+) {
   const [overlays, setOverlays] = useState<SliceOverlay[]>([])
   const [error, setError] = useState<string | null>(null)
   const volumeInfoCacheRef = useRef(new Map<string, Promise<VolumeInfo>>())
@@ -71,10 +83,11 @@ export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[],
           if (!anyVisible) continue
 
           const layerUrl = `${segZarrUrl(seg.recordId)}/layer${layer}`
-          let infoPromise = volumeInfoCacheRef.current.get(layerUrl)
+          const cacheKey = `${layerUrl}:${levelIndex}`
+          let infoPromise = volumeInfoCacheRef.current.get(cacheKey)
           if (!infoPromise) {
-            infoPromise = fetchVolumeInfo(layerUrl)
-            volumeInfoCacheRef.current.set(layerUrl, infoPromise)
+            infoPromise = fetchVolumeInfo(layerUrl, levelIndex)
+            volumeInfoCacheRef.current.set(cacheKey, infoPromise)
           }
 
           try {
@@ -90,7 +103,7 @@ export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[],
             const { lut } = buildLabelLut(segsInLayer)
             results.push({ width: slice.width, height: slice.height, data: slice.data, lut })
           } catch (e) {
-            volumeInfoCacheRef.current.delete(layerUrl)
+            volumeInfoCacheRef.current.delete(cacheKey)
             lastError = e instanceof Error ? e.message : `Failed to load segmentation overlay for "${seg.name}"`
           }
         }
@@ -113,7 +126,7 @@ export function useSegmentationOverlays(segmentations: ZarrLoadedSegmentation[],
         settleTimerRef.current = null
       }
     }
-  }, [segmentations, zIndex, baseVolumeInfo])
+  }, [segmentations, zIndex, baseVolumeInfo, levelIndex])
 
   return { overlays, error }
 }

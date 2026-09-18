@@ -236,6 +236,15 @@ body,
   flex: 1;
 }
 
+.resolution-levels {
+  flex-wrap: wrap;
+}
+
+.resolution-levels .btn {
+  flex: 1 1 auto;
+  min-width: 56px;
+}
+
 .tf-hint {
   font-size: 11px;
   color: var(--text-dim);

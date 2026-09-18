@@ -150,38 +150,61 @@ function fetchChunk(levelUrl: string, bz: number, by: number, bx: number, meta: 
   return p
 }
 
-// Reading pyramid level 1 (2x downsampled in each axis) rather than level 0
-// (true native resolution) for the slice pane -- a deliberate tradeoff.
-// Per-slice lazy reads at native resolution had a real per-step latency
-// floor that persisted after ruling out every specific cause found (chunk
-// layout, unbounded cache growth, cloud-sync storage, Node's I/O thread
-// pool size); level 1's slices are 4x smaller in-plane (8x fewer voxels
-// total), a loss of resolution accepted in exchange for scrolling that
-// actually keeps up, while the itk-vtk-viewer Volume pane keeps auto-
-// selecting whichever level it needs regardless of this. See
-// server/src/zarrWriter.ts's SLICE_OPTIMIZED_LEVEL_COUNT, which must stay
-// at least this large so level 1 gets the same one-chunk-per-Z chunking
-// level 0 does (otherwise this would silently reintroduce the many-small-
-// chunks-per-slice problem that chunking scheme was built to avoid).
-const SLICE_LEVEL_INDEX = 1
+// Default starting level: 1 (2x downsampled in each axis), not 0 (true
+// native resolution) -- a deliberate tradeoff. Per-slice lazy reads at
+// native resolution had a real per-step latency floor that persisted after
+// ruling out every specific cause found (chunk layout, unbounded cache
+// growth, cloud-sync storage, Node's I/O thread pool size). Levels are now
+// user-selectable (see useZarrSliceViewer.ts's level picker and
+// inspectNativeHere), so this is just the starting point, not a hard
+// limit -- level 0 is one click away, bounded to a small Z window around
+// wherever the user actually wants detail (see readZSliceRange below)
+// rather than paid for across the whole stack. See server/src/
+// zarrWriter.ts's SLICE_OPTIMIZED_LEVEL_COUNT, which must cover every
+// level this picker exposes so switching between them doesn't silently
+// reintroduce the many-small-chunks-per-slice problem that chunking
+// scheme was built to avoid.
+export const DEFAULT_LEVEL_INDEX = 1
 
 export interface VolumeInfo {
   /** Path segment (e.g. "scale1") of the level this reader uses for slice
-   *  access -- see SLICE_LEVEL_INDEX above. */
+   *  access. */
   levelPath: string
   /** [z, y, x], in that level's own (downsampled) voxel dimensions. */
   size: [number, number, number]
   dtype: string
 }
 
-/** Fetches just enough metadata to know the slice-reading level's
- *  dimensions -- falls back to the coarsest available level if the volume
- *  doesn't have as many pyramid levels as SLICE_LEVEL_INDEX calls for
- *  (a small test volume might only have one level). */
-export async function fetchVolumeInfo(zarrBaseUrl: string): Promise<VolumeInfo> {
+export interface PyramidLevel extends VolumeInfo {
+  index: number
+  /** 2**index -- every level in this pyramid is downsampled uniformly in
+   *  all 3 axes by this much relative to level 0 (see
+   *  server/src/zarrWriter.ts's buildPyramid). */
+  downsampleFactor: number
+}
+
+/** Lists every pyramid level's own dimensions -- for a level picker UI, and
+ *  for mapping a Z index from one level's coordinates into another's
+ *  (multiply/divide by the two levels' downsampleFactor). */
+export async function fetchPyramidLevels(zarrBaseUrl: string): Promise<PyramidLevel[]> {
   const attrs = await fetchZattrs(zarrBaseUrl)
   const datasets = attrs.multiscales[0].datasets
-  const levelPath = datasets[Math.min(SLICE_LEVEL_INDEX, datasets.length - 1)].path
+  const levels: PyramidLevel[] = []
+  for (let i = 0; i < datasets.length; i++) {
+    const levelPath = datasets[i].path
+    const meta = await fetchZarray(`${zarrBaseUrl}/${levelPath}`)
+    levels.push({ index: i, levelPath, size: meta.shape, dtype: meta.dtype, downsampleFactor: 2 ** i })
+  }
+  return levels
+}
+
+/** Fetches just enough metadata to know one level's dimensions -- falls
+ *  back to the coarsest available level if the volume doesn't have as many
+ *  pyramid levels as requested (a small test volume might only have one). */
+export async function fetchVolumeInfo(zarrBaseUrl: string, levelIndex: number): Promise<VolumeInfo> {
+  const attrs = await fetchZattrs(zarrBaseUrl)
+  const datasets = attrs.multiscales[0].datasets
+  const levelPath = datasets[Math.min(levelIndex, datasets.length - 1)].path
   const meta = await fetchZarray(`${zarrBaseUrl}/${levelPath}`)
   return { levelPath, size: meta.shape, dtype: meta.dtype }
 }
