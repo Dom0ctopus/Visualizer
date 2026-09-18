@@ -1,5 +1,6 @@
+import path from 'node:path'
 import { readNrrdHeaderAndData, type ParsedNrrdHeader } from './nrrdHeader.js'
-import { zarrDtypeFor, type TypedArray, type TypedArrayConstructor } from './zarrWriter.js'
+import { reversedAxes, zarrDtypeFor, type TypedArray, type TypedArrayConstructor } from './zarrWriter.js'
 
 // Maps NRRD's "type" field spellings to the same canonical component-type
 // strings zarrDtypeFor already understands (itk-wasm's own componentType
@@ -157,5 +158,17 @@ export async function readRawNrrdVolume(nrrdPath: string): Promise<ParsedNrrdVol
   const parsed = parseNrrdGeometry(header, rawBytes.byteLength)
   const nVoxelsTotal = parsed.size[0] * parsed.size[1] * parsed.size[2] * parsed.layerCount
   const data = new parsed.ctor(rawBytes.buffer, rawBytes.byteOffset, nVoxelsTotal) as TypedArray
+
+  // Diagnostic: print each converted file's own parsed geometry so a
+  // volume/segmentation pair claimed to be "the same scan" can be directly
+  // compared in the server console -- a size or space-directions-sign
+  // (reversedAxes) mismatch here would explain a segmentation overlay that
+  // doesn't align, without needing the user to paste raw NRRD header text.
+  console.log(
+    `[nrrd-geometry] ${path.basename(nrrdPath)}: size=${JSON.stringify(parsed.size)} layerCount=${parsed.layerCount} ` +
+      `spacing=${JSON.stringify(parsed.spacing)} origin=${JSON.stringify(parsed.origin)} ` +
+      `direction=${JSON.stringify(parsed.direction)} reversedAxes=${JSON.stringify(reversedAxes(parsed.direction))}`
+  )
+
   return { ...parsed, data }
 }
