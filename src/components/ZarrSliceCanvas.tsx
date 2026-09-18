@@ -14,9 +14,10 @@ interface ZarrSliceCanvasProps {
   onWheelStep: (delta: number) => void
   /** Segmentation label-map overlays to alpha-composite on top of the base
    *  grayscale slice, in order (later entries painted over earlier ones) --
-   *  see useSegmentationOverlays.ts. Each overlay's own array must be
-   *  pixel-for-pixel the same size as `slice`; a mismatched one is skipped
-   *  since resampling isn't attempted here (see that hook's own comment). */
+   *  see useSegmentationOverlays.ts. An overlay's own grid is commonly
+   *  smaller than `slice` (a cropped segmentation export) and positioned via
+   *  its own offsetX/offsetY; pixels outside its bounds simply show the
+   *  base slice underneath. */
   overlays?: SliceOverlay[]
   /** Display zoom/pan, applied as a CSS transform on the canvas element --
    *  entirely separate from the pixel data drawn into it, so panning/
@@ -124,39 +125,48 @@ export function ZarrSliceCanvas({
       imageDataRef.current = imageData
     }
     const out = imageData.data
-    // Only overlays that describe the exact same pixel grid as the base
-    // slice can be indexed in lockstep with it below -- see this
-    // component's own prop comment for why a mismatched one is dropped
-    // rather than resampled.
-    const activeOverlays = (overlays ?? []).filter((o) => o.width === width && o.height === height)
+    // Only overlays whose (possibly smaller, possibly offset) footprint
+    // actually overlaps the base slice's bounds need to be considered per
+    // pixel below -- see useSegmentationOverlays.ts for why an overlay's
+    // grid commonly differs in size/position from the base slice's.
+    const activeOverlays = (overlays ?? []).filter(
+      (o) => o.offsetX < width && o.offsetX + o.width > 0 && o.offsetY < height && o.offsetY + o.height > 0
+    )
 
-    for (let i = 0; i < data.length; i++) {
-      let gray: number
-      if (lut) {
-        gray = lut[data[i] + lutRange!.offset]
-      } else {
-        const range = Math.max(1e-6, windowMax - windowMin)
-        const t = Math.min(1, Math.max(0, (data[i] - windowMin) / range))
-        gray = Math.round(t * 255)
+    for (let y = 0; y < height; y++) {
+      const rowBase = y * width
+      for (let x = 0; x < width; x++) {
+        const i = rowBase + x
+        let gray: number
+        if (lut) {
+          gray = lut[data[i] + lutRange!.offset]
+        } else {
+          const range = Math.max(1e-6, windowMax - windowMin)
+          const t = Math.min(1, Math.max(0, (data[i] - windowMin) / range))
+          gray = Math.round(t * 255)
+        }
+        let r = gray
+        let g = gray
+        let b = gray
+        for (const overlay of activeOverlays) {
+          const ox = x - overlay.offsetX
+          const oy = y - overlay.offsetY
+          if (ox < 0 || ox >= overlay.width || oy < 0 || oy >= overlay.height) continue
+          const label = overlay.data[oy * overlay.width + ox]
+          const lutOffset = label * 4
+          const alphaByte = overlay.lut[lutOffset + 3]
+          if (alphaByte === 0) continue
+          const alpha = alphaByte / 255
+          r = overlay.lut[lutOffset] * alpha + r * (1 - alpha)
+          g = overlay.lut[lutOffset + 1] * alpha + g * (1 - alpha)
+          b = overlay.lut[lutOffset + 2] * alpha + b * (1 - alpha)
+        }
+        const o = i * 4
+        out[o] = r
+        out[o + 1] = g
+        out[o + 2] = b
+        out[o + 3] = 255
       }
-      let r = gray
-      let g = gray
-      let b = gray
-      for (const overlay of activeOverlays) {
-        const label = overlay.data[i]
-        const lutOffset = label * 4
-        const alphaByte = overlay.lut[lutOffset + 3]
-        if (alphaByte === 0) continue
-        const alpha = alphaByte / 255
-        r = overlay.lut[lutOffset] * alpha + r * (1 - alpha)
-        g = overlay.lut[lutOffset + 1] * alpha + g * (1 - alpha)
-        b = overlay.lut[lutOffset + 2] * alpha + b * (1 - alpha)
-      }
-      const o = i * 4
-      out[o] = r
-      out[o + 1] = g
-      out[o + 2] = b
-      out[o + 3] = 255
     }
     const pixelLoopDone = performance.now()
     ctx.putImageData(imageData, 0, 0)

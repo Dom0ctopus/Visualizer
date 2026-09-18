@@ -173,6 +173,26 @@ export interface VolumeInfo {
   /** [z, y, x], in that level's own (downsampled) voxel dimensions. */
   size: [number, number, number]
   dtype: string
+  /** [z, y, x] physical origin (mm) of voxel (0,0,0) at this level -- read
+   *  from the level's own NGFF "translation" transform (see
+   *  server/src/zarrWriter.ts's writeMultiscaleGroup). Used to align a
+   *  segmentation overlay whose exported extent is a physical sub-region of
+   *  the volume (common for 3D Slicer segmentations, which by default crop
+   *  each layer to the bounding box of its segmented voxels) rather than
+   *  assuming every layer shares the volume's own pixel grid exactly. */
+  origin: [number, number, number]
+  /** [z, y, x] physical voxel size (mm) at this level -- the level's own
+   *  NGFF "scale" transform. */
+  spacing: [number, number, number]
+}
+
+function parseTransforms(dataset: OmeZarrDataset): { origin: [number, number, number]; spacing: [number, number, number] } {
+  const scale = dataset.coordinateTransformations.find((t) => t.type === 'scale')?.scale ?? [1, 1, 1]
+  const translation = dataset.coordinateTransformations.find((t) => t.type === 'translation')?.translation ?? [0, 0, 0]
+  return {
+    spacing: [scale[0], scale[1], scale[2]],
+    origin: [translation[0], translation[1], translation[2]]
+  }
 }
 
 export interface PyramidLevel extends VolumeInfo {
@@ -193,7 +213,8 @@ export async function fetchPyramidLevels(zarrBaseUrl: string): Promise<PyramidLe
   for (let i = 0; i < datasets.length; i++) {
     const levelPath = datasets[i].path
     const meta = await fetchZarray(`${zarrBaseUrl}/${levelPath}`)
-    levels.push({ index: i, levelPath, size: meta.shape, dtype: meta.dtype, downsampleFactor: 2 ** i })
+    const { origin, spacing } = parseTransforms(datasets[i])
+    levels.push({ index: i, levelPath, size: meta.shape, dtype: meta.dtype, origin, spacing, downsampleFactor: 2 ** i })
   }
   return levels
 }
@@ -204,9 +225,10 @@ export async function fetchPyramidLevels(zarrBaseUrl: string): Promise<PyramidLe
 export async function fetchVolumeInfo(zarrBaseUrl: string, levelIndex: number): Promise<VolumeInfo> {
   const attrs = await fetchZattrs(zarrBaseUrl)
   const datasets = attrs.multiscales[0].datasets
-  const levelPath = datasets[Math.min(levelIndex, datasets.length - 1)].path
-  const meta = await fetchZarray(`${zarrBaseUrl}/${levelPath}`)
-  return { levelPath, size: meta.shape, dtype: meta.dtype }
+  const dataset = datasets[Math.min(levelIndex, datasets.length - 1)]
+  const meta = await fetchZarray(`${zarrBaseUrl}/${dataset.path}`)
+  const { origin, spacing } = parseTransforms(dataset)
+  return { levelPath: dataset.path, size: meta.shape, dtype: meta.dtype, origin, spacing }
 }
 
 export interface SliceResult {
