@@ -14,10 +14,11 @@ interface ZarrSliceCanvasProps {
   onWheelStep: (delta: number) => void
   /** Segmentation label-map overlays to alpha-composite on top of the base
    *  grayscale slice, in order (later entries painted over earlier ones) --
-   *  see useSegmentationOverlays.ts. An overlay's own grid is commonly
-   *  smaller than `slice` (a cropped segmentation export) and positioned via
-   *  its own offsetX/offsetY; pixels outside its bounds simply show the
-   *  base slice underneath. */
+   *  see useSegmentationOverlays.ts. An overlay's own grid commonly differs
+   *  from `slice` in size, position, and resolution (a cropped export, or
+   *  one built against a resampled ROI volume), and is sampled via its own
+   *  scaleX/scaleY/offsetX/offsetY affine mapping; pixels outside its bounds
+   *  simply show the base slice underneath. */
   overlays?: SliceOverlay[]
   /** Display zoom/pan, applied as a CSS transform on the canvas element --
    *  entirely separate from the pixel data drawn into it, so panning/
@@ -125,13 +126,7 @@ export function ZarrSliceCanvas({
       imageDataRef.current = imageData
     }
     const out = imageData.data
-    // Only overlays whose (possibly smaller, possibly offset) footprint
-    // actually overlaps the base slice's bounds need to be considered per
-    // pixel below -- see useSegmentationOverlays.ts for why an overlay's
-    // grid commonly differs in size/position from the base slice's.
-    const activeOverlays = (overlays ?? []).filter(
-      (o) => o.offsetX < width && o.offsetX + o.width > 0 && o.offsetY < height && o.offsetY + o.height > 0
-    )
+    const activeOverlays = overlays ?? []
 
     for (let y = 0; y < height; y++) {
       const rowBase = y * width
@@ -149,8 +144,13 @@ export function ZarrSliceCanvas({
         let g = gray
         let b = gray
         for (const overlay of activeOverlays) {
-          const ox = x - overlay.offsetX
-          const oy = y - overlay.offsetY
+          // Nearest-neighbor sample -- see useSegmentationOverlays.ts's
+          // SliceOverlay comment for why this is a general affine mapping
+          // rather than a plain pixel offset (a coarser- or finer-resolution
+          // segmentation grid than the base volume is a legitimate case, not
+          // just a translated crop).
+          const ox = Math.round(x * overlay.scaleX + overlay.offsetX)
+          const oy = Math.round(y * overlay.scaleY + overlay.offsetY)
           if (ox < 0 || ox >= overlay.width || oy < 0 || oy >= overlay.height) continue
           const label = overlay.data[oy * overlay.width + ox]
           const lutOffset = label * 4

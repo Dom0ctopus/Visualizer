@@ -9,10 +9,16 @@ export interface SliceOverlay {
   height: number
   data: SliceResult['data']
   lut: Uint8ClampedArray
-  /** Pixel offset of this overlay's (0,0) voxel within the base slice's own
-   *  grid, at the base slice's current pixel dimensions -- see this file's
-   *  own comment on physical-space alignment for why this is usually
-   *  nonzero. */
+  /** Maps a base-slice pixel (x, y) to this overlay's own nearest voxel via
+   *  `round(x * scaleX + offsetX)`, `round(y * scaleY + offsetY)` -- an
+   *  affine transform derived from each grid's own physical origin/spacing
+   *  (see this file's own comment on physical-space alignment), general
+   *  enough to cover both a plain pixel translation (a cropped export at
+   *  the same voxel size) and a genuine resolution difference (a
+   *  segmentation authored against a resampled ROI volume, at a coarser or
+   *  finer spacing than the master scan). */
+  scaleX: number
+  scaleY: number
   offsetX: number
   offsetY: number
 }
@@ -24,22 +30,30 @@ export interface SliceOverlay {
  * see ZarrSliceCanvas.tsx for how these get composited onto the base slice.
  *
  * A segmentation's label-map grid is NOT assumed to share the base volume's
- * exact pixel dimensions -- 3D Slicer's default segmentation export crops
- * each layer to the physical bounding box of its own segmented voxels
- * (often much smaller than the full scan), rather than exporting at the
- * full reference-volume extent. What IS assumed is that both grids sit on
- * the same physical voxel lattice (same voxel spacing, and an integer
- * number of voxels between the two grids' origins) -- true whenever the
- * segmentation was actually exported against the loaded scan, regardless of
- * how the two extents were cropped relative to each other. Each layer's own
- * VolumeInfo (spacing + origin, both read from the zarr store's NGFF
- * "scale"/"translation" transforms -- see zarrClient.ts) is used to compute
- * its pixel offset within the base grid; a real incompatibility --
- * different voxel spacing, or an origin that isn't an integer number of
- * voxels away -- surfaces as a clear, persistent error, while a
- * segmentation that's simply cropped (including one with no data at all at
- * the current Z) just contributes nothing to this slice, which isn't an
- * error.
+ * pixel dimensions, origin, or even voxel spacing. Two real 3D Slicer
+ * workflows produce a segmentation whose grid differs from the master
+ * volume's: (1) the default segmentation export crops each layer to the
+ * physical bounding box of its own segmented voxels, and (2) a segmentation
+ * built against a transformed/cropped ROI volume (Slicer's "Crop Volume"
+ * with resampling, commonly used to work at a coarser, faster-to-segment
+ * resolution) has its own, usually coarser, spacing entirely -- but is
+ * still meant to overlay onto the master volume it was cropped from. Both
+ * are legitimate, not errors.
+ *
+ * What's trusted instead is each grid's own physical origin/spacing
+ * (already read from the zarr store's NGFF "scale"/"translation"
+ * transforms -- see zarrClient.ts), exactly like Slicer itself trusts each
+ * node's IJKToRAS transform to align otherwise-unrelated grids in a shared
+ * physical space. For each axis, a base voxel index maps to this layer's
+ * own nearest voxel via `index * (baseSpacing / segSpacing) + (baseOrigin -
+ * segOrigin) / segSpacing` -- see SliceOverlay's own comment for the X/Y
+ * form of this used at composite time, and this file's Z handling below.
+ * Landing outside a layer's own extent (including entirely missing Z
+ * coverage) just contributes nothing to that slice, which isn't an error.
+ * The one case actually flagged as a real mismatch is the layer's physical
+ * bounding box not overlapping the base volume's at all on some axis --
+ * two grids that never occupy the same physical space aren't the same
+ * scan, however each one is internally sampled.
  *
  * `levelIndex` must be the same pyramid level the base volume is currently
  * showing (useZarrSliceViewer's own levelIndex) -- since the user can now
@@ -108,44 +122,43 @@ export function useSegmentationOverlays(
             const info = await infoPromise
             const base = baseVolumeInfo!
 
-            // Voxel spacing must match (within a small relative tolerance) at
-            // this level -- a real difference means the two grids aren't the
-            // same physical resolution at all, which a pixel offset alone
-            // can't reconcile.
-            const spacingMismatch = [0, 1, 2].some((axis) => {
-              const tol = 1e-3 * Math.max(base.spacing[axis], 1e-9)
-              return Math.abs(info.spacing[axis] - base.spacing[axis]) > tol
+            // Physical bounding boxes (in mm) must actually overlap on every
+            // axis -- two grids that never occupy the same physical space
+            // aren't the same scan, no matter how each is internally
+            // sampled. This is independent of the current level/slice.
+            const noOverlap = [0, 1, 2].some((axis) => {
+              const baseMin = base.origin[axis]
+              const baseMax = base.origin[axis] + (base.size[axis] - 1) * base.spacing[axis]
+              const segMin = info.origin[axis]
+              const segMax = info.origin[axis] + (info.size[axis] - 1) * info.spacing[axis]
+              return segMax < baseMin || segMin > baseMax
             })
-            if (spacingMismatch) {
-              lastError = `Segmentation "${seg.name}" (layer ${layer}) has a different voxel size than the loaded volume (${info.spacing.join('x')} mm vs ${base.spacing.join('x')} mm) -- they don't appear to be the same scan.`
+            if (noOverlap) {
+              lastError = `Segmentation "${seg.name}" (layer ${layer}) doesn't physically overlap the loaded volume at all -- they don't appear to be the same scan.`
               continue
             }
 
-            // Offset (in voxels) of this layer's origin from the base
-            // volume's origin, per axis [z, y, x]. 3D Slicer segmentations
-            // are commonly exported cropped to the bounding box of their own
-            // segmented voxels rather than at the full scan extent, so this
-            // is expected to be nonzero -- only a non-integer offset (the
-            // two grids not sharing a lattice) is treated as a real mismatch.
-            const offset = [0, 1, 2].map((axis) => (info.origin[axis] - base.origin[axis]) / base.spacing[axis])
-            const nonIntegerOffset = offset.some((o) => Math.abs(o - Math.round(o)) > 0.05)
-            if (nonIntegerOffset) {
-              lastError = `Segmentation "${seg.name}" (layer ${layer}) isn't aligned to the loaded volume's voxel grid (offset ${offset.map((o) => o.toFixed(2)).join(', ')} voxels) -- they don't appear to be the same scan.`
-              continue
-            }
-            const [offsetZ, offsetY, offsetX] = offset.map(Math.round)
+            // Per-axis affine mapping from a base voxel index to this
+            // layer's own nearest voxel index -- see this file's own header
+            // comment. [z, y, x] order, matching VolumeInfo.size/origin/spacing.
+            const scale = [0, 1, 2].map((axis) => base.spacing[axis] / info.spacing[axis])
+            const offset = [0, 1, 2].map((axis) => (base.origin[axis] - info.origin[axis]) / info.spacing[axis])
 
-            const segZ = zIndex - offsetZ
-            if (segZ < 0 || segZ >= info.size[0]) continue // outside this layer's cropped Z range -- nothing to draw, not an error
-
-            const [, baseY, baseX] = base.size
-            const [, segY, segX] = info.size
-            const overlapsXY = offsetX < baseX && offsetX + segX > 0 && offsetY < baseY && offsetY + segY > 0
-            if (!overlapsXY) continue // outside this layer's cropped X/Y footprint -- nothing to draw, not an error
+            const segZ = Math.round(zIndex * scale[0] + offset[0])
+            if (segZ < 0 || segZ >= info.size[0]) continue // outside this layer's own Z coverage -- nothing to draw, not an error
 
             const slice = await readZSlice(layerUrl, info.levelPath, segZ)
             const { lut } = buildLabelLut(segsInLayer)
-            results.push({ width: slice.width, height: slice.height, data: slice.data, lut, offsetX, offsetY })
+            results.push({
+              width: slice.width,
+              height: slice.height,
+              data: slice.data,
+              lut,
+              scaleY: scale[1],
+              scaleX: scale[2],
+              offsetY: offset[1],
+              offsetX: offset[2]
+            })
           } catch (e) {
             volumeInfoCacheRef.current.delete(cacheKey)
             lastError = e instanceof Error ? e.message : `Failed to load segmentation overlay for "${seg.name}"`
