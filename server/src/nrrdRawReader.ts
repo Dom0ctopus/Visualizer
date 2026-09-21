@@ -67,21 +67,34 @@ export interface ParsedNrrdVolume {
   dtype: string
   size: [number, number, number]
   /** 1 for a plain 3D volume; >1 for a 3D Slicer multi-layer segmentation,
-   *  where it's the 4th "sizes" entry. */
+   *  where it's the non-spatial "list"-kind axis's own "sizes" entry (see
+   *  NrrdGeometry's own comment on listAxis for why its *position* varies). */
   layerCount: number
   spacing: number[]
   origin: number[]
   direction: [number, number, number, number, number, number, number, number, number]
-  /** For layerCount > 1, layer L's voxels are data[L * sx*sy*sz .. (L+1) *
-   *  sx*sy*sz) -- the layer/"list" axis is the last (slowest) one in
-   *  "sizes", not the first, unlike the unrelated vector-NRRD convention
-   *  where a component axis is listed first. Matches what niivue's own
-   *  frame4D slicing already assumes for this same file in the niivue
-   *  engine. */
+  /** Always in canonical layout regardless of the source file's own axis
+   *  order (see NrrdGeometry): layer L's voxels are data[L * sx*sy*sz ..
+   *  (L+1) * sx*sy*sz), sx fastest-varying. */
   data: TypedArray
 }
 
-function parseNrrdGeometry(header: ParsedNrrdHeader, byteLength: number): Omit<ParsedNrrdVolume, 'data'> {
+interface NrrdGeometry extends Omit<ParsedNrrdVolume, 'data'> {
+  /** All axes' "sizes" entries, in the file's own original order (length 3
+   *  for a plain volume, 4 for a multi-layer segmentation) -- needed to
+   *  reorder the raw buffer into ParsedNrrdVolume's canonical layout. */
+  origSizes: number[]
+  /** Original-order index of the non-spatial "list"/"vector" axis, or -1 for
+   *  a plain volume with no such axis. 3D Slicer's own segmentation export
+   *  has been observed listing this axis BOTH first (the standard NRRD
+   *  "vector image" convention -- the non-spatial axis fastest-varying) and
+   *  last, depending on export path -- there is no fixed position, so this
+   *  is read from "kinds" (whichever axis isn't "domain") rather than
+   *  assumed. */
+  listAxis: number
+}
+
+function parseNrrdGeometry(header: ParsedNrrdHeader, byteLength: number): NrrdGeometry {
   const sizesText = header.fields['sizes']
   const typeText = header.fields['type']
   const directionsText = header.fields['space directions']
@@ -101,21 +114,31 @@ function parseNrrdGeometry(header: ParsedNrrdHeader, byteLength: number): Omit<P
     throw new Error(`Unsupported NRRD "space" frame: "${header.fields['space']}" (only left-posterior-superior is supported)`)
   }
 
-  const sizes = sizesText.trim().split(/\s+/).map(Number)
-  if (sizes.length < 3 || sizes.slice(0, 3).some((n) => !Number.isFinite(n) || n <= 0)) {
+  const origSizes = sizesText.trim().split(/\s+/).map(Number)
+  if (origSizes.length < 3 || origSizes.some((n) => !Number.isFinite(n) || n <= 0)) {
     throw new Error(`Invalid NRRD "sizes" field: ${sizesText}`)
   }
-  const size: [number, number, number] = [sizes[0], sizes[1], sizes[2]]
-  const layerCount = sizes.length >= 4 ? sizes[3] : 1
-  if (!Number.isFinite(layerCount) || layerCount <= 0) {
-    throw new Error(`Invalid NRRD 4th "sizes" entry (layer count): ${sizesText}`)
-  }
+
+  // Which original axis (if any) is the non-spatial "list" axis, from
+  // "kinds" (e.g. "domain domain domain list" or "list domain domain
+  // domain") -- NOT assumed to be in any fixed position. Falls back to the
+  // last axis (this reader's original, position-only assumption) only when
+  // "kinds" is missing or doesn't unambiguously identify one, for any file
+  // that previously depended on that assumption.
+  const kindsTokens = header.fields['kinds']?.trim().split(/\s+/) ?? []
+  const kindAxes = kindsTokens.length === origSizes.length ? kindsTokens.map((k) => k.toLowerCase() !== 'domain') : []
+  const nonDomainAxes = kindAxes.reduce<number[]>((acc, isListLike, i) => (isListLike ? [...acc, i] : acc), [])
+  const listAxis = origSizes.length < 4 ? -1 : nonDomainAxes.length === 1 ? nonDomainAxes[0] : origSizes.length - 1
+
+  const spatialAxes = origSizes.map((_, i) => i).filter((i) => i !== listAxis)
+  if (spatialAxes.length !== 3) throw new Error(`NRRD has ${origSizes.length} axes but couldn't identify exactly 3 spatial ones (kinds: ${header.fields['kinds'] ?? 'missing'})`)
+  const size: [number, number, number] = [origSizes[spatialAxes[0]], origSizes[spatialAxes[1]], origSizes[spatialAxes[2]]]
+  const layerCount = listAxis === -1 ? 1 : origSizes[listAxis]
 
   const { dtype, ctor } = zarrDtypeFor(nrrdComponentType(typeText))
 
   const directionVectors = directionsText ? parseSpaceDirections(directionsText) : []
-  const spatialVectors = directionVectors.slice(0, 3).map((v) => v ?? [1, 0, 0])
-  while (spatialVectors.length < 3) spatialVectors.push([0, 0, 0])
+  const spatialVectors = spatialAxes.map((axis) => directionVectors[axis] ?? [1, 0, 0])
   const spacing = spatialVectors.map((v) => vectorNorm(v) || 1)
   const direction = [
     spatialVectors[0][0] ?? 1,
@@ -139,7 +162,52 @@ function parseNrrdGeometry(header: ParsedNrrdHeader, byteLength: number): Omit<P
     throw new Error(`NRRD data size mismatch: expected at least ${expectedBytes} bytes, found ${byteLength}`)
   }
 
-  return { ctor, dtype, size, layerCount, spacing, origin: origin.length === 3 ? origin : [0, 0, 0], direction }
+  return {
+    ctor,
+    dtype,
+    size,
+    layerCount,
+    spacing,
+    origin: origin.length === 3 ? origin : [0, 0, 0],
+    direction,
+    origSizes,
+    listAxis
+  }
+}
+
+// Physically un-permutes the raw buffer from the file's own axis order into
+// ParsedNrrdVolume's canonical layout (X fastest, then Y, then Z, then layer
+// outermost) -- see NrrdGeometry's own comment on why the list axis's
+// position in the source file can't be assumed. NRRD's own convention has
+// "sizes"/"kinds" axis 0 varying fastest in the flat buffer, so each
+// original axis's stride is the product of every faster (lower-index)
+// axis's own size.
+function reorderToCanonicalLayout(
+  raw: TypedArray,
+  origSizes: number[],
+  listAxis: number,
+  spatialAxes: [number, number, number],
+  ctor: TypedArrayConstructor
+): TypedArray {
+  const origStrides = origSizes.map((_, i) => origSizes.slice(0, i).reduce((a, b) => a * b, 1))
+  const [sx, sy, sz] = spatialAxes.map((axis) => origSizes[axis])
+  const layerCount = listAxis === -1 ? 1 : origSizes[listAxis]
+  const [strideX, strideY, strideZ] = spatialAxes.map((axis) => origStrides[axis])
+  const strideL = listAxis === -1 ? 0 : origStrides[listAxis]
+
+  const out = new ctor(sx * sy * sz * layerCount) as TypedArray
+  let dst = 0
+  for (let l = 0; l < layerCount; l++) {
+    const lBase = l * strideL
+    for (let z = 0; z < sz; z++) {
+      const zBase = lBase + z * strideZ
+      for (let y = 0; y < sy; y++) {
+        const rowBase = zBase + y * strideY
+        for (let x = 0; x < sx; x++) out[dst++] = raw[rowBase + x * strideX]
+      }
+    }
+  }
+  return out
 }
 
 /**
@@ -155,9 +223,21 @@ function parseNrrdGeometry(header: ParsedNrrdHeader, byteLength: number): Omit<P
  */
 export async function readRawNrrdVolume(nrrdPath: string): Promise<ParsedNrrdVolume> {
   const { header, data: rawBytes } = await readNrrdHeaderAndData(nrrdPath)
-  const parsed = parseNrrdGeometry(header, rawBytes.byteLength)
+  const { origSizes, listAxis, ...parsed } = parseNrrdGeometry(header, rawBytes.byteLength)
   const nVoxelsTotal = parsed.size[0] * parsed.size[1] * parsed.size[2] * parsed.layerCount
-  const data = new parsed.ctor(rawBytes.buffer, rawBytes.byteOffset, nVoxelsTotal) as TypedArray
+
+  // The raw buffer is already in canonical (X fastest, layer outermost)
+  // layout exactly when there's no list axis, or it's already the last
+  // (slowest) one -- the common case -- so only reorder when the source
+  // file actually put it somewhere else (see reorderToCanonicalLayout).
+  let data: TypedArray
+  if (listAxis === -1 || listAxis === origSizes.length - 1) {
+    data = new parsed.ctor(rawBytes.buffer, rawBytes.byteOffset, nVoxelsTotal) as TypedArray
+  } else {
+    const raw = new parsed.ctor(rawBytes.buffer, rawBytes.byteOffset, nVoxelsTotal) as TypedArray
+    const spatialAxes = origSizes.map((_, i) => i).filter((i) => i !== listAxis) as [number, number, number]
+    data = reorderToCanonicalLayout(raw, origSizes, listAxis, spatialAxes, parsed.ctor)
+  }
 
   // Diagnostic: print each converted file's own parsed geometry so a
   // volume/segmentation pair claimed to be "the same scan" can be directly

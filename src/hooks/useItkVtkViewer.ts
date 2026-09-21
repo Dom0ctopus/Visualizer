@@ -159,8 +159,19 @@ export function useItkVtkViewer() {
     // setUICollapsed(true) call in loadZarrUrl -- confirmed directly: the
     // full native toolbar/histogram/opacity-editor came back the moment a
     // label image was attached, squeezing the slice pane next to it.
-    // Re-asserting the collapse after attaching it hides those newly-shown
-    // groups the same way the initial load already hides the rest.
+    //
+    // A plain re-assertion of setUICollapsed(true) here does NOT fix that,
+    // even though it looks like it should -- confirmed by reading
+    // itk-vtk-viewer's own source: setUICollapsed only sends its internal
+    // "TOGGLE_UI_COLLAPSED" event when the requested value actually differs
+    // from its current state (`e !== S.uiCollapsed && k.send(...)`), and by
+    // this point the viewer's own state is already `true` from loadZarrUrl,
+    // so calling setUICollapsed(true) again is a silent no-op -- the newly-
+    // revealed groups never get hidden. Toggling it off and back on forces
+    // two real state transitions, so the entry action that hides
+    // "collapsible" groups actually re-runs against the now-larger set of
+    // groups the label image just added.
+    viewer.setUICollapsed(false)
     viewer.setUICollapsed(true)
   }, [])
 
