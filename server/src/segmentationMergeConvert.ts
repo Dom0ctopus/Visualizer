@@ -1,13 +1,21 @@
 import { buildPyramid, downsample2xNearest, writeMultiscaleGroup, type Level } from './zarrWriter.js'
 import { pickLevelUnderBudget, readWholeZarrLevel, readZarrLevels } from './zarrReader.js'
 
-// Comfortably under itk-vtk-viewer's own hard voxel cap (2^28 =
-// 268,435,456, confirmed by reading its bundled source -- see
-// zarrWriter.ts's own comment on CUBE_CHUNK_VOXEL_BUDGET) so the merged
-// label image itk-vtk-viewer actually loads is never the thing that trips
-// it, and so this conversion (which resamples every included layer across
-// every reference voxel) stays fast enough to run on demand.
-const REFERENCE_VOXEL_BUDGET = 96_000_000
+// As close to itk-vtk-viewer's own hard voxel cap (2^28 = 268,435,456,
+// confirmed by reading its bundled source -- see zarrWriter.ts's own
+// comment on CUBE_CHUNK_VOXEL_BUDGET) as safely possible, rather than an
+// arbitrary rounder/smaller number -- a real scan's pyramid levels jump by
+// 8x in voxel count per halving, so being meaningfully more conservative
+// than necessary here doesn't buy a proportionally small resolution loss,
+// it can skip an entire level: a first version of this set the budget to
+// 96,000,000, which for a scan whose own natural "fits under the cap"
+// level was ~147.6M voxels meant silently falling back a full level
+// further (~18.4M voxels, 8x fewer) than what a single segmentation
+// displayed at on its own -- visibly blocky/fragmented thin structures
+// (e.g. blood vessels) in the merged cumulative view that weren't blocky
+// before. 0.9x leaves enough margin for the pyramid's edge-padding/rounding
+// without giving up a whole level for scans like that one.
+const REFERENCE_VOXEL_BUDGET = Math.floor(268_435_456 * 0.9)
 
 export interface MergeLayerInput {
   /** e.g. `${segZarrPathFor(id)}/layer${n}` -- one complete multiscale
