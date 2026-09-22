@@ -18,6 +18,11 @@ interface ItkVtkViewerInstance {
   setLabelImage: (image: URL) => Promise<void>
   setLabelImageWeights: (weights: Map<number, number>) => void
   setLabelImageLabelNames: (names: Map<number, string>) => void
+  // Cropping-planes API, confirmed by reading itk-vtk-viewer's own bundled
+  // source -- see loadLabelImageUrl's own comment for why resetCroppingPlanes
+  // gets called after a label image reload.
+  getCroppingPlanesEnabled: () => boolean
+  resetCroppingPlanes: () => void
   delete: () => void
 }
 
@@ -173,6 +178,22 @@ export function useItkVtkViewer() {
     // groups the label image just added.
     viewer.setUICollapsed(false)
     viewer.setUICollapsed(true)
+
+    // The "cumulative 3D view" merge (useSegmentationMerge3D.ts) rebuilds
+    // this label image with different geometry (origin/size/spacing) every
+    // time the set of loaded segmentations changes -- its reference grid is
+    // sized to whatever's currently included, not a fixed extent. itk-vtk-
+    // viewer's cropping tool tracks its planes against an internal
+    // "cropping virtual image" whose own dimensions get recomputed from the
+    // loaded images -- confirmed by reading its source -- so swapping in a
+    // label image with different bounds can leave previously-set crop
+    // planes referring to extent values that no longer mean the same
+    // physical region: dragging a plane back out doesn't necessarily
+    // restore what it used to reveal. Resetting to the (safe, always
+    // correct) uncropped state after every reload avoids that silently
+    // wrong state; only doing it while cropping is actually enabled avoids
+    // any unnecessary work/render when it was never touched.
+    if (viewer.getCroppingPlanesEnabled()) viewer.resetCroppingPlanes()
   }, [])
 
   const setLabelWeights = useCallback((weights: Map<number, number>) => {

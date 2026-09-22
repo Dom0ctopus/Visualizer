@@ -1,5 +1,39 @@
-import { buildPyramid, downsample2xNearest, writeMultiscaleGroup, type Level } from './zarrWriter.js'
+import { buildPyramid, downsample2xNearest, writeMultiscaleGroup, type Level, type TypedArray } from './zarrWriter.js'
 import { readWholeZarrLevel, readZarrLevels, type ZarrLevelInfo } from './zarrReader.js'
+
+/**
+ * Scans a whole layer's native data for the tight bounding box of its
+ * actual nonzero content, in that layer's own LOCAL [x, y, z] voxel
+ * indices -- as opposed to its declared array shape, which segmentation
+ * files in this app are commonly exported at full scan dimensions
+ * regardless of how much of that volume the segmented structure actually
+ * occupies (see convertSegmentationMergeToOmeZarr's own comment on why
+ * this matters for widespread-but-sparse structures like vasculature).
+ * Returns null if the layer has no nonzero voxels at all.
+ */
+function scanContentBbox(data: TypedArray, size: [number, number, number]): { min: [number, number, number]; max: [number, number, number] } | null {
+  const [sx, sy] = size
+  let minX = Infinity
+  let maxX = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
+  let minZ = Infinity
+  let maxZ = -Infinity
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] === 0) continue
+    const z = Math.floor(i / (sy * sx))
+    const y = Math.floor((i - z * sy * sx) / sx)
+    const x = i - z * sy * sx - y * sx
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+    if (z < minZ) minZ = z
+    if (z > maxZ) maxZ = z
+  }
+  if (maxX < 0 || !Number.isFinite(minX)) return null
+  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] }
+}
 
 // As close to itk-vtk-viewer's own hard voxel cap (2^28 = 268,435,456,
 // confirmed by reading its bundled source -- see zarrWriter.ts's own
@@ -58,19 +92,23 @@ export interface MergedSegmentMapping {
  * caller uses that to drive itk-vtk-viewer's per-label
  * setLabelImageWeights/setLabelImageLabelNames from its own segment state.
  *
- * Resolution: the OUTPUT reference grid is sized to the PHYSICAL EXTENT the
- * included segmentations actually occupy (their union bounding box), not
- * the whole base volume -- segmentation files in practice are often small
- * cropped ROIs (see useSegmentationOverlays.ts's own comment on why), so
- * covering the whole volume's extent at a shared resolution wastes most of
- * the voxel budget on empty background and forces a coarser resolution
- * than the segmentation data actually needs. It starts at the base
+ * Resolution: the OUTPUT reference grid is sized to the PHYSICAL EXTENT of
+ * the included segmentations' ACTUAL nonzero content (their union bounding
+ * box, scanned from real data -- see scanContentBbox), not their declared
+ * array extent and not the whole base volume. Segmentation files here are
+ * commonly exported at the full scan's own dimensions regardless of how
+ * much of that space is actually labeled, and a widespread-but-sparse
+ * structure (vasculature, nerves -- can touch most of the body while the
+ * labeled voxels themselves are a tiny fraction of it) would size the
+ * reference grid the same as the whole volume if extent alone were used,
+ * undoing the resolution benefit entirely. The grid starts at the base
  * volume's own native (finest) voxel spacing and only coarsens (by
  * successive 2x, matching every other pyramid this app builds) if the
- * union bbox at that spacing would exceed REFERENCE_VOXEL_BUDGET -- a small
- * ROI's own bbox can easily fit fully native; a segmentation spanning most
- * of the volume converges toward roughly the resolution the base volume
- * itself displays at (e.g. its own "level 2").
+ * content bbox at that spacing would exceed REFERENCE_VOXEL_BUDGET -- a
+ * small or genuinely localized structure can still fit fully native even
+ * though its declared array spans the whole scan; something that truly is
+ * spread through most of the volume converges toward roughly the
+ * resolution the base volume itself displays at (e.g. its own "level 2").
  *
  * Every INPUT layer, regardless of the above, is always read at its OWN
  * native level (level 0) -- never a coarser level of its own pyramid, even
@@ -103,16 +141,47 @@ export async function convertSegmentationMergeToOmeZarr(
   )
 
   // Union of every included layer's own physical bounding box, in [z, y, x]
-  // mm -- origin is the box's near corner; "origin + (size-1)*spacing" is
-  // its own last voxel's corner, the same convention
-  // useSegmentationOverlays.ts's overlap check uses.
+  // mm. Computed from each layer's ACTUAL nonzero content (scanning its
+  // native data), not its declared array extent -- segmentation files here
+  // are commonly exported at the full scan's own dimensions regardless of
+  // how much of that space the segmented structure occupies (confirmed
+  // directly: a real cardiovascular/nerve segmentation's declared shape
+  // matched the whole scan's own dimensions). Using the declared extent
+  // for a widespread-but-sparse structure like vasculature -- which can
+  // touch most of the body even though the labeled voxels themselves are a
+  // tiny fraction of it -- would size the reference grid the same as the
+  // old whole-volume approach and undo the resolution benefit entirely.
+  // Each layer's data is read once here to scan it, then discarded (not
+  // held) -- the resample loop below reads it again -- trading extra I/O
+  // for bounded memory use regardless of how many layers are included, a
+  // deliberate choice given how directly this app has already been bitten
+  // by unbounded memory growth this session.
   const bboxMin: [number, number, number] = [Infinity, Infinity, Infinity]
   const bboxMax: [number, number, number] = [-Infinity, -Infinity, -Infinity]
-  for (const level of layerLevel0s) {
+  for (let i = 0; i < includedLayers.length; i++) {
+    const level = layerLevel0s[i]
+    const data = await readWholeZarrLevel(includedLayers[i].segZarrGroupPath, level)
+    const content = scanContentBbox(data.data, data.size)
+    if (!content) continue // no nonzero voxels in this layer at all
+    const [minX, minY, minZ] = content.min
+    const [maxX, maxY, maxZ] = content.max
+    // content.min/max are [x, y, z] local voxel indices; level.origin/
+    // spacing are [z, y, x] -- convert each local axis to its matching
+    // physical [z, y, x] axis.
+    const localMin = [minZ, minY, minX]
+    const localMax = [maxZ, maxY, maxX]
     for (const axis of [0, 1, 2] as const) {
-      bboxMin[axis] = Math.min(bboxMin[axis], level.origin[axis])
-      bboxMax[axis] = Math.max(bboxMax[axis], level.origin[axis] + (level.size[axis] - 1) * level.spacing[axis])
+      bboxMin[axis] = Math.min(bboxMin[axis], level.origin[axis] + localMin[axis] * level.spacing[axis])
+      bboxMax[axis] = Math.max(bboxMax[axis], level.origin[axis] + localMax[axis] * level.spacing[axis])
     }
+  }
+
+  // Every included layer was entirely empty (no nonzero voxels at all) --
+  // write a minimal, valid (if useless) 1-voxel grid rather than let
+  // Infinity/-Infinity propagate into NaN sizes below.
+  if (!Number.isFinite(bboxMax[0])) {
+    bboxMin[0] = bboxMin[1] = bboxMin[2] = 0
+    bboxMax[0] = bboxMax[1] = bboxMax[2] = 0
   }
 
   // Coarsen from native spacing by successive doublings until the union
