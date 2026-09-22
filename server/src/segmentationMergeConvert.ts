@@ -1,5 +1,5 @@
 import { buildPyramid, downsample2xNearest, writeMultiscaleGroup, type Level } from './zarrWriter.js'
-import { pickLevelUnderBudget, readWholeZarrLevel, readZarrLevels, type ZarrLevelInfo } from './zarrReader.js'
+import { readWholeZarrLevel, readZarrLevels, type ZarrLevelInfo } from './zarrReader.js'
 
 // As close to itk-vtk-viewer's own hard voxel cap (2^28 = 268,435,456,
 // confirmed by reading its bundled source -- see zarrWriter.ts's own
@@ -58,26 +58,34 @@ export interface MergedSegmentMapping {
  * caller uses that to drive itk-vtk-viewer's per-label
  * setLabelImageWeights/setLabelImageLabelNames from its own segment state.
  *
- * Resolution: sized to the PHYSICAL EXTENT the included segmentations
- * actually occupy (their union bounding box), not the whole base volume --
- * segmentation files in practice are often small cropped ROIs (see
- * useSegmentationOverlays.ts's own comment on why), so covering the whole
- * volume's extent at a shared resolution wastes most of the voxel budget on
- * empty background and forces a coarser resolution than the segmentation
- * data actually needs. The reference grid starts at the base volume's own
- * native (finest) voxel spacing -- there's no real information to be
- * gained rendering label data finer than the scan it was segmented from --
- * and only coarsens (by successive 2x, matching every other pyramid this
- * app builds) if the union bbox at that spacing would exceed
- * REFERENCE_VOXEL_BUDGET. A small ROI segmentation's own bbox can easily
- * fit natively; segmentations spanning most of the volume converge toward
- * roughly the same resolution the old whole-volume-sized reference grid
- * used. Each input layer is read at whichever of ITS OWN levels fits
- * REFERENCE_VOXEL_BUDGET in memory, then resampled onto the reference grid
- * via the same nearest-neighbor, physical-origin/spacing affine mapping
- * useSegmentationOverlays.ts uses for the 2D pane -- so a cropped export or
- * a coarser-spacing ROI segmentation merges in correctly aligned, not just
- * ones that already share the volume's exact grid.
+ * Resolution: the OUTPUT reference grid is sized to the PHYSICAL EXTENT the
+ * included segmentations actually occupy (their union bounding box), not
+ * the whole base volume -- segmentation files in practice are often small
+ * cropped ROIs (see useSegmentationOverlays.ts's own comment on why), so
+ * covering the whole volume's extent at a shared resolution wastes most of
+ * the voxel budget on empty background and forces a coarser resolution
+ * than the segmentation data actually needs. It starts at the base
+ * volume's own native (finest) voxel spacing and only coarsens (by
+ * successive 2x, matching every other pyramid this app builds) if the
+ * union bbox at that spacing would exceed REFERENCE_VOXEL_BUDGET -- a small
+ * ROI's own bbox can easily fit fully native; a segmentation spanning most
+ * of the volume converges toward roughly the resolution the base volume
+ * itself displays at (e.g. its own "level 2").
+ *
+ * Every INPUT layer, regardless of the above, is always read at its OWN
+ * native level (level 0) -- never a coarser level of its own pyramid, even
+ * one that would technically fit the same voxel budget. Reading a
+ * pre-downsampled level would mean resampling already-nearest-neighbor-
+ * quantized data a second time onto the reference grid -- two independent
+ * lossy quantization passes stacked on each other, which visibly
+ * fragments/blocks thin structures (blood vessels, nerves) far more than
+ * either pass alone. Reading native data and letting ONE resample onto the
+ * reference grid do all the quantization keeps that to a single pass, even
+ * when the output ends up at a coarser (e.g. level-2-equivalent)
+ * resolution than the input. This does mean reading the same
+ * amount of data this app's own per-segmentation conversion already reads
+ * once during upload (see segmentationZarrConvert.ts) -- a real cost, but
+ * not a new class of one.
  */
 export async function convertSegmentationMergeToOmeZarr(
   volumeZarrGroupPath: string,
@@ -87,7 +95,9 @@ export async function convertSegmentationMergeToOmeZarr(
   const baseLevels = await readZarrLevels(volumeZarrGroupPath)
   const nativeSpacing = baseLevels.find((l) => l.index === 0)!.spacing
 
-  const includedLayers = layers.filter((l) => l.labelValues.length > 0)
+  const includedLayers = layers
+    .map((layer, originalIndex) => ({ ...layer, originalIndex }))
+    .filter((l) => l.labelValues.length > 0)
   const layerLevel0s = await Promise.all(
     includedLayers.map(async (l) => (await readZarrLevels(l.segZarrGroupPath)).find((lv) => lv.index === 0)!)
   )
@@ -125,12 +135,9 @@ export async function convertSegmentationMergeToOmeZarr(
   const mapping: MergedSegmentMapping[] = []
   let nextGlobalLabel = 1
 
-  for (let layerIndex = 0; layerIndex < layers.length; layerIndex++) {
-    const { segZarrGroupPath, labelValues } = layers[layerIndex]
-    if (labelValues.length === 0) continue
-
-    const segLevels = await readZarrLevels(segZarrGroupPath)
-    const segLevel = pickLevelUnderBudget(segLevels, REFERENCE_VOXEL_BUDGET)
+  for (let i = 0; i < includedLayers.length; i++) {
+    const { segZarrGroupPath, labelValues, originalIndex: layerIndex } = includedLayers[i]
+    const segLevel = layerLevel0s[i]
     const segData = await readWholeZarrLevel(segZarrGroupPath, segLevel)
     const [segSizeX, segSizeY, segSizeZ] = segData.size
 

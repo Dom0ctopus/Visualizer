@@ -136,17 +136,3 @@ export async function readWholeZarrLevel(zarrGroupPath: string, level: ZarrLevel
   }
   return { data: out, size: [shapeX, shapeY, shapeZ] }
 }
-
-/** Picks the finest (smallest-index) level whose total voxel count doesn't
- *  exceed `budget`, falling back to the coarsest available level if even
- *  that doesn't fit -- used both for the merge's own output reference grid
- *  (bounded well under itk-vtk-viewer's known voxel cap) and for choosing
- *  which of an input layer's own levels to read. */
-export function pickLevelUnderBudget(levels: ZarrLevelInfo[], budget: number): ZarrLevelInfo {
-  const sorted = [...levels].sort((a, b) => a.index - b.index)
-  for (const level of sorted) {
-    const voxels = level.size[0] * level.size[1] * level.size[2]
-    if (voxels <= budget) return level
-  }
-  return sorted[sorted.length - 1]
-}
