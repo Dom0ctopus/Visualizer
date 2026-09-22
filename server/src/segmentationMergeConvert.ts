@@ -35,40 +35,57 @@ function scanContentBbox(data: TypedArray, size: [number, number, number]): { mi
   return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] }
 }
 
+// How many dilation passes to run after scattering -- see dilateOnce's own
+// comment for what one pass does. A path that turns sharply between
+// consecutive native voxels (a "sinuous" vessel) can move diagonally
+// across more than one reference cell per native step once downsampled,
+// which a single 26-connected pass doesn't always fully bridge; two passes
+// closes gaps of up to 2 reference voxels in any direction, at the cost of
+// a little extra visible thickness at genuine endpoints.
+const DILATION_PASSES = 2
+
 /**
- * One step of 6-connected (face-neighbor) dilation: any voxel that's
- * currently background (0) but has at least one nonzero face-neighbor
- * adopts that neighbor's value. Reads from an unmodified snapshot so the
- * dilation grows by exactly one voxel in this single pass, not an
- * uncontrolled cascade. This is the "padding voxels" step requested
- * alongside scatter-based resampling (see the main function's per-layer
- * loop): scattering already guarantees no native voxel of a thin structure
- * is silently dropped, but a >1x downsample factor can still leave a
- * single-voxel-wide structure as a lightly dashed line wherever
- * consecutive native voxels happened to land on non-adjacent reference
- * cells -- one dilation pass reliably bridges gaps of that size, and makes
- * genuinely thin structures a little more visible in the 3D render besides.
+ * One step of 26-connected (full 3x3x3 neighborhood, including diagonals)
+ * dilation: any voxel that's currently background (0) but has at least one
+ * nonzero neighbor -- face, edge, or corner -- adopts that neighbor's
+ * value. Reads from an unmodified snapshot so the dilation grows by
+ * exactly one voxel in this single pass, not an uncontrolled cascade. This
+ * is the "padding voxels" step requested alongside scatter-based
+ * resampling (see the main function's per-layer loop): scattering already
+ * guarantees no native voxel of a thin structure is silently dropped, but
+ * a >1x downsample factor can still leave a single-voxel-wide structure as
+ * a dashed line, especially where it turns sharply, wherever consecutive
+ * native voxels land on non-adjacent reference cells. Diagonal (not just
+ * face) neighbors matter here specifically because a sharp turn is exactly
+ * where consecutive scattered points are most likely to end up
+ * diagonally, not face-adjacent, to each other.
  */
 function dilateOnce(data: Uint16Array, sx: number, sy: number, sz: number): void {
   const snapshot = data.slice()
   for (let z = 0; z < sz; z++) {
+    const zLo = Math.max(0, z - 1)
+    const zHi = Math.min(sz - 1, z + 1)
     for (let y = 0; y < sy; y++) {
+      const yLo = Math.max(0, y - 1)
+      const yHi = Math.min(sy - 1, y + 1)
       const rowBase = z * sy * sx + y * sx
       for (let x = 0; x < sx; x++) {
         const i = rowBase + x
         if (snapshot[i] !== 0) continue
-        if (x > 0 && snapshot[i - 1] !== 0) {
-          data[i] = snapshot[i - 1]
-        } else if (x < sx - 1 && snapshot[i + 1] !== 0) {
-          data[i] = snapshot[i + 1]
-        } else if (y > 0 && snapshot[i - sx] !== 0) {
-          data[i] = snapshot[i - sx]
-        } else if (y < sy - 1 && snapshot[i + sx] !== 0) {
-          data[i] = snapshot[i + sx]
-        } else if (z > 0 && snapshot[i - sy * sx] !== 0) {
-          data[i] = snapshot[i - sy * sx]
-        } else if (z < sz - 1 && snapshot[i + sy * sx] !== 0) {
-          data[i] = snapshot[i + sy * sx]
+        const xLo = Math.max(0, x - 1)
+        const xHi = Math.min(sx - 1, x + 1)
+        outer: for (let nz = zLo; nz <= zHi; nz++) {
+          for (let ny = yLo; ny <= yHi; ny++) {
+            const nRowBase = nz * sy * sx + ny * sx
+            for (let nx = xLo; nx <= xHi; nx++) {
+              if (nz === z && ny === y && nx === x) continue
+              const neighbor = snapshot[nRowBase + nx]
+              if (neighbor !== 0) {
+                data[i] = neighbor
+                break outer
+              }
+            }
+          }
         }
       }
     }
@@ -173,12 +190,32 @@ export async function convertSegmentationMergeToOmeZarr(
   const baseLevels = await readZarrLevels(volumeZarrGroupPath)
   const nativeSpacing = baseLevels.find((l) => l.index === 0)!.spacing
 
-  const includedLayers = layers
+  // A segmentation's reported layerCount (server/src/index.ts's
+  // enrichSegmentationRecord) comes from the HIGHEST layer any segment's
+  // metadata declares itself on (Segment0_Layer, ...) -- not from how many
+  // layers actually got written to disk during conversion, which is
+  // segmentationZarrConvert.ts's own read of the NRRD's real "list axis"
+  // size. A file whose header declares a segment on a layer beyond what its
+  // own data actually contains (seen in practice) would otherwise crash the
+  // whole merge on one missing directory; skip that one layer instead; with
+  // a clear warning, so a metadata quirk in one segmentation doesn't take
+  // down the cumulative view for every other segmentation that's fine.
+  const candidateLayers = layers
     .map((layer, originalIndex) => ({ ...layer, originalIndex }))
     .filter((l) => l.labelValues.length > 0)
-  const layerLevel0s = await Promise.all(
-    includedLayers.map(async (l) => (await readZarrLevels(l.segZarrGroupPath)).find((lv) => lv.index === 0)!)
+  const resolvedLayers = await Promise.all(
+    candidateLayers.map(async (l) => {
+      try {
+        const level0 = (await readZarrLevels(l.segZarrGroupPath)).find((lv) => lv.index === 0)
+        return level0 ? { layer: l, level0 } : null
+      } catch (e) {
+        console.warn(`Cumulative 3D view: skipping missing layer at ${l.segZarrGroupPath}:`, e instanceof Error ? e.message : e)
+        return null
+      }
+    })
   )
+  const includedLayers = resolvedLayers.filter((r) => r !== null).map((r) => r.layer)
+  const layerLevel0s = resolvedLayers.filter((r) => r !== null).map((r) => r.level0)
 
   // Union of every included layer's own physical bounding box, in [z, y, x]
   // mm. Computed from each layer's ACTUAL nonzero content (scanning its
@@ -305,7 +342,7 @@ export async function convertSegmentationMergeToOmeZarr(
     }
   }
 
-  dilateOnce(combined, refX, refY, refZ)
+  for (let i = 0; i < DILATION_PASSES; i++) dilateOnce(combined, refX, refY, refZ)
 
   const combinedLevel: Level = { data: combined, size: [refX, refY, refZ] }
   const pyramidLevels = buildPyramid(combinedLevel, Uint16Array, downsample2xNearest)
