@@ -1,7 +1,7 @@
 import cors from 'cors'
 import express from 'express'
 import multer from 'multer'
-import { rm } from 'node:fs/promises'
+import { rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { readNrrdHeader } from './nrrdHeader.js'
 import { convertSegmentationMergeToOmeZarr, type MergedSegmentMapping } from './segmentationMergeConvert.js'
@@ -91,20 +91,46 @@ interface MergeState {
 // mergeZarrPathFor's single fixed output path.
 let currentMerge: MergeState | null = null
 
+// Every merge request bumps this; a background conversion only commits its
+// result if it's still the latest one when it finishes. The client
+// (useSegmentationMerge3D.ts) fires a brand new merge automatically every
+// time the set of loaded segmentations changes -- load one segmentation
+// while a previous merge is still converting (a real, potentially slow
+// operation) and, without this guard, whichever one happened to finish
+// LAST would silently win, regardless of which was actually requested
+// last: an older, smaller merge finishing after a newer, more complete one
+// would clobber it, showing only some of what's actually loaded with no
+// error at all -- confirmed as the actual cause of a "both say loaded but
+// only one renders" report.
+let mergeGeneration = 0
+
 // Runs a cumulative-3D-view merge (segmentationMergeConvert.ts) in the
 // background, same fire-and-forget pattern as convertInBackground/
-// convertSegmentationInBackground above.
-function convertMergeInBackground(volumeId: string, layers: Array<{ segmentationId: string; layer: number; labelValues: number[] }>): void {
+// convertSegmentationInBackground above. Writes to its own generation-
+// specific temp path and only swaps it into the canonical location (an
+// atomic rename, so a client mid-read of the old content never sees a
+// half-written new one) if it's still the latest request by the time it
+// finishes -- a superseded generation's output is discarded instead of
+// ever touching the canonical path or `currentMerge` at all.
+function convertMergeInBackground(generation: number, volumeId: string, layers: Array<{ segmentationId: string; layer: number; labelValues: number[] }>): void {
+  const tempPath = path.join(ZARR_DIR, `_merge.tmp-${generation}.ome.zarr`)
   void (async () => {
     try {
-      await rm(mergeZarrPathFor(), { recursive: true, force: true })
       const layerInputs = layers.map((l) => ({
         segZarrGroupPath: path.join(segZarrPathFor(l.segmentationId), `layer${l.layer}`),
         labelValues: l.labelValues
       }))
-      const { mapping } = await convertSegmentationMergeToOmeZarr(zarrPathFor(volumeId), layerInputs, mergeZarrPathFor())
+      const { mapping } = await convertSegmentationMergeToOmeZarr(zarrPathFor(volumeId), layerInputs, tempPath)
+      if (generation !== mergeGeneration) {
+        await rm(tempPath, { recursive: true, force: true })
+        return
+      }
+      await rm(mergeZarrPathFor(), { recursive: true, force: true })
+      await rename(tempPath, mergeZarrPathFor())
       currentMerge = { status: 'ready', mapping }
     } catch (e) {
+      await rm(tempPath, { recursive: true, force: true }).catch(() => {})
+      if (generation !== mergeGeneration) return
       console.error('Segmentation merge failed:', e)
       currentMerge = { status: 'failed', error: e instanceof Error ? e.message : 'Merge failed' }
     }
@@ -217,9 +243,10 @@ app.post('/api/segmentation-merges', express.json(), (req, res) => {
     res.status(400).json({ error: 'Malformed layers entry' })
     return
   }
+  const generation = ++mergeGeneration
   currentMerge = { status: 'pending' }
   res.json(currentMerge)
-  convertMergeInBackground(volumeId, validLayers)
+  convertMergeInBackground(generation, volumeId, validLayers)
 })
 
 app.get('/api/segmentation-merges', (_req, res) => {
