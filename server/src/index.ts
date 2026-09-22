@@ -4,6 +4,7 @@ import multer from 'multer'
 import { rm } from 'node:fs/promises'
 import path from 'node:path'
 import { readNrrdHeader } from './nrrdHeader.js'
+import { convertSegmentationMergeToOmeZarr, type MergedSegmentMapping } from './segmentationMergeConvert.js'
 import { convertSegmentationNrrdToOmeZarr } from './segmentationZarrConvert.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
 import { FILES_DIR, ZARR_DIR, addRecord, getRecord, initStore, listRecords, newId, removeRecord, updateRecord } from './store.js'
@@ -31,6 +32,16 @@ function zarrPathFor(id: string): string {
 
 function segZarrPathFor(id: string): string {
   return path.join(ZARR_DIR, `${id}.seg.ome.zarr`)
+}
+
+// Fixed (not per-request) path: this app runs single-user/local, so at most
+// one merged "cumulative" 3D label image is ever needed at a time. Reusing
+// one slot instead of minting a new id per merge (every time the set of
+// loaded segmentations changes) avoids accumulating never-cleaned-up merge
+// output on disk across a session -- see the git history for why unbounded
+// file growth under server/data is worth taking seriously here.
+function mergeZarrPathFor(): string {
+  return path.join(ZARR_DIR, '_merge.ome.zarr')
 }
 
 // Runs in the background after a volume upload responds -- conversion of a
@@ -63,6 +74,39 @@ function convertSegmentationInBackground(id: string, nrrdPath: string): void {
     } catch (e) {
       console.error(`Segmentation conversion failed for ${id}:`, e)
       await updateRecord(id, { zarrStatus: 'failed', zarrError: e instanceof Error ? e.message : 'Conversion failed' })
+    }
+  })()
+}
+
+interface MergeState {
+  status: 'pending' | 'ready' | 'failed'
+  error?: string
+  mapping?: MergedSegmentMapping[]
+}
+
+// In-memory only, not persisted to store.ts's index.json -- a merge is
+// fully derived from already-persisted volume/segmentation records, so
+// there's nothing here worth surviving a server restart; the client just
+// re-requests one if it needs it again. Single slot, matching
+// mergeZarrPathFor's single fixed output path.
+let currentMerge: MergeState | null = null
+
+// Runs a cumulative-3D-view merge (segmentationMergeConvert.ts) in the
+// background, same fire-and-forget pattern as convertInBackground/
+// convertSegmentationInBackground above.
+function convertMergeInBackground(volumeId: string, layers: Array<{ segmentationId: string; layer: number; labelValues: number[] }>): void {
+  void (async () => {
+    try {
+      await rm(mergeZarrPathFor(), { recursive: true, force: true })
+      const layerInputs = layers.map((l) => ({
+        segZarrGroupPath: path.join(segZarrPathFor(l.segmentationId), `layer${l.layer}`),
+        labelValues: l.labelValues
+      }))
+      const { mapping } = await convertSegmentationMergeToOmeZarr(zarrPathFor(volumeId), layerInputs, mergeZarrPathFor())
+      currentMerge = { status: 'ready', mapping }
+    } catch (e) {
+      console.error('Segmentation merge failed:', e)
+      currentMerge = { status: 'failed', error: e instanceof Error ? e.message : 'Merge failed' }
     }
   })()
 }
@@ -154,6 +198,32 @@ app.post('/api/segmentations', upload.single('file'), async (req, res) => {
     await rm(filePath, { force: true })
     res.status(422).json({ error: e instanceof Error ? e.message : 'Failed to parse segmentation' })
   }
+})
+
+app.post('/api/segmentation-merges', express.json(), (req, res) => {
+  const { volumeId, layers } = (req.body ?? {}) as {
+    volumeId?: string
+    layers?: Array<{ segmentationId?: string; layer?: number; labelValues?: number[] }>
+  }
+  if (!volumeId || !Array.isArray(layers) || layers.length === 0) {
+    res.status(400).json({ error: 'Missing volumeId or layers' })
+    return
+  }
+  const validLayers = layers.filter(
+    (l): l is { segmentationId: string; layer: number; labelValues: number[] } =>
+      typeof l.segmentationId === 'string' && typeof l.layer === 'number' && Array.isArray(l.labelValues)
+  )
+  if (validLayers.length !== layers.length) {
+    res.status(400).json({ error: 'Malformed layers entry' })
+    return
+  }
+  currentMerge = { status: 'pending' }
+  res.json(currentMerge)
+  convertMergeInBackground(volumeId, validLayers)
+})
+
+app.get('/api/segmentation-merges', (_req, res) => {
+  res.json(currentMerge ?? { status: 'none' })
 })
 
 app.delete('/api/files/:id', async (req, res) => {
