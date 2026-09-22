@@ -35,6 +35,46 @@ function scanContentBbox(data: TypedArray, size: [number, number, number]): { mi
   return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] }
 }
 
+/**
+ * One step of 6-connected (face-neighbor) dilation: any voxel that's
+ * currently background (0) but has at least one nonzero face-neighbor
+ * adopts that neighbor's value. Reads from an unmodified snapshot so the
+ * dilation grows by exactly one voxel in this single pass, not an
+ * uncontrolled cascade. This is the "padding voxels" step requested
+ * alongside scatter-based resampling (see the main function's per-layer
+ * loop): scattering already guarantees no native voxel of a thin structure
+ * is silently dropped, but a >1x downsample factor can still leave a
+ * single-voxel-wide structure as a lightly dashed line wherever
+ * consecutive native voxels happened to land on non-adjacent reference
+ * cells -- one dilation pass reliably bridges gaps of that size, and makes
+ * genuinely thin structures a little more visible in the 3D render besides.
+ */
+function dilateOnce(data: Uint16Array, sx: number, sy: number, sz: number): void {
+  const snapshot = data.slice()
+  for (let z = 0; z < sz; z++) {
+    for (let y = 0; y < sy; y++) {
+      const rowBase = z * sy * sx + y * sx
+      for (let x = 0; x < sx; x++) {
+        const i = rowBase + x
+        if (snapshot[i] !== 0) continue
+        if (x > 0 && snapshot[i - 1] !== 0) {
+          data[i] = snapshot[i - 1]
+        } else if (x < sx - 1 && snapshot[i + 1] !== 0) {
+          data[i] = snapshot[i + 1]
+        } else if (y > 0 && snapshot[i - sx] !== 0) {
+          data[i] = snapshot[i - sx]
+        } else if (y < sy - 1 && snapshot[i + sx] !== 0) {
+          data[i] = snapshot[i + sx]
+        } else if (z > 0 && snapshot[i - sy * sx] !== 0) {
+          data[i] = snapshot[i - sy * sx]
+        } else if (z < sz - 1 && snapshot[i + sy * sx] !== 0) {
+          data[i] = snapshot[i + sy * sx]
+        }
+      }
+    }
+  }
+}
+
 // As close to itk-vtk-viewer's own hard voxel cap (2^28 = 268,435,456,
 // confirmed by reading its bundled source -- see zarrWriter.ts's own
 // comment on CUBE_CHUNK_VOXEL_BUDGET) as safely possible, rather than an
@@ -217,40 +257,55 @@ export async function convertSegmentationMergeToOmeZarr(
       mapping.push({ globalLabelValue, layerIndex, originalLabelValue })
     }
 
-    // Per-axis affine mapping from a reference voxel index to this layer's
-    // own nearest voxel index -- see useSegmentationOverlays.ts's
-    // SliceOverlay comment for the identical 2D-pane formula this mirrors.
+    // Forward ("scatter") mapping from this layer's own native voxel index
+    // to a reference voxel index -- the inverse of a "gather" (for each
+    // reference voxel, sample its one nearest source voxel), which is what
+    // this used to be. Gather silently drops any source voxel that isn't
+    // exactly the one nearest sample point for its reference cell -- fatal
+    // for a structure only 1-2 voxels wide (blood vessels, nerves): most of
+    // its native voxels are never anyone's "nearest" and just vanish,
+    // fragmenting a continuous vessel into disconnected specks regardless
+    // of how the reference resolution is chosen. Scatter instead visits
+    // EVERY native voxel once and marks wherever it lands -- a thin
+    // structure's full native path, not just whichever points happened to
+    // be sampled, so a continuous run of native voxels can only ever
+    // produce a continuous (or, worst case near a >1 factor, lightly
+    // dashed -- see the dilation pass below) run of reference voxels.
     // [z, y, x] order, matching ZarrLevelInfo.
-    const scaleZ = refLevel.spacing[0] / segLevel.spacing[0]
-    const scaleY = refLevel.spacing[1] / segLevel.spacing[1]
-    const scaleX = refLevel.spacing[2] / segLevel.spacing[2]
-    const offsetZ = (refLevel.origin[0] - segLevel.origin[0]) / segLevel.spacing[0]
-    const offsetY = (refLevel.origin[1] - segLevel.origin[1]) / segLevel.spacing[1]
-    const offsetX = (refLevel.origin[2] - segLevel.origin[2]) / segLevel.spacing[2]
+    const scaleZ = segLevel.spacing[0] / refLevel.spacing[0]
+    const scaleY = segLevel.spacing[1] / refLevel.spacing[1]
+    const scaleX = segLevel.spacing[2] / refLevel.spacing[2]
+    const offsetZ = (segLevel.origin[0] - refLevel.origin[0]) / refLevel.spacing[0]
+    const offsetY = (segLevel.origin[1] - refLevel.origin[1]) / refLevel.spacing[1]
+    const offsetX = (segLevel.origin[2] - refLevel.origin[2]) / refLevel.spacing[2]
 
-    for (let z = 0; z < refZ; z++) {
-      const sz = Math.round(z * scaleZ + offsetZ)
-      if (sz < 0 || sz >= segSizeZ) continue
-      for (let y = 0; y < refY; y++) {
-        const sy = Math.round(y * scaleY + offsetY)
-        if (sy < 0 || sy >= segSizeY) continue
-        const dstRowBase = z * refY * refX + y * refX
-        const srcRowBase = sz * segSizeY * segSizeX + sy * segSizeX
-        for (let x = 0; x < refX; x++) {
-          const sx = Math.round(x * scaleX + offsetX)
-          if (sx < 0 || sx >= segSizeX) continue
+    for (let sz = 0; sz < segSizeZ; sz++) {
+      const rz = Math.round(sz * scaleZ + offsetZ)
+      if (rz < 0 || rz >= refZ) continue
+      const srcZBase = sz * segSizeY * segSizeX
+      const dstZBase = rz * refY * refX
+      for (let sy = 0; sy < segSizeY; sy++) {
+        const ry = Math.round(sy * scaleY + offsetY)
+        if (ry < 0 || ry >= refY) continue
+        const srcRowBase = srcZBase + sy * segSizeX
+        const dstRowBase = dstZBase + ry * refX
+        for (let sx = 0; sx < segSizeX; sx++) {
           const srcVal = segData.data[srcRowBase + sx]
           if (srcVal === 0) continue
+          const rx = Math.round(sx * scaleX + offsetX)
+          if (rx < 0 || rx >= refX) continue
           const globalLabelValue = labelToGlobal.get(srcVal)
           // Later layers in the input list win on overlap -- an arbitrary
           // but deterministic tie-break, since itk-vtk-viewer's label image
           // has no independent concept of "on top" the way the 2D pane's
           // ordered overlay list does.
-          if (globalLabelValue !== undefined) combined[dstRowBase + x] = globalLabelValue
+          if (globalLabelValue !== undefined) combined[dstRowBase + rx] = globalLabelValue
         }
       }
     }
   }
+
+  dilateOnce(combined, refX, refY, refZ)
 
   const combinedLevel: Level = { data: combined, size: [refX, refY, refZ] }
   const pyramidLevels = buildPyramid(combinedLevel, Uint16Array, downsample2xNearest)
