@@ -64,7 +64,20 @@ function statusLabel(record: VolumeRecord | SegmentationRecord): string {
  * server/src/zarrConvert.ts and segmentationZarrConvert.ts) finishes -- this
  * polls the library while any record is still converting.
  */
-export function ItkVtkViewerPage() {
+interface ItkVtkViewerPageProps {
+  /** Mirrors App.tsx's niivue `.app-body`'s own `hidden` attribute, applied
+   *  directly to this component's root element instead of an extra wrapper
+   *  div around it (App.tsx used to render one) -- that wrapper had no
+   *  className/flex properties of its own, so as a plain block-level child
+   *  of `.app`'s flex column it never grew to fill available height, which
+   *  left this component's own `.app-body` sized to its full content
+   *  height (everything in the sidebar, uncapped) instead of being
+   *  constrained to the viewport -- the actual cause of the sidebar's
+   *  segment list running off the bottom with no way to scroll to it. */
+  hidden?: boolean
+}
+
+export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
   const [library, setLibrary] = useState<LibraryRecord[]>([])
   const [error, setError] = useState<string | null>(null)
   const [searchText, setSearchText] = useState('')
@@ -162,7 +175,7 @@ export function ItkVtkViewerPage() {
   const combinedError = error ?? viewerError ?? sliceError ?? overlayError ?? mergeError
 
   return (
-    <div className="app-body">
+    <div className="app-body" hidden={hidden}>
       <div className="viewer itk-viewer-split">
         <div className="itk-viewer-pane">
           <div className="itk-viewer-pane-label">Slice View</div>

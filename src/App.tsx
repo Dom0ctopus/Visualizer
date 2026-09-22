@@ -108,11 +108,7 @@ function App() {
         </div>
       </header>
 
-      {itkEngineOpened && (
-        <div hidden={engine !== 'itk-vtk-viewer'}>
-          <ItkVtkViewerPage />
-        </div>
-      )}
+      {itkEngineOpened && <ItkVtkViewerPage hidden={engine !== 'itk-vtk-viewer'} />}
       <div className="app-body" hidden={engine !== 'niivue'}>
         <Viewer canvas2dRef={canvas2dRef} canvas3dRef={canvas3dRef} canvas3dDisplayRef={canvas3dDisplayRef} />
 
