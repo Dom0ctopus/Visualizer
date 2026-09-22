@@ -1,5 +1,5 @@
 import { buildPyramid, downsample2xNearest, writeMultiscaleGroup, type Level } from './zarrWriter.js'
-import { pickLevelUnderBudget, readWholeZarrLevel, readZarrLevels } from './zarrReader.js'
+import { pickLevelUnderBudget, readWholeZarrLevel, readZarrLevels, type ZarrLevelInfo } from './zarrReader.js'
 
 // As close to itk-vtk-viewer's own hard voxel cap (2^28 = 268,435,456,
 // confirmed by reading its bundled source -- see zarrWriter.ts's own
@@ -58,18 +58,26 @@ export interface MergedSegmentMapping {
  * caller uses that to drive itk-vtk-viewer's per-label
  * setLabelImageWeights/setLabelImageLabelNames from its own segment state.
  *
- * Resolution: built at whichever of the base volume's own pyramid levels
- * is the finest one still comfortably under itk-vtk-viewer's voxel cap
- * (REFERENCE_VOXEL_BUDGET) -- not the volume's native resolution, which
- * would make this both very slow (resampling scales with reference voxel
- * count times layer count) and pointless, since the 3D pane could never
- * load a finer label image than that anyway. Each input layer is read at
- * whichever of ITS OWN levels similarly fits, then resampled onto the
- * reference grid via the same nearest-neighbor, physical-origin/spacing
- * affine mapping useSegmentationOverlays.ts uses for the 2D pane -- so a
- * cropped export or a coarser-spacing ROI segmentation (see that file's own
- * comment) merges in correctly aligned, not just ones that already share
- * the volume's exact grid.
+ * Resolution: sized to the PHYSICAL EXTENT the included segmentations
+ * actually occupy (their union bounding box), not the whole base volume --
+ * segmentation files in practice are often small cropped ROIs (see
+ * useSegmentationOverlays.ts's own comment on why), so covering the whole
+ * volume's extent at a shared resolution wastes most of the voxel budget on
+ * empty background and forces a coarser resolution than the segmentation
+ * data actually needs. The reference grid starts at the base volume's own
+ * native (finest) voxel spacing -- there's no real information to be
+ * gained rendering label data finer than the scan it was segmented from --
+ * and only coarsens (by successive 2x, matching every other pyramid this
+ * app builds) if the union bbox at that spacing would exceed
+ * REFERENCE_VOXEL_BUDGET. A small ROI segmentation's own bbox can easily
+ * fit natively; segmentations spanning most of the volume converge toward
+ * roughly the same resolution the old whole-volume-sized reference grid
+ * used. Each input layer is read at whichever of ITS OWN levels fits
+ * REFERENCE_VOXEL_BUDGET in memory, then resampled onto the reference grid
+ * via the same nearest-neighbor, physical-origin/spacing affine mapping
+ * useSegmentationOverlays.ts uses for the 2D pane -- so a cropped export or
+ * a coarser-spacing ROI segmentation merges in correctly aligned, not just
+ * ones that already share the volume's exact grid.
  */
 export async function convertSegmentationMergeToOmeZarr(
   volumeZarrGroupPath: string,
@@ -77,7 +85,40 @@ export async function convertSegmentationMergeToOmeZarr(
   outputZarrPath: string
 ): Promise<{ mapping: MergedSegmentMapping[] }> {
   const baseLevels = await readZarrLevels(volumeZarrGroupPath)
-  const refLevel = pickLevelUnderBudget(baseLevels, REFERENCE_VOXEL_BUDGET)
+  const nativeSpacing = baseLevels.find((l) => l.index === 0)!.spacing
+
+  const includedLayers = layers.filter((l) => l.labelValues.length > 0)
+  const layerLevel0s = await Promise.all(
+    includedLayers.map(async (l) => (await readZarrLevels(l.segZarrGroupPath)).find((lv) => lv.index === 0)!)
+  )
+
+  // Union of every included layer's own physical bounding box, in [z, y, x]
+  // mm -- origin is the box's near corner; "origin + (size-1)*spacing" is
+  // its own last voxel's corner, the same convention
+  // useSegmentationOverlays.ts's overlap check uses.
+  const bboxMin: [number, number, number] = [Infinity, Infinity, Infinity]
+  const bboxMax: [number, number, number] = [-Infinity, -Infinity, -Infinity]
+  for (const level of layerLevel0s) {
+    for (const axis of [0, 1, 2] as const) {
+      bboxMin[axis] = Math.min(bboxMin[axis], level.origin[axis])
+      bboxMax[axis] = Math.max(bboxMax[axis], level.origin[axis] + (level.size[axis] - 1) * level.spacing[axis])
+    }
+  }
+
+  // Coarsen from native spacing by successive doublings until the union
+  // bbox fits the voxel budget at that resolution.
+  let factor = 1
+  let refSize: [number, number, number] = [0, 0, 0]
+  for (;;) {
+    refSize = [0, 1, 2].map(
+      (axis) => Math.floor((bboxMax[axis] - bboxMin[axis]) / (nativeSpacing[axis] * factor)) + 1
+    ) as [number, number, number]
+    const voxelCount = refSize[0] * refSize[1] * refSize[2]
+    if (voxelCount <= REFERENCE_VOXEL_BUDGET || factor > 1024) break
+    factor *= 2
+  }
+  const refSpacing: [number, number, number] = [nativeSpacing[0] * factor, nativeSpacing[1] * factor, nativeSpacing[2] * factor]
+  const refLevel: ZarrLevelInfo = { index: 0, levelPath: 'scale0', size: refSize, dtype: '<u2', origin: bboxMin, spacing: refSpacing }
   const [refZ, refY, refX] = refLevel.size
 
   const combined = new Uint16Array(refX * refY * refZ)
