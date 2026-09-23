@@ -35,60 +35,39 @@ function scanContentBbox(data: TypedArray, size: [number, number, number]): { mi
   return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] }
 }
 
-// How many dilation passes to run after scattering -- see dilateOnce's own
-// comment for what one pass does. A path that turns sharply between
-// consecutive native voxels (a "sinuous" vessel) can move diagonally
-// across more than one reference cell per native step once downsampled,
-// which a single 26-connected pass doesn't always fully bridge; two passes
-// closes gaps of up to 2 reference voxels in any direction, at the cost of
-// a little extra visible thickness at genuine endpoints.
-const DILATION_PASSES = 2
-
 /**
- * One step of 26-connected (full 3x3x3 neighborhood, including diagonals)
- * dilation: any voxel that's currently background (0) but has at least one
- * nonzero neighbor -- face, edge, or corner -- adopts that neighbor's
- * value. Reads from an unmodified snapshot so the dilation grows by
- * exactly one voxel in this single pass, not an uncontrolled cascade. This
- * is the "padding voxels" step requested alongside scatter-based
- * resampling (see the main function's per-layer loop): scattering already
- * guarantees no native voxel of a thin structure is silently dropped, but
- * a >1x downsample factor can still leave a single-voxel-wide structure as
- * a dashed line, especially where it turns sharply, wherever consecutive
- * native voxels land on non-adjacent reference cells. Diagonal (not just
- * face) neighbors matter here specifically because a sharp turn is exactly
- * where consecutive scattered points are most likely to end up
- * diagonally, not face-adjacent, to each other.
+ * Fills the straight-line path between two ALREADY-SCATTERED reference
+ * positions with `value`, excluding the endpoints themselves (the caller
+ * has already set those). Used to connect two native-adjacent voxels
+ * (see the main per-layer loop) whose downsampled reference positions
+ * landed more than one cell apart -- closing exactly the gap a >1x
+ * downsample factor can introduce between two voxels that were touching
+ * in the source data, along the true path between them specifically,
+ * rather than isotropic dilation (which pads sideways in every direction
+ * equally, and visibly drifts a curved/sinuous path off its real position
+ * since it fattens the *whole* curve rather than just bridging the actual
+ * gaps in it).
  */
-function dilateOnce(data: Uint16Array, sx: number, sy: number, sz: number): void {
-  const snapshot = data.slice()
-  for (let z = 0; z < sz; z++) {
-    const zLo = Math.max(0, z - 1)
-    const zHi = Math.min(sz - 1, z + 1)
-    for (let y = 0; y < sy; y++) {
-      const yLo = Math.max(0, y - 1)
-      const yHi = Math.min(sy - 1, y + 1)
-      const rowBase = z * sy * sx + y * sx
-      for (let x = 0; x < sx; x++) {
-        const i = rowBase + x
-        if (snapshot[i] !== 0) continue
-        const xLo = Math.max(0, x - 1)
-        const xHi = Math.min(sx - 1, x + 1)
-        outer: for (let nz = zLo; nz <= zHi; nz++) {
-          for (let ny = yLo; ny <= yHi; ny++) {
-            const nRowBase = nz * sy * sx + ny * sx
-            for (let nx = xLo; nx <= xHi; nx++) {
-              if (nz === z && ny === y && nx === x) continue
-              const neighbor = snapshot[nRowBase + nx]
-              if (neighbor !== 0) {
-                data[i] = neighbor
-                break outer
-              }
-            }
-          }
-        }
-      }
-    }
+function fillLine(
+  data: Uint16Array,
+  refX: number,
+  refY: number,
+  refZ: number,
+  z0: number,
+  y0: number,
+  x0: number,
+  z1: number,
+  y1: number,
+  x1: number,
+  value: number
+): void {
+  const steps = Math.max(Math.abs(z1 - z0), Math.abs(y1 - y0), Math.abs(x1 - x0))
+  for (let t = 1; t < steps; t++) {
+    const z = Math.round(z0 + ((z1 - z0) * t) / steps)
+    const y = Math.round(y0 + ((y1 - y0) * t) / steps)
+    const x = Math.round(x0 + ((x1 - x0) * t) / steps)
+    if (z < 0 || z >= refZ || y < 0 || y >= refY || x < 0 || x >= refX) continue
+    data[z * refY * refX + y * refX + x] = value
   }
 }
 
@@ -306,8 +285,9 @@ export async function convertSegmentationMergeToOmeZarr(
     // EVERY native voxel once and marks wherever it lands -- a thin
     // structure's full native path, not just whichever points happened to
     // be sampled, so a continuous run of native voxels can only ever
-    // produce a continuous (or, worst case near a >1 factor, lightly
-    // dashed -- see the dilation pass below) run of reference voxels.
+    // produce a continuous (or, at a >1x factor, lightly dashed -- see the
+    // fillLine calls below, which bridge exactly that) run of reference
+    // voxels.
     // [z, y, x] order, matching ZarrLevelInfo.
     const scaleZ = segLevel.spacing[0] / refLevel.spacing[0]
     const scaleY = segLevel.spacing[1] / refLevel.spacing[1]
@@ -332,17 +312,36 @@ export async function convertSegmentationMergeToOmeZarr(
           const rx = Math.round(sx * scaleX + offsetX)
           if (rx < 0 || rx >= refX) continue
           const globalLabelValue = labelToGlobal.get(srcVal)
+          if (globalLabelValue === undefined) continue
           // Later layers in the input list win on overlap -- an arbitrary
           // but deterministic tie-break, since itk-vtk-viewer's label image
           // has no independent concept of "on top" the way the 2D pane's
           // ordered overlay list does.
-          if (globalLabelValue !== undefined) combined[dstRowBase + rx] = globalLabelValue
+          combined[dstRowBase + rx] = globalLabelValue
+
+          // Connect to the 3 "forward" native neighbors (covers every
+          // face-adjacent pair exactly once across the whole loop) that
+          // share this same label -- if their own downsampled positions
+          // land more than one reference cell away, fillLine bridges
+          // exactly that gap along the true path between them. See
+          // fillLine's own comment for why this is more accurate than
+          // isotropic dilation for a curved/sinuous structure.
+          if (sx + 1 < segSizeX && segData.data[srcRowBase + sx + 1] === srcVal) {
+            const nrx = Math.round((sx + 1) * scaleX + offsetX)
+            fillLine(combined, refX, refY, refZ, rz, ry, rx, rz, ry, nrx, globalLabelValue)
+          }
+          if (sy + 1 < segSizeY && segData.data[srcRowBase + segSizeX + sx] === srcVal) {
+            const nry = Math.round((sy + 1) * scaleY + offsetY)
+            fillLine(combined, refX, refY, refZ, rz, ry, rx, rz, nry, rx, globalLabelValue)
+          }
+          if (sz + 1 < segSizeZ && segData.data[srcRowBase + segSizeY * segSizeX + sx] === srcVal) {
+            const nrz = Math.round((sz + 1) * scaleZ + offsetZ)
+            fillLine(combined, refX, refY, refZ, rz, ry, rx, nrz, ry, rx, globalLabelValue)
+          }
         }
       }
     }
   }
-
-  for (let i = 0; i < DILATION_PASSES; i++) dilateOnce(combined, refX, refY, refZ)
 
   const combinedLevel: Level = { data: combined, size: [refX, refY, refZ] }
   const pyramidLevels = buildPyramid(combinedLevel, Uint16Array, downsample2xNearest)
