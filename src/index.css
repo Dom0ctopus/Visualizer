@@ -575,6 +575,12 @@ input[type='range'] {
   inset: 0;
 }
 
+/* itk-vtk-viewer's menu toggle (three dark lines) disappears against a black
+   background; a white halo keeps it visible on any background. */
+.itk-volume-container collapse-ui {
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff);
+}
+
 .mesh-viewer {
   position: absolute;
   inset: 0;

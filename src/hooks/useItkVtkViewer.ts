@@ -29,8 +29,19 @@ interface ItkVtkViewerInstance {
   setImageScale: (scale: number) => void
   getLabelImageBlend: () => number
   setLabelImageBlend: (blend: number) => void
-  delete: () => void
+  setBackgroundColor: (rgb: [number, number, number]) => void
+  setImageColorMap: (colorMap: string) => void
+  on: (event: string, callback: () => void) => void
+  getViewProxy: () => {
+    getInteractorStyle3D: () => { setCenterOfRotation: (center: [number, number, number]) => void }
+  }
+  // No delete/destroy/dispose exists (checked against its bundled source);
+  // see clearViewer for how a replaced viewer's resources are released.
 }
+
+// How often label weight/name updates reach itk-vtk-viewer while a slider
+// is being dragged: each one re-renders the whole labeled volume.
+const LABEL_UPDATE_THROTTLE_MS = 150
 
 // itk-vtk-viewer's hard limits for one image update (read from its source:
 // "Voxel count over max" / "Image byte count over max").
@@ -120,10 +131,20 @@ export function useItkVtkViewer() {
     }
   }, [])
 
+  // itk-vtk-viewer has no teardown API, so a replaced viewer (Reload, or
+  // loading a different volume) would otherwise keep its whole GPU volume
+  // alive for the rest of the session. Losing its WebGL contexts releases
+  // that memory; its canvases are then detached with the rest of its DOM.
   const clearViewer = useCallback(() => {
-    volumeViewerRef.current?.delete()
     volumeViewerRef.current = null
-    if (volumeContainerRef.current) volumeContainerRef.current.replaceChildren()
+    const container = volumeContainerRef.current
+    if (container) {
+      for (const canvas of container.querySelectorAll('canvas')) {
+        const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl')
+        gl?.getExtension('WEBGL_lose_context')?.loseContext()
+      }
+      container.replaceChildren()
+    }
     setLoadedName(null)
   }, [])
 
@@ -156,10 +177,33 @@ export function useItkVtkViewer() {
         // and switching levels mid-session, which also changes which level
         // of the label image it shows (it fetches both at the same index).
         // The level is still changeable from itk-vtk-viewer's own UI.
+        volumeViewer.setBackgroundColor([0, 0, 0])
         try {
-          volumeViewer.setImageScale(finestDisplayableScale(await fetchPyramidLevels(url)))
+          const levels = await fetchPyramidLevels(url)
+          volumeViewer.setImageScale(finestDisplayableScale(levels))
+          // The volume loads progressively, chunk by chunk, and
+          // itk-vtk-viewer sets its mouse-rotation center from whatever has
+          // loaded so far -- a corner of the volume. Re-center it on the
+          // whole volume (physical center of level 0; VolumeInfo is [z, y, x])
+          // after every progressive update.
+          const { origin, size, spacing } = levels[0]
+          const center: [number, number, number] = [2, 1, 0].map((a) => origin[a] + ((size[a] - 1) * spacing[a]) / 2) as [number, number, number]
+          let colorMapApplied = false
+          const onImageUpdate = () => {
+            try {
+              volumeViewer.getViewProxy().getInteractorStyle3D().setCenterOfRotation(center)
+              if (!colorMapApplied) {
+                volumeViewer.setImageColorMap('Grayscale')
+                colorMapApplied = true
+              }
+            } catch (e) {
+              console.warn('Could not apply 3D view defaults yet:', e)
+            }
+          }
+          volumeViewer.on('renderedImageAssigned', onImageUpdate)
+          onImageUpdate()
         } catch (e) {
-          console.warn('Could not pin itk-vtk-viewer scale:', e)
+          console.warn('Could not apply itk-vtk-viewer defaults:', e)
         }
         volumeViewerRef.current = volumeViewer
         setLoadedName(name)
@@ -241,13 +285,34 @@ export function useItkVtkViewer() {
     }
   }, [])
 
-  const setLabelWeights = useCallback((weights: Map<number, number>) => {
-    volumeViewerRef.current?.setLabelImageWeights(weights)
+  // Opacity sliders fire continuously; forwarding every tick made
+  // itk-vtk-viewer re-render the full labeled volume dozens of times a
+  // second. Only the latest values matter, so send them at most every
+  // LABEL_UPDATE_THROTTLE_MS.
+  const pendingLabelUpdate = useRef<{ weights?: Map<number, number>; names?: Map<number, string> }>({})
+  const labelUpdateTimer = useRef<number | null>(null)
+  const scheduleLabelUpdate = useCallback((update: { weights?: Map<number, number>; names?: Map<number, string> }) => {
+    Object.assign(pendingLabelUpdate.current, update)
+    if (labelUpdateTimer.current !== null) return
+    labelUpdateTimer.current = window.setTimeout(() => {
+      labelUpdateTimer.current = null
+      const { weights, names } = pendingLabelUpdate.current
+      pendingLabelUpdate.current = {}
+      const viewer = volumeViewerRef.current
+      if (!viewer) return
+      if (names) viewer.setLabelImageLabelNames(names)
+      if (weights) viewer.setLabelImageWeights(weights)
+    }, LABEL_UPDATE_THROTTLE_MS)
   }, [])
+  useEffect(
+    () => () => {
+      if (labelUpdateTimer.current !== null) window.clearTimeout(labelUpdateTimer.current)
+    },
+    []
+  )
 
-  const setLabelNames = useCallback((names: Map<number, string>) => {
-    volumeViewerRef.current?.setLabelImageLabelNames(names)
-  }, [])
+  const setLabelWeights = useCallback((weights: Map<number, number>) => scheduleLabelUpdate({ weights }), [scheduleLabelUpdate])
+  const setLabelNames = useCallback((names: Map<number, string>) => scheduleLabelUpdate({ names }), [scheduleLabelUpdate])
 
   return {
     volumeContainerRef,

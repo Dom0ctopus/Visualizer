@@ -8,6 +8,8 @@ interface MeshViewerProps {
   segmentations: ZarrLoadedSegmentation[]
   /** Library records, for each loaded segmentation's meshStatus. */
   records: SegmentationRecord[]
+  /** Whether this tab is showing. Hidden, it skips rendering entirely. */
+  active: boolean
 }
 
 interface LoadedMeshes {
@@ -16,15 +18,27 @@ interface LoadedMeshes {
   meshes: Map<string, THREE.Mesh>
 }
 
+// Drops an attribute's CPU-side copy once three.js has uploaded it to the
+// GPU. Meshes here can total tens of millions of triangles -- gigabytes of
+// JS memory kept for nothing, since nothing re-reads them after upload.
+function releaseAfterUpload(this: THREE.BufferAttribute) {
+  ;(this as unknown as { array: unknown }).array = null
+}
+
 function parseMeshFile(buffer: ArrayBuffer): THREE.BufferGeometry {
   const [vertexCount, triangleCount] = new Uint32Array(buffer, 0, 2)
   const positions = new Float32Array(buffer, 8, vertexCount * 3)
   const indices = new Uint32Array(buffer, 8 + vertexCount * 12, triangleCount * 3)
   const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  geometry.setIndex(new THREE.BufferAttribute(indices, 1))
+  const position = new THREE.BufferAttribute(positions, 3)
+  const index = new THREE.BufferAttribute(indices, 1)
+  geometry.setAttribute('position', position)
+  geometry.setIndex(index)
   geometry.computeVertexNormals()
   geometry.computeBoundingSphere()
+  position.onUpload(releaseAfterUpload)
+  index.onUpload(releaseAfterUpload)
+  ;(geometry.getAttribute('normal') as THREE.BufferAttribute).onUpload(releaseAfterUpload)
   return geometry
 }
 
@@ -35,7 +49,7 @@ function parseMeshFile(buffer: ArrayBuffer): THREE.BufferGeometry {
  * Coordinates are physical mm in the scans' LPS space, so +z (superior) is
  * up and the default camera looks from anterior.
  */
-export function MeshViewer({ segmentations, records }: MeshViewerProps) {
+export function MeshViewer({ segmentations, records, active }: MeshViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const threeRef = useRef<{
     renderer: THREE.WebGLRenderer
@@ -47,6 +61,7 @@ export function MeshViewer({ segmentations, records }: MeshViewerProps) {
   const loadedRef = useRef(new Map<string, LoadedMeshes>())
   const loadingRef = useRef(new Set<string>())
   const fittedKeyRef = useRef('')
+  const activeRef = useRef(active)
   const [version, setVersion] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
@@ -70,7 +85,7 @@ export function MeshViewer({ segmentations, records }: MeshViewerProps) {
     controls.enableDamping = false
     let frame = 0
     const render = () => {
-      if (frame) return
+      if (frame || !activeRef.current) return
       frame = requestAnimationFrame(() => {
         frame = 0
         renderer.render(scene, camera)
@@ -107,6 +122,11 @@ export function MeshViewer({ segmentations, records }: MeshViewerProps) {
       threeRef.current = null
     }
   }, [])
+
+  useEffect(() => {
+    activeRef.current = active
+    if (active) threeRef.current?.render()
+  }, [active])
 
   const statusById = new Map(records.map((r) => [r.id, r]))
   const readyIds = segmentations.filter((s) => statusById.get(s.recordId)?.meshStatus === 'ready').map((s) => s.recordId)

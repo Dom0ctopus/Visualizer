@@ -457,7 +457,7 @@ export function ItkVtkViewerPage() {
               </div>
               {meshTabOpened && (
                 <div className={renderTab === 'mesh' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
-                  <MeshViewer segmentations={zarrSeg.segmentations} records={segmentationRecords} />
+                  <MeshViewer segmentations={zarrSeg.segmentations} records={segmentationRecords} active={renderTab === 'mesh'} />
                 </div>
               )}
             </div>

@@ -54,6 +54,30 @@ export interface OrthogonalOverlays {
 
 type Plane = 'axial' | 'coronal' | 'sagittal'
 
+// Assembled overlay slices, keyed by source array + plane + position. An
+// opacity/visibility edit only changes the color table, so handing the
+// renderer the *same* slice object lets it keep its uploaded label texture
+// (it caches textures by data identity -- see sliceRenderer.ts) instead of
+// re-uploading every layer's slice in all three panes on each slider tick.
+const SLICE_CACHE_LIMIT = 48
+const sliceCache = new Map<string, Promise<SliceResult>>()
+
+function cachedSlice(key: string, load: () => Promise<SliceResult>): Promise<SliceResult> {
+  const hit = sliceCache.get(key)
+  if (hit) {
+    sliceCache.delete(key)
+    sliceCache.set(key, hit)
+    return hit
+  }
+  const p = load()
+  sliceCache.set(key, p)
+  p.catch(() => {
+    if (sliceCache.get(key) === p) sliceCache.delete(key)
+  })
+  while (sliceCache.size > SLICE_CACHE_LIMIT) sliceCache.delete(sliceCache.keys().next().value!)
+  return p
+}
+
 async function loadPlaneOverlays(
   plane: Plane,
   index: number,
@@ -94,7 +118,7 @@ async function loadPlaneOverlays(
           const segIndex = Math.round(index * scale[fixed] + offset[fixed])
           if (segIndex < 0 || segIndex >= info.size[fixed]) return null
           const read = plane === 'axial' ? readZSlice : plane === 'coronal' ? readCoronalSlice : readSagittalSlice
-          const slice = await read(layerUrl, info.levelPath, segIndex)
+          const slice = await cachedSlice(`${plane}|${layerUrl}|${info.levelPath}|${segIndex}`, () => read(layerUrl, info.levelPath, segIndex))
           const { lut, names } = buildLabelLut(segsInLayer)
           return {
             width: slice.width,
