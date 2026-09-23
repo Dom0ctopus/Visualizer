@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { enqueueJob, dequeueJob, getJobQueueState } from './jobQueue.js'
-import { DATA_DIR } from './store.js'
+import { DATA_DIR, writeFileAtomic } from './store.js'
 
 /**
  * Luxar (https://github.com/royerlab/luxar) scenes for the 3D tabs: a
@@ -186,7 +186,7 @@ const children = new Map<string, ChildProcess>()
 async function persistStatus(key: string, status: StoredSceneStatus): Promise<void> {
   statuses.set(key, status)
   await mkdir(sceneDir(key), { recursive: true })
-  await writeFile(path.join(sceneDir(key), 'status.json'), JSON.stringify(status, null, 2))
+  await writeFileAtomic(path.join(sceneDir(key), 'status.json'), JSON.stringify(status, null, 2))
 }
 
 /** Loads cached scene statuses; builds a restart interrupted are marked failed. */
