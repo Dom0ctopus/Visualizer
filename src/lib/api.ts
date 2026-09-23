@@ -14,7 +14,7 @@ export async function fetchLibrary(): Promise<LibraryRecord[]> {
   return data.records
 }
 
-export type JobKind = 'convert' | 'backfill' | 'meshes'
+export type JobKind = 'convert' | 'backfill' | 'meshes' | 'luxar'
 
 export interface JobInfo {
   kind: JobKind
@@ -22,9 +22,13 @@ export interface JobInfo {
   label: string
 }
 
-/** The server's serial background-job queue (server/src/jobQueue.ts). */
+export type RunningJob = JobInfo & { startedAt: number; progress?: string }
+
+/** The server's background-job queue (server/src/jobQueue.ts): one lane for
+ *  conversions/meshes, one for Luxar scene builds. */
 export interface JobQueueState {
-  running: (JobInfo & { startedAt: number; progress?: string }) | null
+  /** At most one per lane. */
+  running: RunningJob[]
   /** In the order they will run. */
   queued: JobInfo[]
 }
@@ -155,4 +159,73 @@ export function meshFileUrl(segmentationId: string, file: string): string {
 
 export async function regenerateMeshes(segmentationId: string): Promise<void> {
   await handleJson(await fetch(`/api/segmentations/${segmentationId}/meshes`, { method: 'POST' }))
+}
+
+// ---------------------------------------------------------------------------
+// Luxar scenes (server/src/luxarScenes.ts)
+// ---------------------------------------------------------------------------
+
+export interface LuxarStatus {
+  available: boolean
+  version?: string
+  gsplats: boolean
+  device?: string
+  reason?: string
+  setupCommand: string
+}
+
+export type AtlasQuality = 'draft' | 'standard' | 'high'
+
+export interface LuxarSceneLayer {
+  name: string
+  recordId: string
+  segmentKey: string
+}
+
+export interface LuxarSceneStatus {
+  key: string
+  kind: 'meshes' | 'atlas'
+  status: 'none' | 'pending' | 'ready' | 'failed'
+  error?: string
+  url?: string
+  progress?: string
+  startedAt?: number
+  builtAt?: string
+  quality?: AtlasQuality
+  layers?: LuxarSceneLayer[]
+}
+
+export async function fetchLuxarStatus(): Promise<LuxarStatus> {
+  return handleJson<LuxarStatus>(await fetch('/api/luxar'))
+}
+
+export async function fetchLuxarScene(key: string): Promise<LuxarSceneStatus> {
+  return handleJson<LuxarSceneStatus>(await fetch(`/api/luxar/scenes/${encodeURIComponent(key)}`))
+}
+
+/** Returns the cached mesh scene for these segmentations, starting its build
+ *  if there is none (or `rebuild`). */
+export async function requestLuxarMeshes(segmentationIds: string[], rebuild = false): Promise<LuxarSceneStatus> {
+  const res = await fetch('/api/luxar/meshes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ segmentationIds, rebuild })
+  })
+  return handleJson<LuxarSceneStatus>(res)
+}
+
+/** The splat atlas for a volume + segmentations at a quality. Only starts a
+ *  build when `build` is set: fitting is slow, so it's user-initiated. */
+export async function requestLuxarAtlas(
+  volumeId: string,
+  segmentationIds: string[],
+  quality: AtlasQuality,
+  options: { build?: boolean; rebuild?: boolean } = {}
+): Promise<LuxarSceneStatus> {
+  const res = await fetch('/api/luxar/atlas', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ volumeId, segmentationIds, quality, build: options.build ?? false, rebuild: options.rebuild ?? false })
+  })
+  return handleJson<LuxarSceneStatus>(res)
 }

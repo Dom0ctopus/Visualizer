@@ -16,6 +16,11 @@ dist-ssr
 server/data/files
 server/data/zarr
 server/data/meshes
+server/data/luxar
+
+# Optional Python environment for Luxar scene builds (npm run setup:luxar)
+server/.luxar-venv
+__pycache__
 server/data/index.json
 
 # itk-vtk-viewer's dist assets (100MB+ of format-decoder wasm binaries) --

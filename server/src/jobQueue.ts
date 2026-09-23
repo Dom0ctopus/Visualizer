@@ -14,9 +14,16 @@
  * re-queued (its run() is called again, with ctx.resumed set) behind it.
  */
 
-export type JobKind = 'convert' | 'backfill' | 'meshes'
+export type JobKind = 'convert' | 'backfill' | 'meshes' | 'luxar'
 
-const PRIORITY: Record<JobKind, number> = { convert: 0, backfill: 1, meshes: 2 }
+const PRIORITY: Record<JobKind, number> = { convert: 0, backfill: 1, meshes: 2, luxar: 0 }
+
+// Luxar scene builds run in a separate Python process (luxarScenes.ts), so
+// they don't compete for this process's heap: they get their own lane,
+// serial within itself but concurrent with the main one. That keeps an
+// hour-long splat fit from holding up an upload's conversion.
+type Lane = 'main' | 'luxar'
+const LANE: Record<JobKind, Lane> = { convert: 'main', backfill: 'main', meshes: 'main', luxar: 'luxar' }
 const HEARTBEAT_MS = 30_000
 
 export class JobPreemptedError extends Error {
@@ -56,19 +63,20 @@ export interface RunningJobInfo extends JobInfo {
 }
 
 export interface JobQueueState {
-  running: RunningJobInfo | null
+  /** At most one per lane. */
+  running: RunningJobInfo[]
   queued: JobInfo[]
 }
 
-const queue: Job[] = []
-let running: (RunningJobInfo & { job: Job }) | null = null
+const queues: Record<Lane, Job[]> = { main: [], luxar: [] }
+const runningJobs: Record<Lane, (RunningJobInfo & { job: Job }) | null> = { main: null, luxar: null }
 
 function elapsed(since: number): string {
   const s = Math.round((Date.now() - since) / 1000)
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
-function takeNext(): Job | undefined {
+function takeNext(queue: Job[]): Job | undefined {
   let best = -1
   for (let i = 0; i < queue.length; i++) {
     if (best < 0 || PRIORITY[queue[i].kind] < PRIORITY[queue[best].kind]) best = i
@@ -76,11 +84,12 @@ function takeNext(): Job | undefined {
   return best < 0 ? undefined : queue.splice(best, 1)[0]
 }
 
-async function drain(): Promise<void> {
-  if (running) return
-  for (let job = takeNext(); job; job = takeNext()) {
+async function drain(lane: Lane): Promise<void> {
+  if (runningJobs[lane]) return
+  const queue = queues[lane]
+  for (let job = takeNext(queue); job; job = takeNext(queue)) {
     const current: RunningJobInfo & { job: Job } = { kind: job.kind, recordId: job.recordId, label: job.label, startedAt: Date.now(), job }
-    running = current
+    runningJobs[lane] = current
     const waited = Date.now() - job.enqueuedAt > 1000 ? `, waited ${elapsed(job.enqueuedAt)}` : ''
     console.log(`[jobs] ${job.resumed ? 'resume' : 'start'}: ${job.label} (${queue.length} queued behind it${waited})`)
     const heartbeat = setInterval(() => {
@@ -108,21 +117,43 @@ async function drain(): Promise<void> {
       }
     } finally {
       clearInterval(heartbeat)
-      running = null
+      runningJobs[lane] = null
     }
   }
 }
 
 export function enqueueJob(kind: JobKind, recordId: string, label: string, run: (ctx: JobContext) => Promise<void>): void {
-  queue.push({ kind, recordId, label, run, resumed: false, enqueuedAt: Date.now() })
+  const lane = LANE[kind]
+  queues[lane].push({ kind, recordId, label, run, resumed: false, enqueuedAt: Date.now() })
+  const running = runningJobs[lane]
   if (running) console.log(`[jobs] queued: ${label} (running: ${running.label})`)
-  void drain()
+  void drain(lane)
+}
+
+/** Whether a job for this record and kind is queued or running. */
+export function hasJob(kind: JobKind, recordId: string): boolean {
+  const lane = LANE[kind]
+  const running = runningJobs[lane]
+  return (running?.kind === kind && running.recordId === recordId) || queues[lane].some((j) => j.kind === kind && j.recordId === recordId)
+}
+
+/** Drops a queued (not yet running) job; returns whether one was removed. */
+export function dequeueJob(kind: JobKind, recordId: string): boolean {
+  const queue = queues[LANE[kind]]
+  const index = queue.findIndex((j) => j.kind === kind && j.recordId === recordId)
+  if (index < 0) return false
+  queue.splice(index, 1)
+  return true
 }
 
 export function getJobQueueState(): JobQueueState {
-  const ordered = [...queue].sort((a, b) => PRIORITY[a.kind] - PRIORITY[b.kind])
-  return {
-    running: running && { kind: running.kind, recordId: running.recordId, label: running.label, startedAt: running.startedAt, progress: running.progress },
-    queued: ordered.map(({ kind, recordId, label }) => ({ kind, recordId, label }))
+  const running: RunningJobInfo[] = []
+  const queued: JobInfo[] = []
+  for (const lane of ['main', 'luxar'] as const) {
+    const r = runningJobs[lane]
+    if (r) running.push({ kind: r.kind, recordId: r.recordId, label: r.label, startedAt: r.startedAt, progress: r.progress })
+    const ordered = [...queues[lane]].sort((a, b) => PRIORITY[a.kind] - PRIORITY[b.kind])
+    queued.push(...ordered.map(({ kind, recordId, label }) => ({ kind, recordId, label })))
   }
+  return { running, queued }
 }
