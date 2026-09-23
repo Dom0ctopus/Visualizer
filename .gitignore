@@ -22,6 +22,7 @@ server/data/luxar
 server/.luxar-venv
 __pycache__
 server/data/index.json
+server/data/index.json.*
 
 # itk-vtk-viewer's dist assets (100MB+ of format-decoder wasm binaries) --
 # synced from node_modules by scripts/sync-itk-vtk-viewer.mjs, not vendored
