@@ -520,6 +520,66 @@ input[type='range'] {
 
 .itk-viewer-split {
   display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 2px;
+}
+
+/* Persistent status bar above the panes, showing whichever segment the
+   cursor is currently hovering in any of the three 2D panes (see
+   ItkVtkViewerPage.tsx's hoveredSegment state and ZarrSliceCanvas's
+   onHoverLabel) -- the mouse-following tooltip (.itk-viewer-hover-tooltip)
+   shows the same information right at the cursor; this bar is the
+   always-in-the-same-place alternative for anyone who'd rather glance at a
+   fixed spot than track a tooltip that moves with the mouse. */
+.itk-viewer-hover-bar {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.itk-viewer-hover-bar-label {
+  color: var(--text-dim);
+  margin-right: 4px;
+}
+
+.itk-viewer-hover-tooltip {
+  position: fixed;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.85);
+  color: var(--text-h);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  /* Purely informational -- never intercepts the mouse, so it can't itself
+     trigger a pointerleave on whichever canvas it happens to render over. */
+  pointer-events: none;
+}
+
+.itk-viewer-columns {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 2px;
+}
+
+/* Stacks the three 2D planes (axial/coronal/sagittal) vertically, next to
+   the 3D render pane -- see .itk-viewer-pane below, reused unchanged for
+   both the small stacked panes here and the full-height 3D pane, since
+   flex:1 already means "share available space with siblings" in either a
+   column (here) or row (.itk-viewer-columns) context. */
+.itk-viewer-left-column {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   gap: 2px;
 }
 

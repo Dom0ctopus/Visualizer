@@ -26,9 +26,17 @@ function statusLabel(record: VolumeRecord | SegmentationRecord): string {
   }
 }
 
+interface HoveredSegment {
+  name: string
+  clientX: number
+  clientY: number
+}
+
+const DEFAULT_PAN: CanvasPan = { x: 0, y: 0 }
+
 /**
  * A second, parallel viewer built on itk-vtk-viewer/vtk.js for the 3D
- * render, plus a custom canvas-based reader for the slice view -- see the
+ * render, plus a custom canvas-based reader for the slice views -- see the
  * conversation history for why the slice side isn't itk-vtk-viewer too:
  * its use2D/ZPlane mode hits a hard internal voxel-count cap on scans this
  * large and corrupts the display when the slice position changes, with no
@@ -41,23 +49,35 @@ function statusLabel(record: VolumeRecord | SegmentationRecord): string {
  * specific cause found (chunk layout, cache growth, cloud-sync storage,
  * Node's I/O thread pool size). Every pyramid level is pickable from the
  * "Resolution" panel below for fast fly-through browsing, and
- * "Inspect here" drills into native resolution for a bounded neighborhood
- * (see useZarrSliceViewer.ts's inspectNativeHere) around wherever the user
- * actually wants detail, rather than paying native-resolution cost across
- * the whole stack. The 3D Volume pane is unaffected either way, since it
- * already auto-selects whichever level fits its own voxel budget.
+ * "Inspect here" (on the Axial pane specifically -- see
+ * useZarrSliceViewer.ts's own comment on why the other two planes don't
+ * have an equivalent) drills into native resolution for a bounded
+ * neighborhood around wherever the user actually wants detail. The 3D
+ * Volume pane is unaffected either way, since it already auto-selects
+ * whichever level fits its own voxel budget.
  *
- * Segmentation overlays: the slice pane composites every loaded
- * segmentation's own layers directly (useSegmentationOverlays.ts), with
- * each segment's exact 3D-Slicer-defined color and opacity -- full parity
- * with the niivue engine there. The 3D pane instead drives itk-vtk-viewer's
- * own built-in labelImage overlay, which only ever holds one label image at
- * a time and colors it by a fixed categorical palette rather than arbitrary
- * per-label RGB (see useItkVtkViewer.ts's loadLabelImageUrl comment) -- so
- * every loaded segmentation/layer is combined server-side into one merged
- * label image first (useSegmentationMerge3D.ts, segmentationMergeConvert.ts)
- * rather than showing only the first one, though still in itk-vtk-viewer's
- * own colors rather than the slice pane's / 3D-Slicer's.
+ * The left column shows all three orthogonal planes (axial, coronal,
+ * sagittal) at once, each independently scrollable/zoomable/pannable, next
+ * to the 3D render on the right -- see useZarrSliceViewer.ts and
+ * useSegmentationOverlays.ts for how a slice/overlay along any of the three
+ * axes is read directly out of the zarr store.
+ *
+ * Segmentation overlays: each 2D pane composites every loaded segmentation's
+ * own layers directly (useSegmentationOverlays.ts), with each segment's
+ * exact 3D-Slicer-defined color and opacity -- full parity with the niivue
+ * engine there. Hovering any of the three panes looks up the segment name
+ * at the cursor from that same per-pixel overlay data (ZarrSliceCanvas's
+ * onHoverLabel) and shows it both in a tooltip near the cursor and in a
+ * status bar above the panes -- the 3D pane has no equivalent, since it's a
+ * separate WebGL viewer library without per-pixel picking exposed here.
+ * The 3D pane instead drives itk-vtk-viewer's own built-in labelImage
+ * overlay, which only ever holds one label image at a time and colors it by
+ * a fixed categorical palette rather than arbitrary per-label RGB (see
+ * useItkVtkViewer.ts's loadLabelImageUrl comment) -- so every loaded
+ * segmentation/layer is combined server-side into one merged label image
+ * first (useSegmentationMerge3D.ts, segmentationMergeConvert.ts) rather than
+ * showing only the first one, though still in itk-vtk-viewer's own colors
+ * rather than the slice panes' / 3D-Slicer's.
  *
  * Volumes/segmentations are only loadable here once the server's background
  * NRRD -> OME-Zarr conversion (kicked off on upload, see
@@ -83,8 +103,13 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
   const [searchText, setSearchText] = useState('')
   const [activeZarrUrl, setActiveZarrUrl] = useState<string | null>(null)
   const [activeVolumeId, setActiveVolumeId] = useState<string | null>(null)
-  const [zoom, setZoom] = useState(1)
-  const [pan, setPan] = useState<CanvasPan>({ x: 0, y: 0 })
+  const [axialZoom, setAxialZoom] = useState(1)
+  const [axialPan, setAxialPan] = useState<CanvasPan>(DEFAULT_PAN)
+  const [coronalZoom, setCoronalZoom] = useState(1)
+  const [coronalPan, setCoronalPan] = useState<CanvasPan>(DEFAULT_PAN)
+  const [sagittalZoom, setSagittalZoom] = useState(1)
+  const [sagittalPan, setSagittalPan] = useState<CanvasPan>(DEFAULT_PAN)
+  const [hoveredSegment, setHoveredSegment] = useState<HoveredSegment | null>(null)
   const pollTimerRef = useRef<number | null>(null)
 
   const {
@@ -106,10 +131,18 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
     zIndex,
     setZIndex,
     stepZIndex,
+    yIndex,
+    setYIndex,
+    stepYIndex,
+    xIndex,
+    setXIndex,
+    stepXIndex,
     setLevel,
     inspectNativeHere,
     exitDetailWindow,
-    slice,
+    axialSlice,
+    coronalSlice,
+    sagittalSlice,
     windowMin,
     windowMax,
     setWindowMin,
@@ -119,7 +152,12 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
   } = useZarrSliceViewer(activeZarrUrl)
 
   const zarrSeg = useZarrSegmentations()
-  const { overlays, error: overlayError } = useSegmentationOverlays(zarrSeg.segmentations, zIndex, volumeInfo, levelIndex)
+  const { overlays, error: overlayError } = useSegmentationOverlays(
+    zarrSeg.segmentations,
+    { z: zIndex, y: yIndex, x: xIndex },
+    volumeInfo,
+    levelIndex
+  )
   const { status: mergeStatus, error: mergeError } = useSegmentationMerge3D(
     activeVolumeId,
     zarrSeg.segmentations,
@@ -157,14 +195,22 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
     const url = zarrUrl(record.id)
     setActiveZarrUrl(url)
     setActiveVolumeId(record.id)
-    setZoom(1)
-    setPan({ x: 0, y: 0 })
+    setAxialZoom(1)
+    setAxialPan(DEFAULT_PAN)
+    setCoronalZoom(1)
+    setCoronalPan(DEFAULT_PAN)
+    setSagittalZoom(1)
+    setSagittalPan(DEFAULT_PAN)
     loadZarrUrl(url, record.name)
   }
 
   const resetSliceView = () => {
-    setZoom(1)
-    setPan({ x: 0, y: 0 })
+    setAxialZoom(1)
+    setAxialPan(DEFAULT_PAN)
+    setCoronalZoom(1)
+    setCoronalPan(DEFAULT_PAN)
+    setSagittalZoom(1)
+    setSagittalPan(DEFAULT_PAN)
   }
 
   const handleLoadSegmentation = (record: SegmentationRecord) => {
@@ -177,53 +223,149 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
   return (
     <div className="app-body" hidden={hidden}>
       <div className="viewer itk-viewer-split">
-        <div className="itk-viewer-pane">
-          <div className="itk-viewer-pane-label">Slice View</div>
-          <div className="itk-viewer-container">
-            <ZarrSliceCanvas
-              slice={slice}
-              windowMin={windowMin}
-              windowMax={windowMax}
-              onWheelStep={stepZIndex}
-              overlays={overlays}
-              zoom={zoom}
-              pan={pan}
-              onZoomChange={setZoom}
-              onPanChange={setPan}
-            />
-          </div>
-          {volumeInfo && (
-            <div className="zarr-slice-controls">
-              <span className="tf-hint">
-                Z: {zIndex} / {detailWindow ? detailWindow.zMax : volumeInfo.size[0] - 1}
-                {detailWindow ? ` (native, ${detailWindow.zMin}-${detailWindow.zMax})` : ''}
-              </span>
-              <input
-                type="range"
-                className="window-slider"
-                min={detailWindow ? detailWindow.zMin : 0}
-                max={detailWindow ? detailWindow.zMax : volumeInfo.size[0] - 1}
-                step={1}
-                value={zIndex}
-                onChange={(e) => setZIndex(Number(e.target.value))}
-              />
-              {detailWindow ? (
-                <button className="btn btn-secondary btn-small" onClick={exitDetailWindow}>
-                  Back to overview
-                </button>
-              ) : (
-                <button className="btn btn-secondary btn-small" onClick={() => inspectNativeHere()} title="Load native resolution for the 50 slices on each side of this one">
-                  Inspect here
-                </button>
-              )}
-            </div>
+        <div className="itk-viewer-hover-bar">
+          {hoveredSegment ? (
+            <>
+              <span className="itk-viewer-hover-bar-label">Segment:</span> {hoveredSegment.name}
+            </>
+          ) : (
+            'Hover a segment in any 2D pane to see its name'
           )}
         </div>
-        <div className="itk-viewer-pane">
-          <div className="itk-viewer-pane-label">3D Render</div>
-          <div ref={volumeContainerRef} className="itk-viewer-container" />
+        <div className="itk-viewer-columns">
+          <div className="itk-viewer-left-column">
+            <div className="itk-viewer-pane">
+              <div className="itk-viewer-pane-label">Axial</div>
+              <div className="itk-viewer-container">
+                <ZarrSliceCanvas
+                  slice={axialSlice}
+                  windowMin={windowMin}
+                  windowMax={windowMax}
+                  onWheelStep={stepZIndex}
+                  overlays={overlays.axial}
+                  zoom={axialZoom}
+                  pan={axialPan}
+                  onZoomChange={setAxialZoom}
+                  onPanChange={setAxialPan}
+                  onHoverLabel={setHoveredSegment}
+                />
+              </div>
+              {volumeInfo && (
+                <div className="zarr-slice-controls">
+                  <span className="tf-hint">
+                    Z: {zIndex} / {detailWindow ? detailWindow.zMax : volumeInfo.size[0] - 1}
+                    {detailWindow ? ` (native, ${detailWindow.zMin}-${detailWindow.zMax})` : ''}
+                  </span>
+                  <input
+                    type="range"
+                    className="window-slider"
+                    min={detailWindow ? detailWindow.zMin : 0}
+                    max={detailWindow ? detailWindow.zMax : volumeInfo.size[0] - 1}
+                    step={1}
+                    value={zIndex}
+                    onChange={(e) => setZIndex(Number(e.target.value))}
+                  />
+                  {detailWindow ? (
+                    <button className="btn btn-secondary btn-small" onClick={exitDetailWindow}>
+                      Back to overview
+                    </button>
+                  ) : (
+                    <button
+                      className="btn btn-secondary btn-small"
+                      onClick={() => inspectNativeHere()}
+                      title="Load native resolution for the 50 slices on each side of this one"
+                    >
+                      Inspect here
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="itk-viewer-pane">
+              <div className="itk-viewer-pane-label">Coronal</div>
+              <div className="itk-viewer-container">
+                <ZarrSliceCanvas
+                  slice={coronalSlice}
+                  windowMin={windowMin}
+                  windowMax={windowMax}
+                  onWheelStep={stepYIndex}
+                  overlays={overlays.coronal}
+                  zoom={coronalZoom}
+                  pan={coronalPan}
+                  onZoomChange={setCoronalZoom}
+                  onPanChange={setCoronalPan}
+                  onHoverLabel={setHoveredSegment}
+                />
+              </div>
+              {volumeInfo && (
+                <div className="zarr-slice-controls">
+                  <span className="tf-hint">
+                    Y: {yIndex} / {volumeInfo.size[1] - 1}
+                  </span>
+                  <input
+                    type="range"
+                    className="window-slider"
+                    min={0}
+                    max={volumeInfo.size[1] - 1}
+                    step={1}
+                    value={yIndex}
+                    onChange={(e) => setYIndex(Number(e.target.value))}
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="itk-viewer-pane">
+              <div className="itk-viewer-pane-label">Sagittal</div>
+              <div className="itk-viewer-container">
+                <ZarrSliceCanvas
+                  slice={sagittalSlice}
+                  windowMin={windowMin}
+                  windowMax={windowMax}
+                  onWheelStep={stepXIndex}
+                  overlays={overlays.sagittal}
+                  zoom={sagittalZoom}
+                  pan={sagittalPan}
+                  onZoomChange={setSagittalZoom}
+                  onPanChange={setSagittalPan}
+                  onHoverLabel={setHoveredSegment}
+                />
+              </div>
+              {volumeInfo && (
+                <div className="zarr-slice-controls">
+                  <span className="tf-hint">
+                    X: {xIndex} / {volumeInfo.size[2] - 1}
+                  </span>
+                  <input
+                    type="range"
+                    className="window-slider"
+                    min={0}
+                    max={volumeInfo.size[2] - 1}
+                    step={1}
+                    value={xIndex}
+                    onChange={(e) => setXIndex(Number(e.target.value))}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="itk-viewer-pane itk-viewer-pane-3d">
+            <div className="itk-viewer-pane-label">3D Render</div>
+            <div ref={volumeContainerRef} className="itk-viewer-container" />
+          </div>
         </div>
       </div>
+
+      {hoveredSegment && (
+        <div
+          className="itk-viewer-hover-tooltip"
+          style={{ left: hoveredSegment.clientX + 14, top: hoveredSegment.clientY + 14 }}
+        >
+          {hoveredSegment.name}
+        </div>
+      )}
 
       <aside className="sidebar">
         {combinedError && <div className="error-banner">{combinedError}</div>}
@@ -233,7 +375,7 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
           <p className="panel-hint">
             Each volume is converted on upload into a chunked, multiscale OME-Zarr pyramid. The 3D render picks a
             resolution level that fits in memory instead of requiring the whole scan to fit in one GPU texture up
-            front the way the niivue engine does; the slice view reads 2D slices from the same store's 2x-downsampled
+            front the way the niivue engine does; the slice panes read 2D slices from the same store's 2x-downsampled
             level, traded for scrolling that keeps up regardless of the source scan's native resolution.
           </p>
           {volumes.length === 0 && (
@@ -267,10 +409,10 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
         <section className="panel">
           <h2 className="panel-title">Segmentations (itk-vtk-viewer)</h2>
           <p className="panel-hint">
-            The slice pane composites every loaded segmentation with its own exact colors and opacities. The 3D
-            render shows a cumulative view of every loaded segmentation and layer combined, rebuilt on the server
-            whenever the set of loaded segmentations changes -- colored with itk-vtk-viewer's own built-in palette
-            instead of each segment's defined color, a limitation of its label-image API, not a missing feature here.
+            Every 2D pane composites every loaded segmentation with its own exact colors and opacities. The 3D render
+            shows a cumulative view of every loaded segmentation and layer combined, rebuilt on the server whenever
+            the set of loaded segmentations changes -- colored with itk-vtk-viewer's own built-in palette instead of
+            each segment's defined color, a limitation of its label-image API, not a missing feature here.
           </p>
           {mergeStatus === 'pending' && <p className="tf-hint">Building combined 3D view…</p>}
           {segmentationRecords.length === 0 && (
@@ -331,8 +473,8 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
           <section className="panel">
             <h2 className="panel-title">Resolution</h2>
             <p className="panel-hint">
-              Fly through at a coarser level for speed, then "Inspect here" (above) to drill into native resolution
-              around wherever you land.
+              Fly through at a coarser level for speed, then "Inspect here" (on the Axial pane) to drill into native
+              resolution around wherever you land.
             </p>
             <div className="tf-row resolution-levels">
               {levels.map((level) => (
@@ -381,21 +523,29 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
               value={windowMax}
               onChange={(e) => setWindowMax(Math.max(Number(e.target.value), windowMin))}
             />
-            <p className="tf-hint">Scroll the slice pane to page through Z, independently of the 3D render's own window/level.</p>
+            <p className="tf-hint">Applies to all three 2D panes. Scroll any pane to page through its own axis.</p>
 
             <p className="tf-hint">Slice zoom &amp; pan</p>
             <div className="tf-row">
               <button
                 className="btn btn-secondary btn-small"
-                onClick={() => setZoom((z) => Math.max(0.1, z / ZOOM_BUTTON_FACTOR))}
-                title="Zoom out"
+                onClick={() => {
+                  setAxialZoom((z) => Math.max(0.1, z / ZOOM_BUTTON_FACTOR))
+                  setCoronalZoom((z) => Math.max(0.1, z / ZOOM_BUTTON_FACTOR))
+                  setSagittalZoom((z) => Math.max(0.1, z / ZOOM_BUTTON_FACTOR))
+                }}
+                title="Zoom out (all panes)"
               >
                 &minus;
               </button>
               <button
                 className="btn btn-secondary btn-small"
-                onClick={() => setZoom((z) => Math.min(20, z * ZOOM_BUTTON_FACTOR))}
-                title="Zoom in"
+                onClick={() => {
+                  setAxialZoom((z) => Math.min(20, z * ZOOM_BUTTON_FACTOR))
+                  setCoronalZoom((z) => Math.min(20, z * ZOOM_BUTTON_FACTOR))
+                  setSagittalZoom((z) => Math.min(20, z * ZOOM_BUTTON_FACTOR))
+                }}
+                title="Zoom in (all panes)"
               >
                 +
               </button>
@@ -403,7 +553,7 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
                 Reset
               </button>
             </div>
-            <p className="tf-hint">Or ctrl/cmd+scroll to zoom, and drag to pan.</p>
+            <p className="tf-hint">Or ctrl/cmd+scroll a pane to zoom it individually, and drag to pan it.</p>
           </section>
         )}
 

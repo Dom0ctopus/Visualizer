@@ -278,3 +278,105 @@ export async function readZSlice(zarrBaseUrl: string, levelPath: string, zIndex:
   )
   return { width: shapeX, height: shapeY, data: out }
 }
+
+/**
+ * Reads one Y-plane (coronal) slice: fixed Y, varying Z (rows) and X
+ * (columns). Unlike readZSlice above, the finest pyramid levels' chunking
+ * (see server/src/zarrWriter.ts's sliceOptimizedChunkShape) puts exactly one
+ * Z index per chunk -- so a coronal slice, which spans every Z index, always
+ * needs one chunk fetch per Z (bounded by the chunk cache: a chunk already
+ * fetched for the axial view, or a previous coronal read at a Y value in the
+ * same chunk-Y band, is reused, not re-fetched). Chunk X always spans the
+ * array's full X extent for these levels (see the same comment), so there's
+ * only ever one X band to fetch per Z, keeping this to exactly one fetch per
+ * Z index in the common case, not one per (Z, X-band) pair.
+ */
+export async function readCoronalSlice(zarrBaseUrl: string, levelPath: string, yIndex: number): Promise<SliceResult> {
+  const sliceT0 = performance.now()
+  const levelUrl = `${zarrBaseUrl}/${levelPath}`
+  const meta = await fetchZarray(levelUrl)
+  const [shapeZ, shapeY, shapeX] = meta.shape
+  const [chunkZ, chunkY, chunkX] = meta.chunks
+  if (yIndex < 0 || yIndex >= shapeY) throw new Error(`y index ${yIndex} out of range [0, ${shapeY})`)
+
+  const by = Math.floor(yIndex / chunkY)
+  const localY = yIndex - by * chunkY
+  const nChunksZ = Math.ceil(shapeZ / chunkZ)
+  const nChunksX = Math.ceil(shapeX / chunkX)
+
+  const ctor = dtypeCtor(meta.dtype)
+  const out = new ctor(shapeX * shapeZ)
+
+  const fetches: Promise<void>[] = []
+  for (let bz = 0; bz < nChunksZ; bz++) {
+    for (let bx = 0; bx < nChunksX; bx++) {
+      fetches.push(
+        fetchChunk(levelUrl, bz, by, bx, meta).then((chunkData) => {
+          const rowsInChunkZ = Math.min(chunkZ, shapeZ - bz * chunkZ)
+          const colsInChunk = Math.min(chunkX, shapeX - bx * chunkX)
+          for (let lz = 0; lz < rowsInChunkZ; lz++) {
+            const gz = bz * chunkZ + lz
+            const srcOffset = lz * chunkY * chunkX + localY * chunkX
+            const dstOffset = gz * shapeX + bx * chunkX
+            out.set(chunkData.subarray(srcOffset, srcOffset + colsInChunk), dstOffset)
+          }
+        })
+      )
+    }
+  }
+  await Promise.all(fetches)
+  console.log(
+    `[zarr-perf] readCoronalSlice y=${yIndex} total ${(performance.now() - sliceT0).toFixed(1)}ms (${nChunksZ * nChunksX} chunk(s), ${shapeX}x${shapeZ})`
+  )
+  return { width: shapeX, height: shapeZ, data: out }
+}
+
+/**
+ * Reads one X-plane (sagittal) slice: fixed X, varying Z (rows) and Y
+ * (columns). Same per-chunk-fetch-count caveat as readCoronalSlice, except
+ * X isn't chunked at all for the finest levels (chunk X always spans the
+ * full array width there -- see sliceOptimizedChunkShape), so a sagittal
+ * read can need multiple chunk fetches per Z when the array is tall enough
+ * to span more than one Y chunk band, not just one like a coronal read.
+ */
+export async function readSagittalSlice(zarrBaseUrl: string, levelPath: string, xIndex: number): Promise<SliceResult> {
+  const sliceT0 = performance.now()
+  const levelUrl = `${zarrBaseUrl}/${levelPath}`
+  const meta = await fetchZarray(levelUrl)
+  const [shapeZ, shapeY, shapeX] = meta.shape
+  const [chunkZ, chunkY, chunkX] = meta.chunks
+  if (xIndex < 0 || xIndex >= shapeX) throw new Error(`x index ${xIndex} out of range [0, ${shapeX})`)
+
+  const bx = Math.floor(xIndex / chunkX)
+  const localX = xIndex - bx * chunkX
+  const nChunksZ = Math.ceil(shapeZ / chunkZ)
+  const nChunksY = Math.ceil(shapeY / chunkY)
+
+  const ctor = dtypeCtor(meta.dtype)
+  const out = new ctor(shapeY * shapeZ)
+
+  const fetches: Promise<void>[] = []
+  for (let bz = 0; bz < nChunksZ; bz++) {
+    for (let by = 0; by < nChunksY; by++) {
+      fetches.push(
+        fetchChunk(levelUrl, bz, by, bx, meta).then((chunkData) => {
+          const rowsInChunkZ = Math.min(chunkZ, shapeZ - bz * chunkZ)
+          const rowsInChunkY = Math.min(chunkY, shapeY - by * chunkY)
+          for (let lz = 0; lz < rowsInChunkZ; lz++) {
+            const gz = bz * chunkZ + lz
+            const dstRowBase = gz * shapeY + by * chunkY
+            const srcZBase = lz * chunkY * chunkX
+            for (let ly = 0; ly < rowsInChunkY; ly++) {
+              out[dstRowBase + ly] = chunkData[srcZBase + ly * chunkX + localX]
+            }
+          }
+        })
+      )
+    }
+  }
+  await Promise.all(fetches)
+  console.log(
+    `[zarr-perf] readSagittalSlice x=${xIndex} total ${(performance.now() - sliceT0).toFixed(1)}ms (${nChunksZ * nChunksY} chunk(s), ${shapeY}x${shapeZ})`
+  )
+  return { width: shapeY, height: shapeZ, data: out }
+}

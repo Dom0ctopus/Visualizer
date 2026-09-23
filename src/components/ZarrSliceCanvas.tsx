@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import type { SliceOverlay } from '../hooks/useSegmentationOverlays'
+import { clientToPixel, findHoveredSegmentName } from '../lib/sliceHover'
 import type { SliceResult } from '../lib/zarrClient'
 
 export interface CanvasPan {
@@ -30,6 +31,15 @@ interface ZarrSliceCanvasProps {
   pan: CanvasPan
   onZoomChange: (zoom: number) => void
   onPanChange: (pan: CanvasPan) => void
+  /** Called on every mouse move over the canvas with the segment name at
+   *  the cursor (topmost visible overlay whose label has a non-empty name
+   *  at that pixel), or null when the cursor is over background, a hidden
+   *  label, or outside the image entirely (e.g. in the letterboxed margin
+   *  object-fit:contain can leave around the bitmap). clientX/clientY are
+   *  passed through unchanged from the triggering PointerEvent so the
+   *  caller can position a tooltip without this component needing to know
+   *  anything about tooltip layout. */
+  onHoverLabel?: (info: { name: string; clientX: number; clientY: number } | null) => void
 }
 
 // Integer typed arrays only ever take one of a small, known set of raw
@@ -77,7 +87,8 @@ export function ZarrSliceCanvas({
   zoom,
   pan,
   onZoomChange,
-  onPanChange
+  onPanChange,
+  onHoverLabel
 }: ZarrSliceCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   // Reused across renders so scrolling through many slices at the same
@@ -94,13 +105,20 @@ export function ZarrSliceCanvas({
   const onZoomChangeRef = useRef(onZoomChange)
   const onPanChangeRef = useRef(onPanChange)
   const onWheelStepRef = useRef(onWheelStep)
+  // Same mirroring pattern, for the hover lookup below -- it needs whatever
+  // overlays are current at the moment of a mouse move, not whatever was
+  // current when the listener was first attached.
+  const overlaysRef = useRef(overlays)
+  const onHoverLabelRef = useRef(onHoverLabel)
   useEffect(() => {
     zoomRef.current = zoom
     panRef.current = pan
     onZoomChangeRef.current = onZoomChange
     onPanChangeRef.current = onPanChange
     onWheelStepRef.current = onWheelStep
-  }, [zoom, pan, onZoomChange, onPanChange, onWheelStep])
+    overlaysRef.current = overlays
+    onHoverLabelRef.current = onHoverLabel
+  }, [zoom, pan, onZoomChange, onPanChange, onWheelStep, overlays, onHoverLabel])
 
   const lutRange = slice ? lutRangeFor(slice.data) : null
   const lut = useMemo(
@@ -224,10 +242,26 @@ export function ZarrSliceCanvas({
       panStart = panRef.current
       canvas.setPointerCapture(e.pointerId)
     }
-    const onPointerMove = (e: PointerEvent) => {
-      if (!dragging) return
-      onPanChangeRef.current({ x: panStart.x + (e.clientX - dragStart.x), y: panStart.y + (e.clientY - dragStart.y) })
+    // See src/lib/sliceHover.ts for what these do and why they're pulled
+    // out as standalone, unit-tested pure functions.
+    const onHoverMove = (e: PointerEvent) => {
+      const handler = onHoverLabelRef.current
+      if (!handler) return
+      const pixel = clientToPixel(e.clientX, e.clientY, canvas.getBoundingClientRect(), canvas.width, canvas.height)
+      if (!pixel) {
+        handler(null)
+        return
+      }
+      const name = findHoveredSegmentName(overlaysRef.current ?? [], pixel)
+      handler(name ? { name, clientX: e.clientX, clientY: e.clientY } : null)
     }
+    const onPointerMove = (e: PointerEvent) => {
+      if (dragging) {
+        onPanChangeRef.current({ x: panStart.x + (e.clientX - dragStart.x), y: panStart.y + (e.clientY - dragStart.y) })
+      }
+      onHoverMove(e)
+    }
+    const onPointerLeave = () => onHoverLabelRef.current?.(null)
     const onPointerUp = (e: PointerEvent) => {
       dragging = false
       if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
@@ -235,12 +269,14 @@ export function ZarrSliceCanvas({
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
+    canvas.addEventListener('pointerleave', onPointerLeave)
 
     return () => {
       canvas.removeEventListener('wheel', onWheel)
       canvas.removeEventListener('pointerdown', onPointerDown)
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
+      canvas.removeEventListener('pointerleave', onPointerLeave)
     }
   }, [])
 
