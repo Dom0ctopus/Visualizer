@@ -71,9 +71,30 @@ function fetchZarray(levelUrl: string): Promise<ZarrArrayMeta> {
   let p = arrayMetaCache.get(levelUrl)
   if (!p) {
     p = fetchJson<ZarrArrayMeta>(`${levelUrl}/.zarray`)
+    // Failures aren't cached: an orthogonal copy that doesn't exist yet (still
+    // being backfilled on the server) should be picked up once it lands.
+    p.catch(() => arrayMetaCache.delete(levelUrl))
     arrayMetaCache.set(levelUrl, p)
   }
   return p
+}
+
+/**
+ * The array to read a coronal/sagittal slice from: the level's axis-chunked
+ * copy (`scale0_coronal` / `scale0_sagittal`, see server/src/
+ * orthogonalCopies.ts) when present -- a handful of chunks per slice -- or
+ * the level itself otherwise (coarse cube-chunked levels, which don't have
+ * copies, or a store whose copies are still being backfilled). The generic
+ * readers below handle either chunk layout.
+ */
+async function orthogonalLevelUrl(zarrBaseUrl: string, levelPath: string, axis: 'coronal' | 'sagittal'): Promise<string> {
+  const copyUrl = `${zarrBaseUrl}/${levelPath}_${axis}`
+  try {
+    await fetchZarray(copyUrl)
+    return copyUrl
+  } catch {
+    return `${zarrBaseUrl}/${levelPath}`
+  }
 }
 
 // Keyed by chunk URL, so scrolling within the same chunk (the common case --
@@ -281,19 +302,13 @@ export async function readZSlice(zarrBaseUrl: string, levelPath: string, zIndex:
 
 /**
  * Reads one Y-plane (coronal) slice: fixed Y, varying Z (rows) and X
- * (columns). Unlike readZSlice above, the finest pyramid levels' chunking
- * (see server/src/zarrWriter.ts's sliceOptimizedChunkShape) puts exactly one
- * Z index per chunk -- so a coronal slice, which spans every Z index, always
- * needs one chunk fetch per Z (bounded by the chunk cache: a chunk already
- * fetched for the axial view, or a previous coronal read at a Y value in the
- * same chunk-Y band, is reused, not re-fetched). Chunk X always spans the
- * array's full X extent for these levels (see the same comment), so there's
- * only ever one X band to fetch per Z, keeping this to exactly one fetch per
- * Z index in the common case, not one per (Z, X-band) pair.
+ * (columns), from the level's coronal-chunked copy when present (see
+ * orthogonalLevelUrl). Handles any chunk layout, so it also works (slowly --
+ * one chunk per Z index) against an axial-chunked array.
  */
 export async function readCoronalSlice(zarrBaseUrl: string, levelPath: string, yIndex: number): Promise<SliceResult> {
   const sliceT0 = performance.now()
-  const levelUrl = `${zarrBaseUrl}/${levelPath}`
+  const levelUrl = await orthogonalLevelUrl(zarrBaseUrl, levelPath, 'coronal')
   const meta = await fetchZarray(levelUrl)
   const [shapeZ, shapeY, shapeX] = meta.shape
   const [chunkZ, chunkY, chunkX] = meta.chunks
@@ -333,15 +348,12 @@ export async function readCoronalSlice(zarrBaseUrl: string, levelPath: string, y
 
 /**
  * Reads one X-plane (sagittal) slice: fixed X, varying Z (rows) and Y
- * (columns). Same per-chunk-fetch-count caveat as readCoronalSlice, except
- * X isn't chunked at all for the finest levels (chunk X always spans the
- * full array width there -- see sliceOptimizedChunkShape), so a sagittal
- * read can need multiple chunk fetches per Z when the array is tall enough
- * to span more than one Y chunk band, not just one like a coronal read.
+ * (columns), from the level's sagittal-chunked copy when present (see
+ * orthogonalLevelUrl). Handles any chunk layout, like readCoronalSlice.
  */
 export async function readSagittalSlice(zarrBaseUrl: string, levelPath: string, xIndex: number): Promise<SliceResult> {
   const sliceT0 = performance.now()
-  const levelUrl = `${zarrBaseUrl}/${levelPath}`
+  const levelUrl = await orthogonalLevelUrl(zarrBaseUrl, levelPath, 'sagittal')
   const meta = await fetchZarray(levelUrl)
   const [shapeZ, shapeY, shapeX] = meta.shape
   const [chunkZ, chunkY, chunkX] = meta.chunks

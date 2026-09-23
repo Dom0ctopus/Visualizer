@@ -98,3 +98,31 @@ export async function fetchSegmentationMergeStatus(): Promise<SegmentationMergeS
   const res = await fetch('/api/segmentation-merges')
   return handleJson<SegmentationMergeStatus>(res)
 }
+
+export interface MeshManifestEntry {
+  layer: number
+  labelValue: number
+  file: string
+  vertexCount: number
+  triangleCount: number
+}
+
+/** See server/src/surfaceMesh.ts. Positions are physical [x, y, z] mm. */
+export interface MeshManifest {
+  version: 1
+  segments: MeshManifestEntry[]
+  boundsMin: [number, number, number]
+  boundsMax: [number, number, number]
+}
+
+export async function fetchMeshManifest(segmentationId: string): Promise<MeshManifest> {
+  return handleJson<MeshManifest>(await fetch(`/api/meshes/${segmentationId}/manifest.json`))
+}
+
+export function meshFileUrl(segmentationId: string, file: string): string {
+  return `/api/meshes/${segmentationId}/${file}`
+}
+
+export async function regenerateMeshes(segmentationId: string): Promise<void> {
+  await handleJson(await fetch(`/api/segmentations/${segmentationId}/meshes`, { method: 'POST' }))
+}

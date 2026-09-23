@@ -15,15 +15,8 @@ export interface LabelLut {
 
 /**
  * Builds a direct label -> RGBA lookup table for one segmentation layer's
- * segments, for the itk-vtk-viewer engine's own slice-pane compositing
- * (ZarrSliceCanvas). Unlike the niivue engine's buildLutForBucket (which has
- * to pack segments into opacity-rounded "buckets" because niivue's
- * per-volume opacity is the only analog blending knob it has), this canvas
- * compositing controls the blend math directly, so each segment's own exact
- * (not rounded) opacity and exact 3D-Slicer-defined color can go straight
- * into the table -- true segment-color parity in this pane, unlike the 3D
- * Volume pane (see useItkVtkViewer.ts's label-image comments for why that
- * one can't match).
+ * segments, for the 2D panes' compositing (ZarrSliceCanvas): each segment's
+ * exact opacity and 3D-Slicer-defined color go straight into the table.
  */
 export function buildLabelLut(segmentsInLayer: SegmentState[]): LabelLut {
   const maxLabel = Math.max(0, ...segmentsInLayer.map((s) => s.labelValue))

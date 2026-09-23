@@ -136,3 +136,64 @@ export async function readWholeZarrLevel(zarrGroupPath: string, level: ZarrLevel
   }
   return { data: out, size: [shapeX, shapeY, shapeZ] }
 }
+
+export interface ZarrArrayInfo {
+  /** [z, y, x] */
+  shape: [number, number, number]
+  /** [z, y, x] */
+  chunks: [number, number, number]
+  dtype: string
+  ctor: TypedArrayConstructor
+}
+
+export async function readZarrArrayInfo(arrayDir: string): Promise<ZarrArrayInfo> {
+  const zarray = JSON.parse(await readFile(path.join(arrayDir, '.zarray'), 'utf8')) as ZarrArrayMeta
+  return { shape: zarray.shape, chunks: zarray.chunks, dtype: zarray.dtype, ctor: dtypeCtor(zarray.dtype) }
+}
+
+/**
+ * Reads Z slices [z0, z0 + nz) of one zarr array into a flat z-major buffer
+ * (index = z * sy * sx + y * sx + x, z relative to z0), decoding only the
+ * chunks that intersect that range -- so a whole level can be streamed a
+ * band at a time with memory bounded by the band, not the level.
+ */
+export async function readZRange(arrayDir: string, z0: number, nz: number): Promise<TypedArray> {
+  const zarray = JSON.parse(await readFile(path.join(arrayDir, '.zarray'), 'utf8')) as ZarrArrayMeta
+  const [shapeZ, shapeY, shapeX] = zarray.shape
+  const [chunkZ, chunkY, chunkX] = zarray.chunks
+  const ctor = dtypeCtor(zarray.dtype)
+  const codec = zarray.compressor ? Blosc.fromConfig(zarray.compressor) : null
+  const zEnd = Math.min(shapeZ, z0 + nz)
+  const out = new ctor(nz * shapeY * shapeX) as TypedArray
+  const nChunksY = Math.ceil(shapeY / chunkY)
+  const nChunksX = Math.ceil(shapeX / chunkX)
+
+  for (let bz = Math.floor(z0 / chunkZ); bz * chunkZ < zEnd; bz++) {
+    for (let by = 0; by < nChunksY; by++) {
+      for (let bx = 0; bx < nChunksX; bx++) {
+        let raw: Uint8Array
+        try {
+          const compressed = await readFile(path.join(arrayDir, `${bz}.${by}.${bx}`))
+          raw = codec ? ((await codec.decode(new Uint8Array(compressed))) as Uint8Array) : new Uint8Array(compressed)
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue
+          throw e
+        }
+        const chunkData = new ctor(raw.buffer, raw.byteOffset, raw.byteLength / ctor.BYTES_PER_ELEMENT)
+        const rowLen = Math.min(chunkX, shapeX - bx * chunkX)
+        const rowsInChunk = Math.min(chunkY, shapeY - by * chunkY)
+        const lzStart = Math.max(0, z0 - bz * chunkZ)
+        const lzEnd = Math.min(chunkZ, zEnd - bz * chunkZ)
+        for (let lz = lzStart; lz < lzEnd; lz++) {
+          const outZ = bz * chunkZ + lz - z0
+          for (let y = 0; y < rowsInChunk; y++) {
+            const srcOffset = lz * chunkY * chunkX + y * chunkX
+            const dstOffset = outZ * shapeY * shapeX + (by * chunkY + y) * shapeX + bx * chunkX
+            out.set(chunkData.subarray(srcOffset, srcOffset + rowLen), dstOffset)
+          }
+        }
+      }
+    }
+  }
+  return out
+}

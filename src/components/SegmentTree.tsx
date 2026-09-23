@@ -2,12 +2,8 @@ import { groupBySystem } from '../types'
 import type { SegmentState, SystemGroup } from '../types'
 import { TreeRow } from './TreeRow'
 
-/** The minimal shape SegmentTree actually needs -- both the niivue engine's
- *  LoadedSegmentation (which carries extra niivue-volume bookkeeping) and
- *  the itk-vtk-viewer engine's own lighter loaded-segmentation type
- *  (useZarrSegmentations.ts) satisfy this structurally, so the same tree UI
- *  renders either engine's segment state without depending on either one's
- *  rendering internals. */
+/** The minimal shape SegmentTree needs -- kept structural rather than tied
+ *  to ZarrLoadedSegmentation so the tree UI stays independent of rendering. */
 export interface SegmentTreeItem {
   recordId: string
   name: string

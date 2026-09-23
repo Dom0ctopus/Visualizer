@@ -12,7 +12,7 @@ import {
 // Full type-range defaults (rather than scanning the volume for its actual
 // min/max up front, which would mean downloading everything just to show a
 // slider) -- narrow, real-valued data just starts with headroom on both
-// ends of the window, same as the niivue engine's initial full-range default.
+// ends of the window.
 function naturalRangeFor(dtype: string): [number, number] {
   switch (dtype) {
     case '|u1':

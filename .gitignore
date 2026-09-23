@@ -15,6 +15,7 @@ dist-ssr
 # Backend uploaded file storage
 server/data/files
 server/data/zarr
+server/data/meshes
 server/data/index.json
 
 # itk-vtk-viewer's dist assets (100MB+ of format-decoder wasm binaries) --

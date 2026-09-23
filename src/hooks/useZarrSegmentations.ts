@@ -4,14 +4,9 @@ import type { SegmentationRecord, SegmentState, ZarrLoadedSegmentation } from '.
 const DEFAULT_SEGMENT_OPACITY = 0.6
 
 /**
- * Segment visibility/opacity state for the itk-vtk-viewer engine's
- * segmentation overlays -- structurally the same segment model as the
- * niivue engine's useNiivue.ts (SegmentState, grouped by system), but far
- * simpler here: there's no GL volume to rebuild on every edit (see
- * useSegmentationOverlays.ts for the slice pane, which reads directly off
- * this state on every render, and useItkVtkViewer.ts's label-image methods
- * for the 3D pane), so this is just plain React state with no
- * debounce/rebuild pipeline.
+ * Segment visibility/opacity state, as plain React state: the 2D panes
+ * (useSegmentationOverlays.ts) and both 3D tabs read directly from it, so
+ * there's nothing to rebuild on an edit.
  */
 export function useZarrSegmentations() {
   const [segmentations, setSegmentations] = useState<ZarrLoadedSegmentation[]>([])

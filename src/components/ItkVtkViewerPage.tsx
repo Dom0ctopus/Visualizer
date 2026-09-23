@@ -1,17 +1,37 @@
-import { useEffect, useRef, useState } from 'react'
-import { fetchLibrary, zarrUrl } from '../lib/api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { deleteLibraryFile, fetchLibrary, uploadSegmentation, uploadVolume, zarrUrl } from '../lib/api'
 import { useItkVtkViewer } from '../hooks/useItkVtkViewer'
 import { useSegmentationMerge3D } from '../hooks/useSegmentationMerge3D'
 import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
 import { useZarrSegmentations } from '../hooks/useZarrSegmentations'
 import { useZarrSliceViewer } from '../hooks/useZarrSliceViewer'
+import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
 import { SegmentTree } from './SegmentTree'
-import { ZarrSliceCanvas, type CanvasPan } from './ZarrSliceCanvas'
+import { ZarrSliceCanvas, type CanvasPan, type OrientationLabels } from './ZarrSliceCanvas'
 import type { LibraryRecord, SegmentationRecord, VolumeRecord } from '../types'
 
 const POLL_INTERVAL_MS = 1500
 const ZOOM_BUTTON_FACTOR = 1.25
+const DEFAULT_PAN: CanvasPan = { x: 0, y: 0 }
+
+// Plane colors follow 3D Slicer's convention (axial red, sagittal yellow,
+// coronal green): a crosshair line in one pane is drawn in the color of the
+// plane it represents.
+const AXIAL_COLOR = '#e85b5b'
+const CORONAL_COLOR = '#62c462'
+const SAGITTAL_COLOR = '#e8c547'
+
+// Stored arrays increase with physical LPS position on every axis (see
+// server/src/zarrWriter.ts's applyAxisFlips): +x = patient left, +y =
+// posterior, +z = superior. Axial is displayed radiologically (patient right
+// on screen left, anterior up); coronal/sagittal are flipped vertically so
+// superior is up.
+const AXIAL_LABELS: OrientationLabels = { left: 'R', right: 'L', top: 'A', bottom: 'P' }
+const CORONAL_LABELS: OrientationLabels = { left: 'R', right: 'L', top: 'S', bottom: 'I' }
+const SAGITTAL_LABELS: OrientationLabels = { left: 'A', right: 'P', top: 'S', bottom: 'I' }
+
+type RenderTab = 'voxel' | 'mesh'
 
 function statusLabel(record: VolumeRecord | SegmentationRecord): string {
   switch (record.zarrStatus) {
@@ -26,80 +46,41 @@ function statusLabel(record: VolumeRecord | SegmentationRecord): string {
   }
 }
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
 interface HoveredSegment {
   name: string
   clientX: number
   clientY: number
 }
 
-const DEFAULT_PAN: CanvasPan = { x: 0, y: 0 }
-
 /**
- * A second, parallel viewer built on itk-vtk-viewer/vtk.js for the 3D
- * render, plus a custom canvas-based reader for the slice views -- see the
- * conversation history for why the slice side isn't itk-vtk-viewer too:
- * its use2D/ZPlane mode hits a hard internal voxel-count cap on scans this
- * large and corrupts the display when the slice position changes, with no
- * public API workaround found. useZarrSliceViewer reads 2D slices directly
- * out of the same OME-Zarr store instead, sidestepping that mode entirely
- * -- at the cost of building the window/level and scroll-to-slice UI
- * ourselves. It starts at pyramid level 1 (2x downsampled in each axis),
- * not the true finest level: native-resolution per-slice reads had a real
- * per-step latency floor that persisted even after ruling out every
- * specific cause found (chunk layout, cache growth, cloud-sync storage,
- * Node's I/O thread pool size). Every pyramid level is pickable from the
- * "Resolution" panel below for fast fly-through browsing, and
- * "Inspect here" (on the Axial pane specifically -- see
- * useZarrSliceViewer.ts's own comment on why the other two planes don't
- * have an equivalent) drills into native resolution for a bounded
- * neighborhood around wherever the user actually wants detail. The 3D
- * Volume pane is unaffected either way, since it already auto-selects
- * whichever level fits its own voxel budget.
+ * The app: three linked 2D panes (axial/coronal/sagittal) read directly from
+ * each volume's OME-Zarr pyramid (useZarrSliceViewer, useSegmentationOverlays,
+ * WebGL-composited by ZarrSliceCanvas), next to a 3D pane with two tabs:
  *
- * The left column shows all three orthogonal planes (axial, coronal,
- * sagittal) at once, each independently scrollable/zoomable/pannable, next
- * to the 3D render on the right -- see useZarrSliceViewer.ts and
- * useSegmentationOverlays.ts for how a slice/overlay along any of the three
- * axes is read directly out of the zarr store.
+ *  - "Voxel render": itk-vtk-viewer volume rendering, with every loaded
+ *    segmentation merged server-side into one label image
+ *    (useSegmentationMerge3D, segmentationMergeConvert.ts) since
+ *    itk-vtk-viewer only holds one label image -- colored by its own palette.
+ *  - "Surface meshes": per-segment surfaces generated server-side
+ *    (surfaceMesh.ts), in each segment's own color (MeshViewer).
  *
- * Segmentation overlays: each 2D pane composites every loaded segmentation's
- * own layers directly (useSegmentationOverlays.ts), with each segment's
- * exact 3D-Slicer-defined color and opacity -- full parity with the niivue
- * engine there. Hovering any of the three panes looks up the segment name
- * at the cursor from that same per-pixel overlay data (ZarrSliceCanvas's
- * onHoverLabel) and shows it both in a tooltip near the cursor and in a
- * status bar above the panes -- the 3D pane has no equivalent, since it's a
- * separate WebGL viewer library without per-pixel picking exposed here.
- * The 3D pane instead drives itk-vtk-viewer's own built-in labelImage
- * overlay, which only ever holds one label image at a time and colors it by
- * a fixed categorical palette rather than arbitrary per-label RGB (see
- * useItkVtkViewer.ts's loadLabelImageUrl comment) -- so every loaded
- * segmentation/layer is combined server-side into one merged label image
- * first (useSegmentationMerge3D.ts, segmentationMergeConvert.ts) rather than
- * showing only the first one, though still in itk-vtk-viewer's own colors
- * rather than the slice panes' / 3D-Slicer's.
+ * Uploads are converted to OME-Zarr on the server in the background; this
+ * polls the library while anything is still converting.
  *
- * Volumes/segmentations are only loadable here once the server's background
- * NRRD -> OME-Zarr conversion (kicked off on upload, see
- * server/src/zarrConvert.ts and segmentationZarrConvert.ts) finishes -- this
- * polls the library while any record is still converting.
+ * The 2D panes start at pyramid level 1 for responsive scrolling; every level
+ * is pickable from the "Resolution" panel, and "Inspect here" drills into
+ * native resolution for a bounded Z neighborhood (see useZarrSliceViewer.ts).
  */
-interface ItkVtkViewerPageProps {
-  /** Mirrors App.tsx's niivue `.app-body`'s own `hidden` attribute, applied
-   *  directly to this component's root element instead of an extra wrapper
-   *  div around it (App.tsx used to render one) -- that wrapper had no
-   *  className/flex properties of its own, so as a plain block-level child
-   *  of `.app`'s flex column it never grew to fill available height, which
-   *  left this component's own `.app-body` sized to its full content
-   *  height (everything in the sidebar, uncapped) instead of being
-   *  constrained to the viewport -- the actual cause of the sidebar's
-   *  segment list running off the bottom with no way to scroll to it. */
-  hidden?: boolean
-}
-
-export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
+export function ItkVtkViewerPage() {
   const [library, setLibrary] = useState<LibraryRecord[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(0)
   const [searchText, setSearchText] = useState('')
   const [activeZarrUrl, setActiveZarrUrl] = useState<string | null>(null)
   const [activeVolumeId, setActiveVolumeId] = useState<string | null>(null)
@@ -110,7 +91,13 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
   const [sagittalZoom, setSagittalZoom] = useState(1)
   const [sagittalPan, setSagittalPan] = useState<CanvasPan>(DEFAULT_PAN)
   const [hoveredSegment, setHoveredSegment] = useState<HoveredSegment | null>(null)
+  const [crosshairVisible, setCrosshairVisible] = useState(true)
+  const [renderTab, setRenderTab] = useState<RenderTab>('voxel')
+  // Mounted on first use (its own WebGL context), then kept mounted.
+  const [meshTabOpened, setMeshTabOpened] = useState(false)
   const pollTimerRef = useRef<number | null>(null)
+  const volumeInputRef = useRef<HTMLInputElement | null>(null)
+  const segInputRef = useRef<HTMLInputElement | null>(null)
 
   const {
     volumeContainerRef,
@@ -118,6 +105,7 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
     busy,
     error: viewerError,
     loadedName,
+    clearVolume,
     loadZarrUrl,
     loadLabelImageUrl,
     setLabelWeights,
@@ -166,43 +154,34 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
     setLabelNames
   )
 
+  const refreshLibrary = useCallback(async () => {
+    try {
+      const records = await fetchLibrary()
+      setLibrary(records)
+      return records
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to reach the backend server.')
+      return null
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
-
     async function poll() {
-      try {
-        const records = await fetchLibrary()
-        if (cancelled) return
-        setLibrary(records)
-        const anyPending = records.some((r) => 'zarrStatus' in r && r.zarrStatus === 'pending')
-        pollTimerRef.current = window.setTimeout(poll, anyPending ? POLL_INTERVAL_MS : POLL_INTERVAL_MS * 4)
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to reach the backend server.')
-      }
+      const records = await refreshLibrary()
+      if (cancelled) return
+      const anyPending = records?.some((r) => r.zarrStatus === 'pending' || (r.kind === 'segmentation' && r.meshStatus === 'pending'))
+      pollTimerRef.current = window.setTimeout(poll, anyPending ? POLL_INTERVAL_MS : POLL_INTERVAL_MS * 4)
     }
     poll()
-
     return () => {
       cancelled = true
       if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current)
     }
-  }, [])
+  }, [refreshLibrary])
 
   const volumes = library.filter((r): r is VolumeRecord => r.kind === 'volume')
   const segmentationRecords = library.filter((r): r is SegmentationRecord => r.kind === 'segmentation')
-
-  const handleLoad = (record: VolumeRecord) => {
-    const url = zarrUrl(record.id)
-    setActiveZarrUrl(url)
-    setActiveVolumeId(record.id)
-    setAxialZoom(1)
-    setAxialPan(DEFAULT_PAN)
-    setCoronalZoom(1)
-    setCoronalPan(DEFAULT_PAN)
-    setSagittalZoom(1)
-    setSagittalPan(DEFAULT_PAN)
-    loadZarrUrl(url, record.name)
-  }
 
   const resetSliceView = () => {
     setAxialZoom(1)
@@ -213,29 +192,88 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
     setSagittalPan(DEFAULT_PAN)
   }
 
-  const handleLoadSegmentation = (record: SegmentationRecord) => {
-    zarrSeg.loadSegmentationRecord(record)
+  const handleLoad = (record: VolumeRecord) => {
+    const url = zarrUrl(record.id)
+    setActiveZarrUrl(url)
+    setActiveVolumeId(record.id)
+    resetSliceView()
+    loadZarrUrl(url, record.name)
+  }
+
+  const handleUpload = async (files: File[], kind: 'volume' | 'segmentation') => {
+    setError(null)
+    setUploading((n) => n + files.length)
+    for (const file of files) {
+      try {
+        if (kind === 'volume') await uploadVolume(file)
+        else await uploadSegmentation(file)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : `Failed to upload ${file.name}`)
+      } finally {
+        setUploading((n) => n - 1)
+        void refreshLibrary()
+      }
+    }
+  }
+
+  const handleRemove = async (record: LibraryRecord) => {
+    if (!window.confirm(`Remove "${record.name}" from the server library? This deletes the uploaded file and its converted data.`)) return
+    setError(null)
+    if (record.kind === 'volume' && record.id === activeVolumeId) {
+      clearVolume()
+      setActiveZarrUrl(null)
+      setActiveVolumeId(null)
+    }
+    if (record.kind === 'segmentation') zarrSeg.removeSegmentation(record.id)
+    try {
+      await deleteLibraryFile(record.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to remove file from the library.')
+    }
+    void refreshLibrary()
+  }
+
+  const openTab = (tab: RenderTab) => {
+    setRenderTab(tab)
+    if (tab === 'mesh') setMeshTabOpened(true)
+  }
+
+  const zoomAll = (factor: number) => {
+    const apply = (z: number) => Math.min(20, Math.max(0.1, z * factor))
+    setAxialZoom(apply)
+    setCoronalZoom(apply)
+    setSagittalZoom(apply)
   }
 
   const sliderStep = Math.max((dataRange[1] - dataRange[0]) / 1000, 0.01)
   const combinedError = error ?? viewerError ?? sliceError ?? overlayError ?? mergeError
+  // VolumeInfo spacing is [z, y, x].
+  const spacing = volumeInfo?.spacing ?? [1, 1, 1]
 
   return (
-    <div className="app-body" hidden={hidden}>
+    <div className="app-body">
       <div className="viewer itk-viewer-split">
         <div className="itk-viewer-hover-bar">
-          {hoveredSegment ? (
-            <>
-              <span className="itk-viewer-hover-bar-label">Segment:</span> {hoveredSegment.name}
-            </>
-          ) : (
-            'Hover a segment in any 2D pane to see its name'
-          )}
+          <span className="itk-viewer-hover-text">
+            {hoveredSegment ? (
+              <>
+                <span className="itk-viewer-hover-bar-label">Segment:</span> {hoveredSegment.name}
+              </>
+            ) : (
+              'Hover a segment in any 2D pane to see its name · click a pane to move the linked cursor'
+            )}
+          </span>
+          <label className="crosshair-toggle">
+            <input type="checkbox" checked={crosshairVisible} onChange={(e) => setCrosshairVisible(e.target.checked)} />
+            Crosshair
+          </label>
         </div>
         <div className="itk-viewer-columns">
           <div className="itk-viewer-left-column">
             <div className="itk-viewer-pane">
-              <div className="itk-viewer-pane-label">Axial</div>
+              <div className="itk-viewer-pane-label" style={{ borderLeftColor: AXIAL_COLOR }}>
+                Axial
+              </div>
               <div className="itk-viewer-container">
                 <ZarrSliceCanvas
                   slice={axialSlice}
@@ -248,6 +286,13 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
                   onZoomChange={setAxialZoom}
                   onPanChange={setAxialPan}
                   onHoverLabel={setHoveredSegment}
+                  pixelSpacing={[spacing[2], spacing[1]]}
+                  crosshair={crosshairVisible ? { x: xIndex, y: yIndex, colorX: SAGITTAL_COLOR, colorY: CORONAL_COLOR } : null}
+                  onPick={(p) => {
+                    setXIndex(p.x)
+                    setYIndex(p.y)
+                  }}
+                  labels={AXIAL_LABELS}
                 />
               </div>
               {volumeInfo && (
@@ -283,7 +328,9 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
             </div>
 
             <div className="itk-viewer-pane">
-              <div className="itk-viewer-pane-label">Coronal</div>
+              <div className="itk-viewer-pane-label" style={{ borderLeftColor: CORONAL_COLOR }}>
+                Coronal
+              </div>
               <div className="itk-viewer-container">
                 <ZarrSliceCanvas
                   slice={coronalSlice}
@@ -296,6 +343,14 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
                   onZoomChange={setCoronalZoom}
                   onPanChange={setCoronalPan}
                   onHoverLabel={setHoveredSegment}
+                  pixelSpacing={[spacing[2], spacing[0]]}
+                  flipY
+                  crosshair={crosshairVisible ? { x: xIndex, y: zIndex, colorX: SAGITTAL_COLOR, colorY: AXIAL_COLOR } : null}
+                  onPick={(p) => {
+                    setXIndex(p.x)
+                    setZIndex(p.y)
+                  }}
+                  labels={CORONAL_LABELS}
                 />
               </div>
               {volumeInfo && (
@@ -317,7 +372,9 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
             </div>
 
             <div className="itk-viewer-pane">
-              <div className="itk-viewer-pane-label">Sagittal</div>
+              <div className="itk-viewer-pane-label" style={{ borderLeftColor: SAGITTAL_COLOR }}>
+                Sagittal
+              </div>
               <div className="itk-viewer-container">
                 <ZarrSliceCanvas
                   slice={sagittalSlice}
@@ -330,6 +387,14 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
                   onZoomChange={setSagittalZoom}
                   onPanChange={setSagittalPan}
                   onHoverLabel={setHoveredSegment}
+                  pixelSpacing={[spacing[1], spacing[0]]}
+                  flipY
+                  crosshair={crosshairVisible ? { x: yIndex, y: zIndex, colorX: CORONAL_COLOR, colorY: AXIAL_COLOR } : null}
+                  onPick={(p) => {
+                    setYIndex(p.x)
+                    setZIndex(p.y)
+                  }}
+                  labels={SAGITTAL_LABELS}
                 />
               </div>
               {volumeInfo && (
@@ -352,17 +417,32 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
           </div>
 
           <div className="itk-viewer-pane itk-viewer-pane-3d">
-            <div className="itk-viewer-pane-label">3D Render</div>
-            <div ref={volumeContainerRef} className="itk-viewer-container" />
+            <div className="render-tabs">
+              <button className={renderTab === 'voxel' ? 'render-tab active' : 'render-tab'} onClick={() => openTab('voxel')}>
+                Voxel render
+              </button>
+              <button className={renderTab === 'mesh' ? 'render-tab active' : 'render-tab'} onClick={() => openTab('mesh')}>
+                Surface meshes
+              </button>
+            </div>
+            <div className="itk-viewer-container">
+              {/* Both tabs stay mounted and sized (visibility, not display:none),
+                  so switching never reloads or re-lays-out either renderer. */}
+              <div className={renderTab === 'voxel' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
+                <div ref={volumeContainerRef} className="itk-volume-container" />
+              </div>
+              {meshTabOpened && (
+                <div className={renderTab === 'mesh' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
+                  <MeshViewer segmentations={zarrSeg.segmentations} records={segmentationRecords} />
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
       {hoveredSegment && (
-        <div
-          className="itk-viewer-hover-tooltip"
-          style={{ left: hoveredSegment.clientX + 14, top: hoveredSegment.clientY + 14 }}
-        >
+        <div className="itk-viewer-hover-tooltip" style={{ left: hoveredSegment.clientX + 14, top: hoveredSegment.clientY + 14 }}>
           {hoveredSegment.name}
         </div>
       )}
@@ -371,16 +451,48 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
         {combinedError && <div className="error-banner">{combinedError}</div>}
 
         <section className="panel">
-          <h2 className="panel-title">Volumes (itk-vtk-viewer)</h2>
-          <p className="panel-hint">
-            Each volume is converted on upload into a chunked, multiscale OME-Zarr pyramid. The 3D render picks a
-            resolution level that fits in memory instead of requiring the whole scan to fit in one GPU texture up
-            front the way the niivue engine does; the slice panes read 2D slices from the same store's 2x-downsampled
-            level, traded for scrolling that keeps up regardless of the source scan's native resolution.
+          <h2 className="panel-title">Upload</h2>
+          <div className="library-upload-row">
+            <input
+              ref={volumeInputRef}
+              type="file"
+              accept=".nrrd,.nhdr"
+              className="hidden-input"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? [])
+                e.target.value = ''
+                if (files.length) void handleUpload(files, 'volume')
+              }}
+            />
+            <button className="btn btn-primary btn-small" onClick={() => volumeInputRef.current?.click()}>
+              Upload Volume…
+            </button>
+            <input
+              ref={segInputRef}
+              type="file"
+              accept=".nrrd,.nhdr"
+              multiple
+              className="hidden-input"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? [])
+                e.target.value = ''
+                if (files.length) void handleUpload(files, 'segmentation')
+              }}
+            />
+            <button className="btn btn-secondary btn-small" onClick={() => segInputRef.current?.click()}>
+              Upload Segmentation…
+            </button>
+          </div>
+          {uploading > 0 && <p className="tf-hint upload-status">Uploading {uploading} file{uploading === 1 ? '' : 's'}…</p>}
+          <p className="panel-hint upload-hint">
+            NRRD volumes and 3D Slicer segmentation NRRDs. Each is converted on the server into a multiscale OME-Zarr
+            pyramid (and, for segmentations, surface meshes) before it can be loaded.
           </p>
-          {volumes.length === 0 && (
-            <p className="empty-hint">Upload a volume from the main viewer's library panel -- it'll show up here once converted.</p>
-          )}
+        </section>
+
+        <section className="panel">
+          <h2 className="panel-title">Volumes</h2>
+          {volumes.length === 0 && <p className="empty-hint">No volumes yet. Upload one above.</p>}
           <ul className="library-list">
             {volumes.map((record) => (
               <li key={record.id} className="library-row">
@@ -390,7 +502,7 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
                     {record.name}
                   </div>
                   <div className="library-meta" title={record.zarrError}>
-                    {statusLabel(record)}
+                    {formatSize(record.sizeBytes)} · {statusLabel(record)}
                     {record.zarrStatus === 'failed' && record.zarrError ? `: ${record.zarrError}` : ''}
                   </div>
                 </div>
@@ -399,7 +511,10 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
                   disabled={!scriptReady || busy || record.zarrStatus !== 'ready'}
                   onClick={() => handleLoad(record)}
                 >
-                  Load
+                  {record.id === activeVolumeId ? 'Reload' : 'Load'}
+                </button>
+                <button className="icon-btn" onClick={() => void handleRemove(record)} title="Remove from library">
+                  ✕
                 </button>
               </li>
             ))}
@@ -407,17 +522,9 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
         </section>
 
         <section className="panel">
-          <h2 className="panel-title">Segmentations (itk-vtk-viewer)</h2>
-          <p className="panel-hint">
-            Every 2D pane composites every loaded segmentation with its own exact colors and opacities. The 3D render
-            shows a cumulative view of every loaded segmentation and layer combined, rebuilt on the server whenever
-            the set of loaded segmentations changes -- colored with itk-vtk-viewer's own built-in palette instead of
-            each segment's defined color, a limitation of its label-image API, not a missing feature here.
-          </p>
-          {mergeStatus === 'pending' && <p className="tf-hint">Building combined 3D view…</p>}
-          {segmentationRecords.length === 0 && (
-            <p className="empty-hint">Upload a segmentation from the main viewer's library panel -- it'll show up here once converted.</p>
-          )}
+          <h2 className="panel-title">Segmentations</h2>
+          {mergeStatus === 'pending' && <p className="tf-hint">Building combined voxel render…</p>}
+          {segmentationRecords.length === 0 && <p className="empty-hint">No segmentations yet. Upload one above.</p>}
           <ul className="library-list">
             {segmentationRecords.map((record) => {
               const alreadyLoaded = zarrSeg.segmentations.some((s) => s.recordId === record.id)
@@ -429,16 +536,19 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
                       {record.name}
                     </div>
                     <div className="library-meta" title={record.zarrError}>
-                      {statusLabel(record)}
+                      {formatSize(record.sizeBytes)} · {statusLabel(record)}
                       {record.zarrStatus === 'failed' && record.zarrError ? `: ${record.zarrError}` : ''}
                     </div>
                   </div>
                   <button
                     className="btn btn-secondary btn-small"
                     disabled={record.zarrStatus !== 'ready' || alreadyLoaded}
-                    onClick={() => handleLoadSegmentation(record)}
+                    onClick={() => zarrSeg.loadSegmentationRecord(record)}
                   >
                     {alreadyLoaded ? 'Loaded' : 'Load'}
+                  </button>
+                  <button className="icon-btn" onClick={() => void handleRemove(record)} title="Remove from library">
+                    ✕
                   </button>
                 </li>
               )
@@ -527,26 +637,10 @@ export function ItkVtkViewerPage({ hidden }: ItkVtkViewerPageProps) {
 
             <p className="tf-hint">Slice zoom &amp; pan</p>
             <div className="tf-row">
-              <button
-                className="btn btn-secondary btn-small"
-                onClick={() => {
-                  setAxialZoom((z) => Math.max(0.1, z / ZOOM_BUTTON_FACTOR))
-                  setCoronalZoom((z) => Math.max(0.1, z / ZOOM_BUTTON_FACTOR))
-                  setSagittalZoom((z) => Math.max(0.1, z / ZOOM_BUTTON_FACTOR))
-                }}
-                title="Zoom out (all panes)"
-              >
+              <button className="btn btn-secondary btn-small" onClick={() => zoomAll(1 / ZOOM_BUTTON_FACTOR)} title="Zoom out (all panes)">
                 &minus;
               </button>
-              <button
-                className="btn btn-secondary btn-small"
-                onClick={() => {
-                  setAxialZoom((z) => Math.min(20, z * ZOOM_BUTTON_FACTOR))
-                  setCoronalZoom((z) => Math.min(20, z * ZOOM_BUTTON_FACTOR))
-                  setSagittalZoom((z) => Math.min(20, z * ZOOM_BUTTON_FACTOR))
-                }}
-                title="Zoom in (all panes)"
-              >
+              <button className="btn btn-secondary btn-small" onClick={() => zoomAll(ZOOM_BUTTON_FACTOR)} title="Zoom in (all panes)">
                 +
               </button>
               <button className="btn btn-secondary btn-small" onClick={resetSliceView}>

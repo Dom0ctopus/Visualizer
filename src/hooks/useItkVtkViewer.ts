@@ -62,7 +62,7 @@ function loadItkVtkViewerScript(): Promise<void> {
 }
 
 /**
- * Drives only the 3D volume render pane. The slice pane used to be a second
+ * Drives the "Voxel render" 3D tab. The slice panes used to be a second
  * itk-vtk-viewer instance in use2D/ZPlane mode, but that mode hits a hard
  * internal voxel-count cap on scans this large and corrupts the display
  * instead of falling back gracefully when the slice position changes --
@@ -210,6 +210,7 @@ export function useItkVtkViewer() {
     busy,
     error,
     loadedName,
+    clearVolume: clearViewer,
     loadZarrUrl,
     loadLabelImageUrl,
     setLabelWeights,

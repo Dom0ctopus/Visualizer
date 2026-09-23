@@ -352,7 +352,9 @@ export async function convertSegmentationMergeToOmeZarr(
     Uint16Array,
     [refLevel.spacing[2], refLevel.spacing[1], refLevel.spacing[0]],
     [refLevel.origin[2], refLevel.origin[1], refLevel.origin[0]],
-    'nearest'
+    'nearest',
+    // Only itk-vtk-viewer's 3D pane reads the merge, never the 2D panes.
+    { orthogonalCopies: false }
   )
 
   return { mapping }

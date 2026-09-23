@@ -1,6 +1,7 @@
 import Blosc from 'numcodecs/blosc'
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { writeOrthogonalCopies } from './orthogonalCopies.js'
 
 // How many voxels wide/tall/deep the smallest pyramid level should still be,
 // and the hard cap on how many levels we generate for a very large volume --
@@ -76,7 +77,7 @@ const MAX_SLICE_CHUNK_BYTES = 64 * 1024 * 1024
 // pyramid that the Volume pane picking one to load whole is far more
 // likely, and cube chunking is friendlier to loading a whole level's worth
 // of chunks together than one-chunk-per-Z is).
-const SLICE_OPTIMIZED_LEVEL_COUNT = 4
+export const SLICE_OPTIMIZED_LEVEL_COUNT = 4
 
 function sliceOptimizedChunkShape(size: readonly [number, number, number], bytesPerElement: number): [number, number, number] {
   const [sx, sy] = size
@@ -355,8 +356,10 @@ export async function writeMultiscaleGroup(
   ctor: TypedArrayConstructor,
   spacing: number[],
   origin: number[],
-  multiscaleType: 'average' | 'nearest'
+  multiscaleType: 'average' | 'nearest',
+  options: { orthogonalCopies?: boolean } = {}
 ): Promise<void> {
+  const orthogonalCopies = options.orthogonalCopies ?? true
   await mkdir(outputPath, { recursive: true })
   await writeFile(path.join(outputPath, '.zgroup'), JSON.stringify({ zarr_format: 2 }))
 
@@ -389,6 +392,17 @@ export async function writeMultiscaleGroup(
   await writeFile(path.join(outputPath, '.zattrs'), JSON.stringify(zattrs))
 
   for (let i = 0; i < levels.length; i++) {
-    await writeZarrArrayV2(path.join(outputPath, `scale${i}`), levels[i], dtype, ctor, i < SLICE_OPTIMIZED_LEVEL_COUNT)
+    const levelDir = path.join(outputPath, `scale${i}`)
+    const sliceOptimized = i < SLICE_OPTIMIZED_LEVEL_COUNT
+    await writeZarrArrayV2(levelDir, levels[i], dtype, ctor, sliceOptimized)
+    // Only the slice-optimized levels need them: coarser levels are
+    // cube-chunked, so every plane is already a small number of chunks.
+    if (orthogonalCopies && sliceOptimized) {
+      const level = levels[i]
+      const [sx, sy] = level.size
+      await writeOrthogonalCopies(levelDir, level.size, dtype, ctor, (z0, nz) =>
+        level.data.subarray(z0 * sy * sx, (z0 + nz) * sy * sx) as TypedArray
+      )
+    }
   }
 }

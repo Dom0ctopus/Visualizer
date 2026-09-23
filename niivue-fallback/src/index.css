@@ -1,0 +1,651 @@
+:root {
+  --bg-0: #0b0c10;
+  --bg-1: #14161c;
+  --bg-2: #1b1e26;
+  --border: #2a2d38;
+  --text: #d6d8e0;
+  --text-dim: #8a8fa3;
+  --text-h: #f4f5f8;
+  --accent: #4f9dff;
+  --accent-hover: #6bb0ff;
+  --danger: #ef4444;
+  --danger-bg: rgba(239, 68, 68, 0.12);
+
+  font: 14px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg-0);
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+  flex-shrink: 0;
+}
+
+.app-header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0;
+  letter-spacing: 0.2px;
+}
+
+.app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.crosshair-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.crosshair-toggle input {
+  accent-color: var(--accent);
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* `.app-body { display: flex }` above has the same specificity as the UA
+   stylesheet's `[hidden] { display: none }` and loads later, so it would
+   otherwise win and defeat the `hidden` attribute used to toggle between the
+   niivue and itk-vtk-viewer engines without unmounting either. */
+.app-body[hidden] {
+  display: none;
+}
+
+.viewer {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: #000;
+  position: relative;
+}
+
+.viewer-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Sized identically to .viewer-3d-display below (so niivue's own ResizeObserver-driven
+   canvas dimensions match what's actually shown) but painted far outside the viewport
+   via `transform`, which doesn't affect layout/percentage sizing -- only paint
+   position. See the comment on canvas3dRef in useNiivue.ts for why this must stay
+   off-screen rather than simply hidden or removed. */
+.viewer-3d-source {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 50%;
+  transform: translate(-9999px, 0);
+}
+
+.viewer-3d-display {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 50%;
+  z-index: 1;
+  cursor: grab;
+}
+
+.viewer-3d-display:active {
+  cursor: grabbing;
+}
+
+.sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* A flex item's default min-height is `auto`, which lets it grow to its
+     full content height regardless of the parent's available space --
+     defeating `overflow-y: auto` above entirely (there's never less room
+     than content, so nothing ever scrolls) and leaving the outer `.app`'s
+     own `overflow: hidden` to just clip the excess instead. This overrides
+     that default so the sidebar is actually constrained to .app-body's
+     available height, letting its own scrollbar do the job -- most
+     visible with a segment list long enough to run past the bottom of the
+     viewport. */
+  min-height: 0;
+}
+
+.panel {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+  margin: 0 0 10px;
+}
+
+.panel-hint {
+  color: var(--text-dim);
+}
+
+.panel-hint p + p {
+  margin-top: 8px;
+}
+
+.hidden-input {
+  display: none;
+}
+
+.btn {
+  font: inherit;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  cursor: pointer;
+  width: 100%;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06131f;
+  font-weight: 600;
+}
+
+.btn-primary:not(:disabled):hover {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--text);
+  width: auto;
+}
+
+.btn-secondary:not(:disabled):hover {
+  border-color: var(--text-dim);
+}
+
+.btn-small {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.volume-info {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.volume-name {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tf-row {
+  display: flex;
+  gap: 6px;
+}
+
+.tf-row .btn {
+  width: auto;
+  flex: 1;
+}
+
+.resolution-levels {
+  flex-wrap: wrap;
+}
+
+.resolution-levels .btn {
+  flex: 1 1 auto;
+  min-width: 56px;
+}
+
+.tf-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.window-slider {
+  width: 100%;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.field span {
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+}
+
+.field b {
+  color: var(--text-h);
+  font-weight: 500;
+}
+
+input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.empty-hint {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin: 0;
+}
+
+.color-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.library-upload-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.library-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.library-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.library-kind {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  border-radius: 3px;
+  padding: 2px 4px;
+  color: #06131f;
+}
+
+.library-kind-volume {
+  background: var(--accent);
+}
+
+.library-kind-segmentation {
+  background: #8fd19e;
+}
+
+.library-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.library-name {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.library-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.search-bar {
+  margin-bottom: 10px;
+}
+
+.search-input {
+  width: 100%;
+  font: inherit;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+}
+
+.search-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.search-actions .btn-small {
+  width: auto;
+}
+
+.search-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  flex: 1;
+}
+
+.segment-tree {
+  display: flex;
+  flex-direction: column;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  border-radius: 4px;
+}
+
+.tree-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tree-row input[type='checkbox'] {
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.tree-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-badge {
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--bg-1);
+  border-radius: 8px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
+
+.opacity-popover {
+  position: fixed;
+  z-index: 1000;
+  width: 180px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.opacity-popover-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.opacity-popover-label b {
+  color: var(--text-h);
+  font-weight: 500;
+}
+
+.icon-btn {
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px 6px;
+  flex-shrink: 0;
+}
+
+.icon-btn:hover {
+  color: var(--text-h);
+  border-color: var(--text-dim);
+}
+
+.crosshair-mm {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-h);
+  margin-bottom: 8px;
+}
+
+.crosshair-values {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.crosshair-values li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.crosshair-name {
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crosshair-value {
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--text-h);
+  flex-shrink: 0;
+}
+
+.engine-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.engine-toggle .btn {
+  width: auto;
+}
+
+.itk-viewer-split {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 2px;
+}
+
+/* Persistent status bar above the panes, showing whichever segment the
+   cursor is currently hovering in any of the three 2D panes (see
+   ItkVtkViewerPage.tsx's hoveredSegment state and ZarrSliceCanvas's
+   onHoverLabel) -- the mouse-following tooltip (.itk-viewer-hover-tooltip)
+   shows the same information right at the cursor; this bar is the
+   always-in-the-same-place alternative for anyone who'd rather glance at a
+   fixed spot than track a tooltip that moves with the mouse. */
+.itk-viewer-hover-bar {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.itk-viewer-hover-bar-label {
+  color: var(--text-dim);
+  margin-right: 4px;
+}
+
+.itk-viewer-hover-tooltip {
+  position: fixed;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.85);
+  color: var(--text-h);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  /* Purely informational -- never intercepts the mouse, so it can't itself
+     trigger a pointerleave on whichever canvas it happens to render over. */
+  pointer-events: none;
+}
+
+.itk-viewer-columns {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 2px;
+}
+
+/* Stacks the three 2D planes (axial/coronal/sagittal) vertically, next to
+   the 3D render pane -- see .itk-viewer-pane below, reused unchanged for
+   both the small stacked panes here and the full-height 3D pane, since
+   flex:1 already means "share available space with siblings" in either a
+   column (here) or row (.itk-viewer-columns) context. */
+.itk-viewer-left-column {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.itk-viewer-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.itk-viewer-pane-label {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 4px;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
+.itk-viewer-container {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  /* Clips the slice canvas when zoomed in (see .zarr-slice-canvas's
+     transform) so panning/zooming never visually spills into neighboring
+     panes or controls. */
+  overflow: hidden;
+}
+
+.zarr-slice-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: #000;
+  cursor: grab;
+}
+
+.zarr-slice-canvas:active {
+  cursor: grabbing;
+}
+
+.zarr-slice-controls {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-1);
+}
+
+.zarr-slice-controls .window-slider {
+  flex: 1;
+}
+
+.error-banner {
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  color: #fca5a5;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}

@@ -81,54 +81,12 @@ body,
   min-height: 0;
 }
 
-/* `.app-body { display: flex }` above has the same specificity as the UA
-   stylesheet's `[hidden] { display: none }` and loads later, so it would
-   otherwise win and defeat the `hidden` attribute used to toggle between the
-   niivue and itk-vtk-viewer engines without unmounting either. */
-.app-body[hidden] {
-  display: none;
-}
-
 .viewer {
   flex: 1;
   min-width: 0;
   min-height: 0;
   background: #000;
   position: relative;
-}
-
-.viewer-canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-/* Sized identically to .viewer-3d-display below (so niivue's own ResizeObserver-driven
-   canvas dimensions match what's actually shown) but painted far outside the viewport
-   via `transform`, which doesn't affect layout/percentage sizing -- only paint
-   position. See the comment on canvas3dRef in useNiivue.ts for why this must stay
-   off-screen rather than simply hidden or removed. */
-.viewer-3d-source {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 50%;
-  height: 50%;
-  transform: translate(-9999px, 0);
-}
-
-.viewer-3d-display {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 50%;
-  height: 50%;
-  z-index: 1;
-  cursor: grab;
-}
-
-.viewer-3d-display:active {
-  cursor: grabbing;
 }
 
 .sidebar {
@@ -473,51 +431,6 @@ input[type='range'] {
   border-color: var(--text-dim);
 }
 
-.crosshair-mm {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
-  color: var(--text-h);
-  margin-bottom: 8px;
-}
-
-.crosshair-values {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.crosshair-values li {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.crosshair-name {
-  color: var(--text-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.crosshair-value {
-  font-family: ui-monospace, Consolas, monospace;
-  color: var(--text-h);
-  flex-shrink: 0;
-}
-
-.engine-toggle {
-  display: flex;
-  gap: 6px;
-}
-
-.engine-toggle .btn {
-  width: auto;
-}
-
 .itk-viewer-split {
   display: flex;
   flex-direction: column;
@@ -535,11 +448,22 @@ input[type='range'] {
    fixed spot than track a tooltip that moves with the mouse. */
 .itk-viewer-hover-bar {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 6px 10px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   color: var(--text);
+}
+
+.itk-viewer-hover-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .itk-viewer-hover-bar-label {
@@ -600,9 +524,108 @@ input[type='range'] {
   font-size: 11px;
   color: var(--text-dim);
   background: rgba(0, 0, 0, 0.5);
+  border-left: 3px solid transparent;
   border-radius: 4px;
   padding: 2px 6px;
   pointer-events: none;
+}
+
+.render-tabs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 2px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.render-tab {
+  font: inherit;
+  font-size: 12px;
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.render-tab:hover {
+  color: var(--text);
+}
+
+.render-tab.active {
+  color: var(--text-h);
+  border-bottom-color: var(--accent);
+}
+
+/* Both 3D tabs stay mounted and full-size; the inactive one is just hidden,
+   so neither renderer loses its state or sees a 0x0 resize on a switch. */
+.render-tab-panel {
+  position: absolute;
+  inset: 0;
+}
+
+.render-tab-panel.inactive {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.itk-volume-container {
+  position: absolute;
+  inset: 0;
+}
+
+.mesh-viewer {
+  position: absolute;
+  inset: 0;
+}
+
+.mesh-viewer-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.mesh-viewer-canvas canvas {
+  display: block;
+}
+
+.mesh-viewer-status {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  right: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.mesh-viewer-status > span {
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 4px;
+  padding: 2px 6px;
+  pointer-events: auto;
+}
+
+.mesh-viewer-status .btn {
+  margin-left: 6px;
+  padding: 2px 8px;
+}
+
+.mesh-viewer-error {
+  color: #fca5a5;
+}
+
+.upload-status {
+  margin-top: 8px;
+}
+
+.upload-hint {
+  font-size: 11px;
+  margin: 8px 0 0;
 }
 
 .itk-viewer-container {
@@ -615,17 +638,79 @@ input[type='range'] {
   overflow: hidden;
 }
 
+.zarr-slice-view {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  /* Pointer drags pan the pane; don't let touch input scroll the page. */
+  touch-action: none;
+}
+
+.zarr-slice-view.dragging {
+  cursor: grabbing;
+}
+
 .zarr-slice-canvas {
   width: 100%;
   height: 100%;
   display: block;
-  object-fit: contain;
   background: #000;
-  cursor: grab;
 }
 
-.zarr-slice-canvas:active {
-  cursor: grabbing;
+.zarr-slice-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.zarr-slice-overlay line {
+  stroke-width: 1;
+  opacity: 0.85;
+}
+
+.orientation-label {
+  position: absolute;
+  font-size: 11px;
+  font-weight: 600;
+  color: #f0f0f0;
+  text-shadow: 0 0 3px #000, 0 0 3px #000;
+  pointer-events: none;
+  user-select: none;
+}
+
+.orientation-left {
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.orientation-right {
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.orientation-top {
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.orientation-bottom {
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.zarr-slice-error {
+  position: absolute;
+  inset: auto 8px 8px 8px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  color: #fca5a5;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
 }
 
 .zarr-slice-controls {

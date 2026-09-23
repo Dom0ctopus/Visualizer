@@ -7,6 +7,7 @@ import type { StoredRecord } from './types.js'
 export const DATA_DIR = path.resolve(import.meta.dirname, '..', 'data')
 export const FILES_DIR = path.join(DATA_DIR, 'files')
 export const ZARR_DIR = path.join(DATA_DIR, 'zarr')
+export const MESH_DIR = path.join(DATA_DIR, 'meshes')
 const INDEX_PATH = path.join(DATA_DIR, 'index.json')
 
 let records: StoredRecord[] = []
@@ -14,6 +15,7 @@ let records: StoredRecord[] = []
 export async function initStore(): Promise<void> {
   await mkdir(FILES_DIR, { recursive: true })
   await mkdir(ZARR_DIR, { recursive: true })
+  await mkdir(MESH_DIR, { recursive: true })
   if (existsSync(INDEX_PATH)) {
     records = JSON.parse(await readFile(INDEX_PATH, 'utf8'))
   }

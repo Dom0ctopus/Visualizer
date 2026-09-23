@@ -40,6 +40,10 @@ export interface StoredSegmentationRecord extends RecordCommon {
   kind: 'segmentation'
   zarrStatus?: ZarrStatus
   zarrError?: string
+  /** Surface-mesh generation (surfaceMesh.ts) for the 3D "Surface meshes"
+   *  tab; runs after zarr conversion. Absent means never attempted. */
+  meshStatus?: ZarrStatus
+  meshError?: string
 }
 
 export type StoredRecord = VolumeRecord | StoredSegmentationRecord

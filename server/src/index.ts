@@ -3,11 +3,14 @@ import express from 'express'
 import multer from 'multer'
 import { rename, rm } from 'node:fs/promises'
 import path from 'node:path'
+import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
+import { enqueueJob } from './jobQueue.js'
 import { readNrrdHeader } from './nrrdHeader.js'
 import { convertSegmentationMergeToOmeZarr, type MergedSegmentMapping } from './segmentationMergeConvert.js'
 import { convertSegmentationNrrdToOmeZarr } from './segmentationZarrConvert.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
-import { FILES_DIR, ZARR_DIR, addRecord, getRecord, initStore, listRecords, newId, removeRecord, updateRecord } from './store.js'
+import { generateSegmentationMeshes } from './surfaceMesh.js'
+import { FILES_DIR, MESH_DIR, ZARR_DIR, addRecord, getRecord, initStore, listRecords, newId, removeRecord, updateRecord } from './store.js'
 import type { LibraryRecord, SegmentationRecord, StoredRecord, StoredSegmentationRecord, VolumeRecord } from './types.js'
 import { convertNrrdToOmeZarr } from './zarrConvert.js'
 
@@ -44,38 +47,92 @@ function mergeZarrPathFor(): string {
   return path.join(ZARR_DIR, '_merge.ome.zarr')
 }
 
-// Runs in the background after a volume upload responds -- conversion of a
-// large scan can take a while, and the point of doing this automatically is
-// to keep the upload itself fast rather than making the user wait through it.
-// The itk-vtk-viewer engine polls /api/library and only offers itself once
-// zarrStatus is 'ready'.
+function meshDirFor(id: string): string {
+  return path.join(MESH_DIR, id)
+}
+
+// Conversions run through the serial job queue (jobQueue.ts) rather than
+// all at once: each holds a whole pyramid level in memory. The upload
+// itself still responds immediately; the record stays 'pending' until its
+// job runs. A record deleted while its job is queued is skipped.
 function convertInBackground(id: string, nrrdPath: string): void {
-  void (async () => {
+  void enqueueJob(`convert volume ${id}`, async () => {
+    if (!getRecord(id)) return
     try {
       await convertNrrdToOmeZarr(nrrdPath, zarrPathFor(id))
       await updateRecord(id, { zarrStatus: 'ready' })
     } catch (e) {
-      // Only e.message is persisted to the record (surfaced in the UI), which
-      // is often too short to diagnose from -- the full error (stack trace
-      // included) goes to the server's own console so it's not lost.
+      // Only e.message is persisted to the record (surfaced in the UI); the
+      // full error goes to the server console.
       console.error(`Volume conversion failed for ${id}:`, e)
       await updateRecord(id, { zarrStatus: 'failed', zarrError: e instanceof Error ? e.message : 'Conversion failed' })
     }
-  })()
+  })
 }
 
-// Same fire-and-forget pattern as convertInBackground, for a segmentation's
-// per-layer label-map conversion (segmentationZarrConvert.ts).
 function convertSegmentationInBackground(id: string, nrrdPath: string): void {
-  void (async () => {
+  void enqueueJob(`convert segmentation ${id}`, async () => {
+    if (!getRecord(id)) return
     try {
       await convertSegmentationNrrdToOmeZarr(nrrdPath, segZarrPathFor(id))
       await updateRecord(id, { zarrStatus: 'ready' })
     } catch (e) {
       console.error(`Segmentation conversion failed for ${id}:`, e)
       await updateRecord(id, { zarrStatus: 'failed', zarrError: e instanceof Error ? e.message : 'Conversion failed' })
+      return
     }
-  })()
+    generateMeshesInBackground(id)
+  })
+}
+
+function generateMeshesInBackground(id: string): void {
+  void updateRecord(id, { meshStatus: 'pending', meshError: undefined })
+  void enqueueJob(`generate meshes ${id}`, async () => {
+    if (!getRecord(id)) return
+    try {
+      const manifest = await generateSegmentationMeshes(segZarrPathFor(id), meshDirFor(id))
+      const triangles = manifest.segments.reduce((n, s) => n + s.triangleCount, 0)
+      console.log(`Meshes for ${id}: ${manifest.segments.length} segments, ${triangles.toLocaleString()} triangles`)
+      await updateRecord(id, { meshStatus: 'ready' })
+    } catch (e) {
+      console.error(`Mesh generation failed for ${id}:`, e)
+      await updateRecord(id, { meshStatus: 'failed', meshError: e instanceof Error ? e.message : 'Mesh generation failed' })
+    }
+  })
+}
+
+// Stores converted before the coronal/sagittal-chunked copies existed (see
+// orthogonalCopies.ts) get them added in the background, and segmentations
+// that never had meshes get them generated. Existing uploads stay usable
+// meanwhile: the 2D readers fall back to the axial-chunked arrays until a
+// copy's .zarray appears.
+async function scheduleStartupBackfill(): Promise<void> {
+  // Conversions interrupted by a server restart would otherwise sit at
+  // 'pending' forever.
+  for (const record of listRecords().filter((r) => r.zarrStatus === 'pending')) {
+    const nrrdPath = path.join(FILES_DIR, record.storedFilename)
+    if (record.kind === 'volume') convertInBackground(record.id, nrrdPath)
+    else convertSegmentationInBackground(record.id, nrrdPath)
+  }
+  const ready = listRecords().filter((r) => r.zarrStatus === 'ready')
+  for (const record of ready) {
+    const storePath = record.kind === 'volume' ? zarrPathFor(record.id) : segZarrPathFor(record.id)
+    try {
+      if (!(await storeNeedsOrthogonalBackfill(storePath, record.kind))) continue
+    } catch (e) {
+      console.warn(`Skipping orthogonal backfill check for ${record.id}:`, e instanceof Error ? e.message : e)
+      continue
+    }
+    void enqueueJob(`backfill orthogonal copies ${record.id}`, async () => {
+      if (!getRecord(record.id)) return
+      await backfillOrthogonalCopies(storePath, record.kind)
+    })
+  }
+  for (const record of ready) {
+    if (record.kind === 'segmentation' && (record.meshStatus === undefined || record.meshStatus === 'pending')) {
+      generateMeshesInBackground(record.id)
+    }
+  }
 }
 
 interface MergeState {
@@ -143,6 +200,7 @@ app.use(cors())
 // (.zattrs, .zgroup, .zarray) are dotfiles, which express.static ignores
 // (404s) by default.
 app.use('/api/zarr', express.static(ZARR_DIR, { dotfiles: 'allow' }))
+app.use('/api/meshes', express.static(MESH_DIR))
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -249,6 +307,20 @@ app.post('/api/segmentation-merges', express.json(), (req, res) => {
   convertMergeInBackground(generation, volumeId, validLayers)
 })
 
+app.post('/api/segmentations/:id/meshes', (req, res) => {
+  const record = getRecord(req.params.id)
+  if (!record || record.kind !== 'segmentation' || record.zarrStatus !== 'ready') {
+    res.status(404).json({ error: 'No converted segmentation with that id' })
+    return
+  }
+  if (record.meshStatus === 'pending') {
+    res.json({ meshStatus: 'pending' })
+    return
+  }
+  generateMeshesInBackground(record.id)
+  res.json({ meshStatus: 'pending' })
+})
+
 app.get('/api/segmentation-merges', (_req, res) => {
   res.json(currentMerge ?? { status: 'none' })
 })
@@ -273,6 +345,7 @@ app.delete('/api/files/:id', async (req, res) => {
     await rm(zarrPathFor(removed.id), rmOptions)
   } else {
     await rm(segZarrPathFor(removed.id), rmOptions)
+    await rm(meshDirFor(removed.id), rmOptions)
   }
   res.json({ ok: true })
 })
@@ -280,4 +353,5 @@ app.delete('/api/files/:id', async (req, res) => {
 const PORT = Number(process.env.PORT ?? 8787)
 app.listen(PORT, () => {
   console.log(`Micro-CT visualizer backend listening on http://localhost:${PORT}`)
+  void scheduleStartupBackfill()
 })
