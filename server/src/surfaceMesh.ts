@@ -1,4 +1,4 @@
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { multiscaleGroupsIn } from './backfill.js'
 import { readZarrArrayInfo, readZarrLevels, readZRange } from './zarrReader.js'
@@ -226,7 +226,7 @@ function taubinSmooth(positions: Float32Array, vertexCount: number, indices: Uin
  * Meshes every nonzero label in one multiscale group's level 0. Returns the
  * meshes keyed by label, positions already in physical [x, y, z] mm.
  */
-async function meshLayer(groupPath: string): Promise<Map<number, { positions: Float32Array; indices: Uint32Array }>> {
+async function meshLayer(groupPath: string, onSlice: (k: number, sz: number) => void): Promise<Map<number, { positions: Float32Array; indices: Uint32Array }>> {
   const levels = await readZarrLevels(groupPath)
   const level0 = levels.find((l) => l.index === 0)!
   const arrayDir = path.join(groupPath, level0.levelPath)
@@ -287,6 +287,7 @@ async function meshLayer(groupPath: string): Promise<Map<number, { positions: Fl
   }
 
   for (let k = -1; k < sz; k++) {
+    if (k >= 0 && k % READ_BAND_SLICES === 0) onSlice(k, sz)
     const s = await sliceSource(k + 1)
     fillPaddedSlice(upper, s.src, s.offset, sx, sy, pw)
     const L = lower.data
@@ -394,23 +395,63 @@ async function meshLayer(groupPath: string): Promise<Map<number, { positions: Fl
   return result
 }
 
+export interface MeshGenerationOptions {
+  /**
+   * Called every few slices; may throw to abandon the run (see jobQueue's
+   * checkpoint). Layers finished before that are kept on disk.
+   */
+  onProgress?: (progress: string) => void
+  /** Continue a run abandoned via onProgress, skipping its finished layers. */
+  resume?: boolean
+}
+
+interface PartialProgress {
+  entries: MeshManifestEntry[]
+  boundsMin: [number, number, number]
+  boundsMax: [number, number, number]
+  doneLayers: number[]
+}
+
 /**
  * Generates meshes for every layer of a converted segmentation store and
  * writes them, plus a manifest.json, to outputDir: one binary file per
  * (layer, label) -- [u32 vertexCount][u32 triangleCount][f32 xyz * vertexCount][u32 abc * triangleCount].
+ * Work in progress lives in `${outputDir}.tmp`, with partial.json recording
+ * the layers already written so an interrupted run can resume.
  */
-export async function generateSegmentationMeshes(segStorePath: string, outputDir: string): Promise<MeshManifest> {
+export async function generateSegmentationMeshes(segStorePath: string, outputDir: string, options: MeshGenerationOptions = {}): Promise<MeshManifest> {
   const tmpDir = `${outputDir}.tmp`
-  await rm(tmpDir, { recursive: true, force: true })
-  await mkdir(tmpDir, { recursive: true })
+  const partialPath = path.join(tmpDir, 'partial.json')
+  let partial: PartialProgress | null = null
+  if (options.resume) {
+    try {
+      partial = JSON.parse(await readFile(partialPath, 'utf8')) as PartialProgress
+    } catch {
+      partial = null
+    }
+  }
+  if (!partial) {
+    await rm(tmpDir, { recursive: true, force: true })
+    await mkdir(tmpDir, { recursive: true })
+  }
 
-  const entries: MeshManifestEntry[] = []
-  const boundsMin: [number, number, number] = [Infinity, Infinity, Infinity]
-  const boundsMax: [number, number, number] = [-Infinity, -Infinity, -Infinity]
+  const entries: MeshManifestEntry[] = partial?.entries ?? []
+  const boundsMin: [number, number, number] = partial?.boundsMin ?? [Infinity, Infinity, Infinity]
+  const boundsMax: [number, number, number] = partial?.boundsMax ?? [-Infinity, -Infinity, -Infinity]
+  const doneLayers = new Set(partial?.doneLayers ?? [])
+  // Infinity doesn't survive JSON: a resumed run with no segments so far
+  // reads null back.
+  for (let a = 0; a < 3; a++) {
+    if (boundsMin[a] === null) boundsMin[a] = Infinity
+    if (boundsMax[a] === null) boundsMax[a] = -Infinity
+  }
 
-  for (const groupPath of await multiscaleGroupsIn(segStorePath, 'segmentation')) {
+  const groups = await multiscaleGroupsIn(segStorePath, 'segmentation')
+  for (const [i, groupPath] of groups.entries()) {
     const layer = Number(path.basename(groupPath).replace('layer', ''))
-    const meshes = await meshLayer(groupPath)
+    if (doneLayers.has(layer)) continue
+    const meshes = await meshLayer(groupPath, (k, sz) => options.onProgress?.(`layer ${i + 1}/${groups.length}, slice ${k}/${sz}`))
+    options.onProgress?.(`layer ${i + 1}/${groups.length}, writing`)
     for (const [labelValue, { positions, indices }] of meshes) {
       const vertexCount = positions.length / 3
       const triangleCount = indices.length / 3
@@ -429,6 +470,9 @@ export async function generateSegmentationMeshes(segStorePath: string, outputDir
       ]))
       entries.push({ layer, labelValue, file, vertexCount, triangleCount })
     }
+    doneLayers.add(layer)
+    const progress: PartialProgress = { entries, boundsMin, boundsMax, doneLayers: [...doneLayers] }
+    await writeFile(partialPath, JSON.stringify(progress))
   }
 
   if (!Number.isFinite(boundsMin[0])) {
@@ -436,6 +480,7 @@ export async function generateSegmentationMeshes(segStorePath: string, outputDir
     boundsMax.fill(0)
   }
   const manifest: MeshManifest = { version: 1, segments: entries, boundsMin, boundsMax }
+  await rm(partialPath, { force: true })
   await writeFile(path.join(tmpDir, 'manifest.json'), JSON.stringify(manifest))
   await rm(outputDir, { recursive: true, force: true })
   await rename(tmpDir, outputDir)

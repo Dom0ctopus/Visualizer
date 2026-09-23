@@ -31,7 +31,7 @@ A simpler, low-resolution [NiiVue](https://github.com/niivue/niivue) viewer that
   - `orthogonalCopies.ts` writes coronal- and sagittal-chunked copies of the finest pyramid levels. The primary arrays are chunked one Z slice per chunk (ideal for axial reads, but a coronal/sagittal slice would span every chunk in the level); the copies make every plane a handful of chunk reads. They roughly triple a converted store's disk footprint and add ~60% to its write time.
   - `surfaceMesh.ts` generates the segment meshes (multi-label surface nets with Taubin smoothing, streamed two slices at a time).
   - `segmentationMergeConvert.ts` builds the voxel-render merge on demand.
-  - `jobQueue.ts` runs conversions, mesh generation and backfills one at a time to bound memory. On startup, the server backfills orthogonal copies and meshes for anything uploaded before those features existed, and restarts conversions a previous run left unfinished.
+  - `jobQueue.ts` runs conversions, mesh generation and backfills one at a time to bound memory, conversions first. A mesh job in progress pauses (between slices) when an upload arrives and resumes from its last finished layer afterwards. `GET /api/jobs` reports the running job, its progress and the queue; the sidebar shows this under Upload and in each library row, and the server logs `[jobs]` lines, including a `still running` heartbeat every 30s. On startup, the server backfills orthogonal copies and meshes for anything uploaded before those features existed, and restarts conversions and mesh jobs a previous run left unfinished.
 
 In dev, Vite proxies `/api` to the backend (see `vite.config.ts`), so both run together.
 

@@ -320,6 +320,10 @@ input[type='range'] {
   color: var(--text-dim);
 }
 
+.job-queue-line {
+  margin-top: 6px;
+}
+
 .search-bar {
   margin-bottom: 10px;
 }

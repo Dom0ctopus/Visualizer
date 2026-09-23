@@ -14,6 +14,26 @@ export async function fetchLibrary(): Promise<LibraryRecord[]> {
   return data.records
 }
 
+export type JobKind = 'convert' | 'backfill' | 'meshes'
+
+export interface JobInfo {
+  kind: JobKind
+  recordId: string
+  label: string
+}
+
+/** The server's serial background-job queue (server/src/jobQueue.ts). */
+export interface JobQueueState {
+  running: (JobInfo & { startedAt: number; progress?: string }) | null
+  /** In the order they will run. */
+  queued: JobInfo[]
+}
+
+export async function fetchJobs(): Promise<JobQueueState> {
+  const res = await fetch('/api/jobs')
+  return handleJson<JobQueueState>(res)
+}
+
 export async function uploadVolume(file: File): Promise<VolumeRecord> {
   const form = new FormData()
   form.append('file', file)

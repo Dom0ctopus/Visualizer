@@ -4,7 +4,7 @@ import multer from 'multer'
 import { rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
-import { enqueueJob } from './jobQueue.js'
+import { enqueueJob, getJobQueueState, JobPreemptedError } from './jobQueue.js'
 import { readNrrdHeader } from './nrrdHeader.js'
 import { convertSegmentationMergeToOmeZarr, MergeCancelledError, type MergedSegmentMapping, type MergeProgress } from './segmentationMergeConvert.js'
 import { convertSegmentationNrrdToOmeZarr } from './segmentationZarrConvert.js'
@@ -55,8 +55,12 @@ function meshDirFor(id: string): string {
 // all at once: each holds a whole pyramid level in memory. The upload
 // itself still responds immediately; the record stays 'pending' until its
 // job runs. A record deleted while its job is queued is skipped.
+function jobLabel(action: string, id: string): string {
+  return `${action} ${getRecord(id)?.name ?? id}`
+}
+
 function convertInBackground(id: string, nrrdPath: string): void {
-  void enqueueJob(`convert volume ${id}`, async () => {
+  enqueueJob('convert', id, jobLabel('convert volume', id), async () => {
     if (!getRecord(id)) return
     try {
       await convertNrrdToOmeZarr(nrrdPath, zarrPathFor(id))
@@ -71,7 +75,7 @@ function convertInBackground(id: string, nrrdPath: string): void {
 }
 
 function convertSegmentationInBackground(id: string, nrrdPath: string): void {
-  void enqueueJob(`convert segmentation ${id}`, async () => {
+  enqueueJob('convert', id, jobLabel('convert segmentation', id), async () => {
     if (!getRecord(id)) return
     try {
       await convertSegmentationNrrdToOmeZarr(nrrdPath, segZarrPathFor(id))
@@ -85,16 +89,26 @@ function convertSegmentationInBackground(id: string, nrrdPath: string): void {
   })
 }
 
-function generateMeshesInBackground(id: string): void {
+// Mesh jobs are the lowest priority and step aside (between slices) for
+// any conversion uploaded meanwhile; see jobQueue.ts. `resume` picks up a
+// run interrupted by a server restart.
+function generateMeshesInBackground(id: string, resume = false): void {
   void updateRecord(id, { meshStatus: 'pending', meshError: undefined })
-  void enqueueJob(`generate meshes ${id}`, async () => {
+  enqueueJob('meshes', id, jobLabel('generate meshes for', id), async (ctx) => {
     if (!getRecord(id)) return
     try {
-      const manifest = await generateSegmentationMeshes(segZarrPathFor(id), meshDirFor(id))
+      const manifest = await generateSegmentationMeshes(segZarrPathFor(id), meshDirFor(id), {
+        resume: resume || ctx.resumed,
+        onProgress: (progress) => {
+          ctx.setProgress(progress)
+          ctx.checkpoint()
+        }
+      })
       const triangles = manifest.segments.reduce((n, s) => n + s.triangleCount, 0)
       console.log(`Meshes for ${id}: ${manifest.segments.length} segments, ${triangles.toLocaleString()} triangles`)
       await updateRecord(id, { meshStatus: 'ready' })
     } catch (e) {
+      if (e instanceof JobPreemptedError) throw e
       console.error(`Mesh generation failed for ${id}:`, e)
       await updateRecord(id, { meshStatus: 'failed', meshError: e instanceof Error ? e.message : 'Mesh generation failed' })
     }
@@ -123,14 +137,14 @@ async function scheduleStartupBackfill(): Promise<void> {
       console.warn(`Skipping orthogonal backfill check for ${record.id}:`, e instanceof Error ? e.message : e)
       continue
     }
-    void enqueueJob(`backfill orthogonal copies ${record.id}`, async () => {
+    enqueueJob('backfill', record.id, jobLabel('backfill orthogonal copies for', record.id), async () => {
       if (!getRecord(record.id)) return
       await backfillOrthogonalCopies(storePath, record.kind)
     })
   }
   for (const record of ready) {
     if (record.kind === 'segmentation' && (record.meshStatus === undefined || record.meshStatus === 'pending')) {
-      generateMeshesInBackground(record.id)
+      generateMeshesInBackground(record.id, true)
     }
   }
 }
@@ -333,6 +347,10 @@ app.post('/api/segmentation-merges', express.json(), (req, res) => {
   currentMerge = { status: 'pending', startedAt: Date.now() }
   res.json(currentMerge)
   convertMergeInBackground(generation, volumeId, validLayers)
+})
+
+app.get('/api/jobs', (_req, res) => {
+  res.json(getJobQueueState())
 })
 
 app.post('/api/segmentations/:id/meshes', (req, res) => {

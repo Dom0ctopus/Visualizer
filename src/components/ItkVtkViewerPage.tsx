@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { deleteLibraryFile, fetchLibrary, uploadSegmentation, uploadVolume, zarrUrl, type MergeProgress } from '../lib/api'
+import { deleteLibraryFile, fetchJobs, fetchLibrary, uploadSegmentation, uploadVolume, zarrUrl, type JobKind, type JobQueueState, type MergeProgress } from '../lib/api'
 import { useItkVtkViewer } from '../hooks/useItkVtkViewer'
 import { useSegmentationMerge3D } from '../hooks/useSegmentationMerge3D'
 import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
@@ -33,28 +33,63 @@ const SAGITTAL_LABELS: OrientationLabels = { left: 'A', right: 'P', top: 'S', bo
 
 type RenderTab = 'voxel' | 'mesh'
 
-function statusLabel(record: VolumeRecord | SegmentationRecord): string {
+function formatElapsed(ms: number): string {
+  // Clamped: `now` ticks once a second, so it can trail a fresh start time.
+  const s = Math.max(0, Math.floor(ms / 1000))
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+}
+
+/** Where a record's job of this kind stands in the server's queue, e.g.
+ *  "running · 2m 05s · layer 2/5, slice 64/800" or "queued, 2 jobs ahead". */
+function jobPhrase(jobs: JobQueueState | null, recordId: string, kind: JobKind, now: number): string | null {
+  if (!jobs) return null
+  const { running, queued } = jobs
+  if (running && running.recordId === recordId && running.kind === kind) {
+    return `running · ${formatElapsed(now - running.startedAt)}${running.progress ? ` · ${running.progress}` : ''}`
+  }
+  const position = queued.findIndex((j) => j.recordId === recordId && j.kind === kind)
+  if (position < 0) return null
+  const ahead = position + (running ? 1 : 0)
+  return ahead === 0 ? 'queued, starting' : `queued, ${ahead} job${ahead === 1 ? '' : 's'} ahead`
+}
+
+function statusLabel(record: VolumeRecord | SegmentationRecord, jobs: JobQueueState | null, now: number): string {
   switch (record.zarrStatus) {
-    case 'ready':
-      return 'ready'
+    case 'ready': {
+      if (record.kind !== 'segmentation') return 'ready'
+      if (record.meshStatus === 'failed') return 'ready · meshes failed'
+      if (record.meshStatus !== 'pending') return 'ready'
+      const phrase = jobPhrase(jobs, record.id, 'meshes', now)
+      return `ready · meshes ${phrase ?? 'pending'}`
+    }
     case 'failed':
       return 'conversion failed'
-    case 'pending':
-      return 'converting…'
+    case 'pending': {
+      const phrase = jobPhrase(jobs, record.id, 'convert', now)
+      return phrase ? `converting: ${phrase}` : 'converting…'
+    }
     default:
       return 'not converted'
   }
+}
+
+/** What the server's background queue is doing right now, if anything. */
+function JobQueueLine({ jobs, now }: { jobs: JobQueueState | null; now: number }) {
+  if (!jobs?.running) return null
+  const { running, queued } = jobs
+  return (
+    <p className="tf-hint job-queue-line" title={queued.map((j) => j.label).join('\n')}>
+      Server working on: {running.label} · {formatElapsed(now - running.startedAt)}
+      {running.progress ? ` · ${running.progress}` : ''}
+      {queued.length > 0 ? ` · ${queued.length} more queued` : ''}
+    </p>
+  )
 }
 
 function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
-function formatElapsed(ms: number): string {
-  const s = Math.floor(ms / 1000)
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
 }
 
 /** "Building combined voxel render… resampling layer 2 of 5 (40%) · 3m 12s",
@@ -103,6 +138,15 @@ interface HoveredSegment {
  */
 export function ItkVtkViewerPage() {
   const [library, setLibrary] = useState<LibraryRecord[]>([])
+  const [jobs, setJobs] = useState<JobQueueState | null>(null)
+  // Ticks elapsed times in job status text while the server is busy.
+  const [now, setNow] = useState(() => Date.now())
+  const jobsRunning = jobs?.running != null
+  useEffect(() => {
+    if (!jobsRunning) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [jobsRunning])
   const [error, setError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(0)
   const [searchText, setSearchText] = useState('')
@@ -180,8 +224,10 @@ export function ItkVtkViewerPage() {
 
   const refreshLibrary = useCallback(async () => {
     try {
-      const records = await fetchLibrary()
+      const [records, jobState] = await Promise.all([fetchLibrary(), fetchJobs()])
       setLibrary(records)
+      setJobs(jobState)
+      setNow(Date.now())
       return records
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to reach the backend server.')
@@ -508,6 +554,7 @@ export function ItkVtkViewerPage() {
             </button>
           </div>
           {uploading > 0 && <p className="tf-hint upload-status">Uploading {uploading} file{uploading === 1 ? '' : 's'}…</p>}
+          <JobQueueLine jobs={jobs} now={now} />
           <p className="panel-hint upload-hint">
             NRRD volumes and 3D Slicer segmentation NRRDs. Each is converted on the server into a multiscale OME-Zarr
             pyramid (and, for segmentations, surface meshes) before it can be loaded.
@@ -526,7 +573,7 @@ export function ItkVtkViewerPage() {
                     {record.name}
                   </div>
                   <div className="library-meta" title={record.zarrError}>
-                    {formatSize(record.sizeBytes)} · {statusLabel(record)}
+                    {formatSize(record.sizeBytes)} · {statusLabel(record, jobs, now)}
                     {record.zarrStatus === 'failed' && record.zarrError ? `: ${record.zarrError}` : ''}
                   </div>
                 </div>
@@ -560,7 +607,7 @@ export function ItkVtkViewerPage() {
                       {record.name}
                     </div>
                     <div className="library-meta" title={record.zarrError}>
-                      {formatSize(record.sizeBytes)} · {statusLabel(record)}
+                      {formatSize(record.sizeBytes)} · {statusLabel(record, jobs, now)}
                       {record.zarrStatus === 'failed' && record.zarrError ? `: ${record.zarrError}` : ''}
                     </div>
                   </div>

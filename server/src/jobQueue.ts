@@ -5,24 +5,124 @@
  * volume and a few segmentations back to back -- risks exhausting the Node
  * heap. Jobs are responsible for their own error handling/status updates;
  * a failing job never blocks the ones queued after it.
+ *
+ * Jobs run in priority order (conversions first: an upload is unusable until
+ * converted, while backfill and meshes only add to something already
+ * usable), FIFO within a priority. A long low-priority job can also step
+ * aside mid-run: it calls ctx.checkpoint() periodically, which throws
+ * JobPreemptedError when a higher-priority job is waiting; the job is then
+ * re-queued (its run() is called again, with ctx.resumed set) behind it.
  */
-let tail: Promise<void> = Promise.resolve()
-let pending = 0
 
-export function enqueueJob(label: string, run: () => Promise<void>): Promise<void> {
-  pending++
-  const job = tail.then(async () => {
-    const t0 = Date.now()
-    console.log(`[jobs] start: ${label} (${pending - 1} queued behind it)`)
-    try {
-      await run()
-      console.log(`[jobs] done: ${label} in ${((Date.now() - t0) / 1000).toFixed(1)}s`)
-    } catch (e) {
-      console.error(`[jobs] failed: ${label}:`, e)
-    } finally {
-      pending--
+export type JobKind = 'convert' | 'backfill' | 'meshes'
+
+const PRIORITY: Record<JobKind, number> = { convert: 0, backfill: 1, meshes: 2 }
+const HEARTBEAT_MS = 30_000
+
+export class JobPreemptedError extends Error {
+  constructor() {
+    super('Job preempted by a higher-priority job')
+    this.name = 'JobPreemptedError'
+  }
+}
+
+export interface JobContext {
+  /** Short description of where the job is, for the UI and heartbeat logs. */
+  setProgress(progress: string): void
+  /** Throws JobPreemptedError if a higher-priority job is waiting. */
+  checkpoint(): void
+  /** True when this run continues a job that was preempted earlier. */
+  resumed: boolean
+}
+
+interface Job {
+  kind: JobKind
+  recordId: string
+  label: string
+  run: (ctx: JobContext) => Promise<void>
+  resumed: boolean
+  enqueuedAt: number
+}
+
+export interface JobInfo {
+  kind: JobKind
+  recordId: string
+  label: string
+}
+
+export interface RunningJobInfo extends JobInfo {
+  startedAt: number
+  progress?: string
+}
+
+export interface JobQueueState {
+  running: RunningJobInfo | null
+  queued: JobInfo[]
+}
+
+const queue: Job[] = []
+let running: (RunningJobInfo & { job: Job }) | null = null
+
+function elapsed(since: number): string {
+  const s = Math.round((Date.now() - since) / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
+}
+
+function takeNext(): Job | undefined {
+  let best = -1
+  for (let i = 0; i < queue.length; i++) {
+    if (best < 0 || PRIORITY[queue[i].kind] < PRIORITY[queue[best].kind]) best = i
+  }
+  return best < 0 ? undefined : queue.splice(best, 1)[0]
+}
+
+async function drain(): Promise<void> {
+  if (running) return
+  for (let job = takeNext(); job; job = takeNext()) {
+    const current: RunningJobInfo & { job: Job } = { kind: job.kind, recordId: job.recordId, label: job.label, startedAt: Date.now(), job }
+    running = current
+    const waited = Date.now() - job.enqueuedAt > 1000 ? `, waited ${elapsed(job.enqueuedAt)}` : ''
+    console.log(`[jobs] ${job.resumed ? 'resume' : 'start'}: ${job.label} (${queue.length} queued behind it${waited})`)
+    const heartbeat = setInterval(() => {
+      const behind = queue.length ? `; ${queue.length} queued: ${queue.map((j) => j.label).join(', ')}` : ''
+      console.log(`[jobs] still running: ${job.label} (${elapsed(current.startedAt)}${current.progress ? `, ${current.progress}` : ''})${behind}`)
+    }, HEARTBEAT_MS)
+    const ctx: JobContext = {
+      resumed: job.resumed,
+      setProgress: (p) => {
+        current.progress = p
+      },
+      checkpoint: () => {
+        if (queue.some((q) => PRIORITY[q.kind] < PRIORITY[job.kind])) throw new JobPreemptedError()
+      }
     }
-  })
-  tail = job
-  return job
+    try {
+      await job.run(ctx)
+      console.log(`[jobs] done: ${job.label} in ${elapsed(current.startedAt)}`)
+    } catch (e) {
+      if (e instanceof JobPreemptedError) {
+        console.log(`[jobs] paused: ${job.label} after ${elapsed(current.startedAt)}, to run higher-priority jobs first; it will resume after them`)
+        queue.push({ ...job, resumed: true })
+      } else {
+        console.error(`[jobs] failed: ${job.label}:`, e)
+      }
+    } finally {
+      clearInterval(heartbeat)
+      running = null
+    }
+  }
+}
+
+export function enqueueJob(kind: JobKind, recordId: string, label: string, run: (ctx: JobContext) => Promise<void>): void {
+  queue.push({ kind, recordId, label, run, resumed: false, enqueuedAt: Date.now() })
+  if (running) console.log(`[jobs] queued: ${label} (running: ${running.label})`)
+  void drain()
+}
+
+export function getJobQueueState(): JobQueueState {
+  const ordered = [...queue].sort((a, b) => PRIORITY[a.kind] - PRIORITY[b.kind])
+  return {
+    running: running && { kind: running.kind, recordId: running.recordId, label: running.label, startedAt: running.startedAt, progress: running.progress },
+    queued: ordered.map(({ kind, recordId, label }) => ({ kind, recordId, label }))
+  }
 }
