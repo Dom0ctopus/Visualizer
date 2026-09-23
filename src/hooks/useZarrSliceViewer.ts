@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useLatestAsync } from './useLatestAsync'
 import {
   DEFAULT_LEVEL_INDEX,
   fetchPyramidLevels,
@@ -35,12 +36,6 @@ function naturalRangeFor(dtype: string): [number, number] {
   }
 }
 
-// See the settle-timer comment inside each slice-fetch effect below for why
-// this exists. Short enough to feel immediate for a single scroll step,
-// long enough that a fast multi-step scroll only ever decodes the slice
-// actually landed on.
-const SLICE_SETTLE_DELAY_MS = 40
-
 // How many native-resolution (level 0) Z slices to load on each side of the
 // current position when "inspecting" -- see inspectNativeHere below.
 const DEFAULT_INSPECT_RADIUS = 50
@@ -59,65 +54,28 @@ export interface DetailWindow {
 
 type Axis = 'z' | 'y' | 'x'
 
-/**
- * One settle-delayed fetch for a single plane -- see SLICE_SETTLE_DELAY_MS's
- * comment on useZarrSliceViewer for why the delay exists. A standalone hook
- * (module scope, not nested inside useZarrSliceViewer) called once per axis
- * below, each with its own timer/request-id pair, so a coronal scrub
- * in-flight fetch is never cancelled by an unrelated axial one.
- */
-function useSliceEffect(
+/** Loads one plane's slice whenever its index/level changes -- latest-wins,
+ *  one read in flight per plane (see useLatestAsync), so each plane scrolls
+ *  independently and continuously. */
+function useSliceLoader(
   axis: Axis,
   index: number,
   zarrUrl: string | null,
   currentLevel: PyramidLevel | null,
   read: (zarrUrl: string, levelPath: string, index: number) => Promise<SliceResult>,
   setSlice: (s: SliceResult | null) => void,
-  setError: (e: string | null) => void,
-  setLoading?: (l: boolean) => void
+  setError: (e: string | null) => void
 ) {
-  const timerRef = useRef<number | null>(null)
-  const reqRef = useRef(0)
-  useEffect(() => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current)
-      timerRef.current = null
-    }
-    if (!zarrUrl || !currentLevel) return
-
-    // A fast scroll fires many index changes in quick succession. Without a
-    // settle delay, every intermediate one used to kick off its own
-    // fetch+decode immediately -- the requestId guard below only discards
-    // an already-finished *result*, it doesn't stop the decode work itself
-    // from running to completion for every discarded frame. Only the index
-    // actually settled on now triggers a fetch.
-    const requestId = ++reqRef.current
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null
-      setLoading?.(true)
-      read(zarrUrl, currentLevel.levelPath, index)
-        .then((result) => {
-          if (reqRef.current !== requestId) return
-          setSlice(result)
-          setError(null)
-        })
-        .catch((e) => {
-          if (reqRef.current !== requestId) return
-          setError(e instanceof Error ? e.message : `Failed to load ${axis} slice`)
-        })
-        .finally(() => {
-          if (reqRef.current === requestId) setLoading?.(false)
-        })
-    }, SLICE_SETTLE_DELAY_MS)
-
-    return () => {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current)
-        timerRef.current = null
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zarrUrl, currentLevel, index])
+  useLatestAsync(
+    zarrUrl && currentLevel ? () => read(zarrUrl, currentLevel.levelPath, index) : null,
+    [zarrUrl, currentLevel, index],
+    `${zarrUrl}|${currentLevel?.levelPath}`,
+    (slice) => {
+      setSlice(slice)
+      setError(null)
+    },
+    (e) => setError(e instanceof Error ? e.message : `Failed to load ${axis} slice`)
+  )
 }
 
 /**
@@ -163,7 +121,6 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
   const [windowMin, setWindowMin] = useState(0)
   const [windowMax, setWindowMax] = useState(255)
   const [dataRange, setDataRange] = useState<[number, number]>([0, 255])
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Mirrors of state read from inside callbacks (setZIndex/stepZIndex/
@@ -230,15 +187,9 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     }
   }, [zarrUrl])
 
-  // One settle-delayed fetch effect per plane -- see SLICE_SETTLE_DELAY_MS's
-  // comment. Each plane scrolls independently (a coronal scrub shouldn't
-  // cancel an in-flight axial fetch), so these can't share a single timer/
-  // requestId the way a single-plane viewer could. Only the axial (Z) plane
-  // drives the shared `loading` flag, matching its pre-existing meaning
-  // (the detail-window/inspect UI only ever cared about Z).
-  useSliceEffect('z', zIndex, zarrUrl, currentLevel, readZSlice, setAxialSlice, setError, setLoading)
-  useSliceEffect('y', yIndex, zarrUrl, currentLevel, readCoronalSlice, setCoronalSlice, setError)
-  useSliceEffect('x', xIndex, zarrUrl, currentLevel, readSagittalSlice, setSagittalSlice, setError)
+  useSliceLoader('z', zIndex, zarrUrl, currentLevel, readZSlice, setAxialSlice, setError)
+  useSliceLoader('y', yIndex, zarrUrl, currentLevel, readCoronalSlice, setCoronalSlice, setError)
+  useSliceLoader('x', xIndex, zarrUrl, currentLevel, readSagittalSlice, setSagittalSlice, setError)
 
   const clampIndex = useCallback((v: number, axis: Axis, levelIdx: number, window: DetailWindow | null) => {
     const ls = levelsRef.current
@@ -376,7 +327,6 @@ export function useZarrSliceViewer(zarrUrl: string | null) {
     setWindowMin,
     setWindowMax,
     dataRange,
-    loading,
     error
   }
 }

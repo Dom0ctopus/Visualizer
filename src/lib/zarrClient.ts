@@ -131,6 +131,27 @@ function evictChunkCacheIfNeeded(): void {
   }
 }
 
+// Caps in-flight chunk requests. A read against an array without an
+// axis-chunked copy (see orthogonalLevelUrl) can need one chunk per Z index --
+// thousands at once -- which exhausts the browser's connection resources and
+// fails requests ("Failed to fetch") across every pane, not just that read.
+const MAX_CONCURRENT_FETCHES = 16
+let activeFetches = 0
+const fetchWaiters: Array<() => void> = []
+
+async function limitedFetch(url: string): Promise<ArrayBuffer> {
+  if (activeFetches >= MAX_CONCURRENT_FETCHES) await new Promise<void>((resolve) => fetchWaiters.push(resolve))
+  activeFetches++
+  try {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`Failed to fetch chunk ${url} (${res.status})`)
+    return await res.arrayBuffer()
+  } finally {
+    activeFetches--
+    fetchWaiters.shift()?.()
+  }
+}
+
 function fetchChunk(levelUrl: string, bz: number, by: number, bx: number, meta: ZarrArrayMeta): Promise<TypedArray> {
   const key = `${levelUrl}/${bz}.${by}.${bx}`
   if (chunkCache.has(key)) {
@@ -139,34 +160,17 @@ function fetchChunk(levelUrl: string, bz: number, by: number, bx: number, meta: 
   }
   const ctor = dtypeCtor(meta.dtype)
   const p = (async () => {
-    const t0 = performance.now()
-    const res = await fetch(key)
-    if (!res.ok) throw new Error(`Failed to fetch chunk ${key} (${res.status})`)
-    const compressedBuf = await res.arrayBuffer()
-    const t1 = performance.now()
-    const compressed = new Uint8Array(compressedBuf)
-    let raw: Uint8Array
-    if (meta.compressor) {
-      const codec = Blosc.fromConfig(meta.compressor)
-      raw = (await codec.decode(compressed)) as Uint8Array
-    } else {
-      raw = compressed
-    }
-    const t2 = performance.now()
-    // Temporary diagnostic instrumentation -- see the scroll-performance
-    // investigation in the project history. Prints once per uncached chunk
-    // fetch (cache hits skip this entirely, so scrolling within an
-    // already-visited chunk won't spam the console) so a slow step can be
-    // attributed to network/server time vs. blosc decode time rather than
-    // guessed at.
-    console.log(
-      `[zarr-perf] chunk ${key.split('/').slice(-4).join('/')}: fetch ${(t1 - t0).toFixed(1)}ms (${(compressedBuf.byteLength / 1024).toFixed(0)}KB compressed), decode ${(t2 - t1).toFixed(1)}ms (${(raw.byteLength / 1024).toFixed(0)}KB raw)`
-    )
+    const compressed = new Uint8Array(await limitedFetch(key))
+    const raw = meta.compressor ? ((await Blosc.fromConfig(meta.compressor).decode(compressed)) as Uint8Array) : compressed
     chunkByteSizes.set(key, raw.byteLength)
     chunkCacheBytes += raw.byteLength
     evictChunkCacheIfNeeded()
     return new ctor(raw.buffer, raw.byteOffset, raw.byteLength / ctor.BYTES_PER_ELEMENT)
   })()
+  // A failed fetch must not stay cached, or that chunk fails forever.
+  p.catch(() => {
+    if (chunkCache.get(key) === p) chunkCache.delete(key)
+  })
   chunkCache.set(key, p)
   return p
 }
@@ -261,7 +265,6 @@ export interface SliceResult {
 /** Reads one Z-plane slice (at VolumeInfo's chosen level), fetching (and
  *  caching) only the chunks that actually cover it -- not the whole volume. */
 export async function readZSlice(zarrBaseUrl: string, levelPath: string, zIndex: number): Promise<SliceResult> {
-  const sliceT0 = performance.now()
   const levelUrl = `${zarrBaseUrl}/${levelPath}`
   const meta = await fetchZarray(levelUrl)
   const [shapeZ, shapeY, shapeX] = meta.shape
@@ -294,9 +297,6 @@ export async function readZSlice(zarrBaseUrl: string, levelPath: string, zIndex:
     }
   }
   await Promise.all(fetches)
-  console.log(
-    `[zarr-perf] readZSlice z=${zIndex} total ${(performance.now() - sliceT0).toFixed(1)}ms (${nChunksY * nChunksX} chunk(s), ${shapeX}x${shapeY})`
-  )
   return { width: shapeX, height: shapeY, data: out }
 }
 
@@ -307,7 +307,6 @@ export async function readZSlice(zarrBaseUrl: string, levelPath: string, zIndex:
  * one chunk per Z index) against an axial-chunked array.
  */
 export async function readCoronalSlice(zarrBaseUrl: string, levelPath: string, yIndex: number): Promise<SliceResult> {
-  const sliceT0 = performance.now()
   const levelUrl = await orthogonalLevelUrl(zarrBaseUrl, levelPath, 'coronal')
   const meta = await fetchZarray(levelUrl)
   const [shapeZ, shapeY, shapeX] = meta.shape
@@ -340,9 +339,6 @@ export async function readCoronalSlice(zarrBaseUrl: string, levelPath: string, y
     }
   }
   await Promise.all(fetches)
-  console.log(
-    `[zarr-perf] readCoronalSlice y=${yIndex} total ${(performance.now() - sliceT0).toFixed(1)}ms (${nChunksZ * nChunksX} chunk(s), ${shapeX}x${shapeZ})`
-  )
   return { width: shapeX, height: shapeZ, data: out }
 }
 
@@ -352,7 +348,6 @@ export async function readCoronalSlice(zarrBaseUrl: string, levelPath: string, y
  * orthogonalLevelUrl). Handles any chunk layout, like readCoronalSlice.
  */
 export async function readSagittalSlice(zarrBaseUrl: string, levelPath: string, xIndex: number): Promise<SliceResult> {
-  const sliceT0 = performance.now()
   const levelUrl = await orthogonalLevelUrl(zarrBaseUrl, levelPath, 'sagittal')
   const meta = await fetchZarray(levelUrl)
   const [shapeZ, shapeY, shapeX] = meta.shape
@@ -387,8 +382,5 @@ export async function readSagittalSlice(zarrBaseUrl: string, levelPath: string, 
     }
   }
   await Promise.all(fetches)
-  console.log(
-    `[zarr-perf] readSagittalSlice x=${xIndex} total ${(performance.now() - sliceT0).toFixed(1)}ms (${nChunksZ * nChunksY} chunk(s), ${shapeY}x${shapeZ})`
-  )
   return { width: shapeY, height: shapeZ, data: out }
 }

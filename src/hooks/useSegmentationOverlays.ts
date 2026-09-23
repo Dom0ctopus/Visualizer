@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useLatestAsync } from './useLatestAsync'
 import { segZarrUrl } from '../lib/api'
 import { buildLabelLut } from '../lib/segmentationOverlay'
 import {
@@ -51,10 +52,103 @@ export interface OrthogonalOverlays {
   sagittal: SliceOverlay[]
 }
 
+type Plane = 'axial' | 'coronal' | 'sagittal'
+
+async function loadPlaneOverlays(
+  plane: Plane,
+  index: number,
+  segmentations: ZarrLoadedSegmentation[],
+  base: VolumeInfo,
+  levelIndex: number,
+  infoCache: Map<string, Promise<VolumeInfo>>
+): Promise<{ overlays: SliceOverlay[]; error: string | null }> {
+  const jobs = segmentations.flatMap((seg) =>
+    [...groupByLayer(seg.segments)]
+      .filter(([, segsInLayer]) => segsInLayer.some((s) => s.visible && s.opacity > 0))
+      .map(async ([layer, segsInLayer]): Promise<SliceOverlay | string | null> => {
+        const layerUrl = `${segZarrUrl(seg.recordId)}/layer${layer}`
+        const cacheKey = `${layerUrl}:${levelIndex}`
+        let infoPromise = infoCache.get(cacheKey)
+        if (!infoPromise) {
+          infoPromise = fetchVolumeInfo(layerUrl, levelIndex)
+          infoCache.set(cacheKey, infoPromise)
+        }
+        try {
+          const info = await infoPromise
+          // Physical bounding boxes (mm) must overlap on every axis -- two
+          // grids that never occupy the same space aren't the same scan.
+          const noOverlap = [0, 1, 2].some((axis) => {
+            const baseMax = base.origin[axis] + (base.size[axis] - 1) * base.spacing[axis]
+            const segMax = info.origin[axis] + (info.size[axis] - 1) * info.spacing[axis]
+            return segMax < base.origin[axis] || info.origin[axis] > baseMax
+          })
+          if (noOverlap) {
+            return `Segmentation "${seg.name}" (layer ${layer}) doesn't physically overlap the loaded volume at all -- they don't appear to be the same scan.`
+          }
+          // Per-axis affine map from a base voxel index to this layer's own
+          // nearest voxel -- see this file's header comment. [z, y, x] order.
+          const scale = [0, 1, 2].map((axis) => base.spacing[axis] / info.spacing[axis])
+          const offset = [0, 1, 2].map((axis) => (base.origin[axis] - info.origin[axis]) / info.spacing[axis])
+          // The plane's fixed axis, and the axes of its rows and columns.
+          const [fixed, rowAxis, colAxis] = plane === 'axial' ? [0, 1, 2] : plane === 'coronal' ? [1, 0, 2] : [2, 0, 1]
+          const segIndex = Math.round(index * scale[fixed] + offset[fixed])
+          if (segIndex < 0 || segIndex >= info.size[fixed]) return null
+          const read = plane === 'axial' ? readZSlice : plane === 'coronal' ? readCoronalSlice : readSagittalSlice
+          const slice = await read(layerUrl, info.levelPath, segIndex)
+          const { lut, names } = buildLabelLut(segsInLayer)
+          return {
+            width: slice.width,
+            height: slice.height,
+            data: slice.data,
+            lut,
+            names,
+            scaleX: scale[colAxis],
+            scaleY: scale[rowAxis],
+            offsetX: offset[colAxis],
+            offsetY: offset[rowAxis]
+          }
+        } catch (e) {
+          infoCache.delete(cacheKey)
+          return e instanceof Error ? e.message : `Failed to load segmentation overlay for "${seg.name}"`
+        }
+      })
+  )
+  const results = await Promise.all(jobs)
+  const overlays = results.filter((r): r is SliceOverlay => r !== null && typeof r !== 'string')
+  const error = results.find((r): r is string => typeof r === 'string') ?? null
+  return { overlays, error }
+}
+
+/** One plane's overlays, reloaded (latest-wins) only when that plane's own
+ *  position, the loaded segmentations, or the base level change. */
+function usePlaneOverlays(
+  plane: Plane,
+  index: number,
+  segmentations: ZarrLoadedSegmentation[],
+  base: VolumeInfo | null,
+  levelIndex: number,
+  infoCache: Map<string, Promise<VolumeInfo>>
+): { overlays: SliceOverlay[]; error: string | null } {
+  const [state, setState] = useState<{ overlays: SliceOverlay[]; error: string | null }>({ overlays: [], error: null })
+  const active = segmentations.length > 0 && base !== null
+  useLatestAsync(
+    active ? () => loadPlaneOverlays(plane, index, segmentations, base, levelIndex, infoCache) : null,
+    [segmentations, index, base, levelIndex],
+    base ? `${levelIndex}|${base.size.join(',')}|${base.origin.join(',')}|${base.spacing.join(',')}` : '',
+    setState,
+    (e) => setState((prev) => ({ ...prev, error: e instanceof Error ? e.message : 'Failed to load segmentation overlays' }))
+  )
+  useEffect(() => {
+    if (!active) setState({ overlays: [], error: null })
+  }, [active])
+  return state
+}
+
 /**
- * For the current (z, y, x) cursor position, reads (and caches) the matching
- * slice out of every visible segmentation layer's own label-map zarr store
- * along each of the three orthogonal planes, pairing each with a color/name
+ * For the current (z, y, x) cursor position, reads the matching slice out of
+ * every visible segmentation layer's own label-map zarr store along each of
+ * the three orthogonal planes -- each plane loaded independently and
+ * latest-wins (usePlaneOverlays), all layers in parallel -- pairing each with a color/name
  * lookup table built from that layer's segment state -- see
  * ZarrSliceCanvas.tsx for how these get composited onto (and, for names,
  * queried from) the base slice, and useZarrSliceViewer.ts for where axial/
@@ -95,162 +189,19 @@ export interface OrthogonalOverlays {
  * baseVolumeInfo actually describes, or every frame would look like a
  * mismatch.
  */
-// A fast scroll fires many position changes in quick succession; without a
-// settle delay, every one of them used to kick off a full-resolution decode
-// chain immediately -- and unlike the requestId guard below (which only
-// discards an already-finished result), the decode work itself still ran to
-// completion for every discarded frame. On a native-resolution scan that's
-// a lot of wasted large blosc decodes piling up, which is exactly what made
-// scrolling feel like it "locked up" once a segmentation was loaded. Only
-// the position the user actually settles on now triggers a fetch.
-const SETTLE_DELAY_MS = 80
-
 export function useSegmentationOverlays(
   segmentations: ZarrLoadedSegmentation[],
   positions: OrthogonalPositions,
   baseVolumeInfo: VolumeInfo | null,
   levelIndex: number
 ) {
-  const [overlays, setOverlays] = useState<OrthogonalOverlays>({ axial: [], coronal: [], sagittal: [] })
-  const [error, setError] = useState<string | null>(null)
-  const volumeInfoCacheRef = useRef(new Map<string, Promise<VolumeInfo>>())
-  const requestIdRef = useRef(0)
-  const settleTimerRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (settleTimerRef.current !== null) {
-      window.clearTimeout(settleTimerRef.current)
-      settleTimerRef.current = null
-    }
-
-    if (segmentations.length === 0 || !baseVolumeInfo) {
-      setOverlays({ axial: [], coronal: [], sagittal: [] })
-      setError(null)
-      return
-    }
-
-    const requestId = ++requestIdRef.current
-    let cancelled = false
-
-    async function run() {
-      const axial: SliceOverlay[] = []
-      const coronal: SliceOverlay[] = []
-      const sagittal: SliceOverlay[] = []
-      let lastError: string | null = null
-
-      for (const seg of segmentations) {
-        const byLayer = groupByLayer(seg.segments)
-        for (const [layer, segsInLayer] of byLayer) {
-          const anyVisible = segsInLayer.some((s) => s.visible && s.opacity > 0)
-          if (!anyVisible) continue
-
-          const layerUrl = `${segZarrUrl(seg.recordId)}/layer${layer}`
-          const cacheKey = `${layerUrl}:${levelIndex}`
-          let infoPromise = volumeInfoCacheRef.current.get(cacheKey)
-          if (!infoPromise) {
-            infoPromise = fetchVolumeInfo(layerUrl, levelIndex)
-            volumeInfoCacheRef.current.set(cacheKey, infoPromise)
-          }
-
-          try {
-            const info = await infoPromise
-            const base = baseVolumeInfo!
-
-            // Physical bounding boxes (in mm) must actually overlap on every
-            // axis -- two grids that never occupy the same physical space
-            // aren't the same scan, no matter how each is internally
-            // sampled. This is independent of the current level/position.
-            const noOverlap = [0, 1, 2].some((axis) => {
-              const baseMin = base.origin[axis]
-              const baseMax = base.origin[axis] + (base.size[axis] - 1) * base.spacing[axis]
-              const segMin = info.origin[axis]
-              const segMax = info.origin[axis] + (info.size[axis] - 1) * info.spacing[axis]
-              return segMax < baseMin || segMin > baseMax
-            })
-            if (noOverlap) {
-              lastError = `Segmentation "${seg.name}" (layer ${layer}) doesn't physically overlap the loaded volume at all -- they don't appear to be the same scan.`
-              continue
-            }
-
-            // Per-axis affine mapping from a base voxel index to this
-            // layer's own nearest voxel index -- see this file's own header
-            // comment. [z, y, x] order, matching VolumeInfo.size/origin/spacing.
-            const scale = [0, 1, 2].map((axis) => base.spacing[axis] / info.spacing[axis])
-            const offset = [0, 1, 2].map((axis) => (base.origin[axis] - info.origin[axis]) / info.spacing[axis])
-            const { lut, names } = buildLabelLut(segsInLayer)
-
-            const segZ = Math.round(positions.z * scale[0] + offset[0])
-            if (segZ >= 0 && segZ < info.size[0]) {
-              const slice = await readZSlice(layerUrl, info.levelPath, segZ)
-              axial.push({
-                width: slice.width,
-                height: slice.height,
-                data: slice.data,
-                lut,
-                names,
-                scaleY: scale[1],
-                scaleX: scale[2],
-                offsetY: offset[1],
-                offsetX: offset[2]
-              })
-            }
-
-            const segY = Math.round(positions.y * scale[1] + offset[1])
-            if (segY >= 0 && segY < info.size[1]) {
-              const slice = await readCoronalSlice(layerUrl, info.levelPath, segY)
-              coronal.push({
-                width: slice.width,
-                height: slice.height,
-                data: slice.data,
-                lut,
-                names,
-                scaleY: scale[0],
-                scaleX: scale[2],
-                offsetY: offset[0],
-                offsetX: offset[2]
-              })
-            }
-
-            const segX = Math.round(positions.x * scale[2] + offset[2])
-            if (segX >= 0 && segX < info.size[2]) {
-              const slice = await readSagittalSlice(layerUrl, info.levelPath, segX)
-              sagittal.push({
-                width: slice.width,
-                height: slice.height,
-                data: slice.data,
-                lut,
-                names,
-                scaleY: scale[0],
-                scaleX: scale[1],
-                offsetY: offset[0],
-                offsetX: offset[1]
-              })
-            }
-          } catch (e) {
-            volumeInfoCacheRef.current.delete(cacheKey)
-            lastError = e instanceof Error ? e.message : `Failed to load segmentation overlay for "${seg.name}"`
-          }
-        }
-      }
-
-      if (cancelled || requestIdRef.current !== requestId) return
-      setOverlays({ axial, coronal, sagittal })
-      setError(lastError)
-    }
-
-    settleTimerRef.current = window.setTimeout(() => {
-      settleTimerRef.current = null
-      void run()
-    }, SETTLE_DELAY_MS)
-
-    return () => {
-      cancelled = true
-      if (settleTimerRef.current !== null) {
-        window.clearTimeout(settleTimerRef.current)
-        settleTimerRef.current = null
-      }
-    }
-  }, [segmentations, positions.z, positions.y, positions.x, baseVolumeInfo, levelIndex])
-
-  return { overlays, error }
+  const infoCache = useRef(new Map<string, Promise<VolumeInfo>>()).current
+  const axial = usePlaneOverlays('axial', positions.z, segmentations, baseVolumeInfo, levelIndex, infoCache)
+  const coronal = usePlaneOverlays('coronal', positions.y, segmentations, baseVolumeInfo, levelIndex, infoCache)
+  const sagittal = usePlaneOverlays('sagittal', positions.x, segmentations, baseVolumeInfo, levelIndex, infoCache)
+  const overlays = useMemo<OrthogonalOverlays>(
+    () => ({ axial: axial.overlays, coronal: coronal.overlays, sagittal: sagittal.overlays }),
+    [axial.overlays, coronal.overlays, sagittal.overlays]
+  )
+  return { overlays, error: axial.error ?? coronal.error ?? sagittal.error }
 }
