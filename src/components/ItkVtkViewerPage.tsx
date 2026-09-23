@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { deleteLibraryFile, fetchLibrary, uploadSegmentation, uploadVolume, zarrUrl } from '../lib/api'
+import { deleteLibraryFile, fetchLibrary, uploadSegmentation, uploadVolume, zarrUrl, type MergeProgress } from '../lib/api'
 import { useItkVtkViewer } from '../hooks/useItkVtkViewer'
 import { useSegmentationMerge3D } from '../hooks/useSegmentationMerge3D'
 import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
@@ -50,6 +50,30 @@ function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+}
+
+/** "Building combined voxel render… resampling layer 2 of 5 (40%) · 3m 12s",
+ *  ticking every second so it's visible the server is still working. */
+function MergeStatusLine({ progress, since }: { progress: MergeProgress | null; since: number | null }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  let detail = 'starting'
+  if (progress?.phase === 'writing') detail = 'writing output'
+  else if (progress) detail = `${progress.phase} layer ${progress.layer} of ${progress.layerCount} (${Math.round(progress.fraction * 100)}%)`
+  return (
+    <p className="tf-hint">
+      Building combined voxel render… {detail}
+      {since !== null && ` · ${formatElapsed(now - since)}`}
+    </p>
+  )
 }
 
 interface HoveredSegment {
@@ -146,7 +170,7 @@ export function ItkVtkViewerPage() {
     volumeInfo,
     levelIndex
   )
-  const { status: mergeStatus, error: mergeError } = useSegmentationMerge3D(
+  const { status: mergeStatus, error: mergeError, progress: mergeProgress, pendingSince: mergePendingSince } = useSegmentationMerge3D(
     activeVolumeId,
     zarrSeg.segmentations,
     loadLabelImageUrl,
@@ -523,7 +547,7 @@ export function ItkVtkViewerPage() {
 
         <section className="panel">
           <h2 className="panel-title">Segmentations</h2>
-          {mergeStatus === 'pending' && <p className="tf-hint">Building combined voxel render…</p>}
+          {mergeStatus === 'pending' && <MergeStatusLine progress={mergeProgress} since={mergePendingSince} />}
           {segmentationRecords.length === 0 && <p className="empty-hint">No segmentations yet. Upload one above.</p>}
           <ul className="library-list">
             {segmentationRecords.map((record) => {

@@ -1,38 +1,54 @@
-import { buildPyramid, downsample2xNearest, writeMultiscaleGroup, type Level, type TypedArray } from './zarrWriter.js'
-import { readWholeZarrLevel, readZarrLevels, type ZarrLevelInfo } from './zarrReader.js'
+import { mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { downsample2xLabelMode, writeZarrArrayV2, type Level, type TypedArray } from './zarrWriter.js'
+import { readZarrLevels, readZRange, type ZarrLevelInfo } from './zarrReader.js'
 
 /**
- * Scans a whole layer's native data for the tight bounding box of its
- * actual nonzero content, in that layer's own LOCAL [x, y, z] voxel
- * indices -- as opposed to its declared array shape, which segmentation
- * files in this app are commonly exported at full scan dimensions
- * regardless of how much of that volume the segmented structure actually
- * occupies (see convertSegmentationMergeToOmeZarr's own comment on why
- * this matters for widespread-but-sparse structures like vasculature).
- * Returns null if the layer has no nonzero voxels at all.
+ * Expands `min`/`max` (local [x, y, z] voxel indices) to cover the nonzero
+ * voxels of one band of slices starting at z0.
  */
-function scanContentBbox(data: TypedArray, size: [number, number, number]): { min: [number, number, number]; max: [number, number, number] } | null {
-  const [sx, sy] = size
-  let minX = Infinity
-  let maxX = -Infinity
-  let minY = Infinity
-  let maxY = -Infinity
-  let minZ = Infinity
-  let maxZ = -Infinity
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] === 0) continue
-    const z = Math.floor(i / (sy * sx))
-    const y = Math.floor((i - z * sy * sx) / sx)
-    const x = i - z * sy * sx - y * sx
-    if (x < minX) minX = x
-    if (x > maxX) maxX = x
-    if (y < minY) minY = y
-    if (y > maxY) maxY = y
-    if (z < minZ) minZ = z
-    if (z > maxZ) maxZ = z
+function scanBandBbox(band: TypedArray, sx: number, sy: number, nz: number, z0: number, min: number[], max: number[]): void {
+  for (let z = 0; z < nz; z++) {
+    const zBase = z * sy * sx
+    for (let y = 0; y < sy; y++) {
+      const rowBase = zBase + y * sx
+      for (let x = 0; x < sx; x++) {
+        if (band[rowBase + x] === 0) continue
+        if (x < min[0]) min[0] = x
+        if (x > max[0]) max[0] = x
+        if (y < min[1]) min[1] = y
+        if (y > max[1]) max[1] = y
+        if (z0 + z < min[2]) min[2] = z0 + z
+        if (z0 + z > max[2]) max[2] = z0 + z
+      }
+    }
   }
-  if (maxX < 0 || !Number.isFinite(minX)) return null
-  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] }
+}
+
+// Slices read (and processed) at a time. Keeps memory bounded by a band
+// rather than a whole native-resolution layer, and gives the event loop a
+// turn between bands so the server keeps serving requests during a merge.
+const MERGE_BAND_SLICES = 16
+
+export interface MergeProgress {
+  phase: 'scanning' | 'resampling' | 'writing'
+  /** 1-based layer being processed, of layerCount. */
+  layer: number
+  layerCount: number
+  /** 0..1 through the current layer (or the write). */
+  fraction: number
+}
+
+export class MergeCancelledError extends Error {
+  constructor() {
+    super('Merge superseded by a newer request')
+  }
+}
+
+export interface MergeOptions {
+  onProgress?: (progress: MergeProgress) => void
+  /** Polled between bands; returning true stops the merge with MergeCancelledError. */
+  isCancelled?: () => boolean
 }
 
 /**
@@ -130,7 +146,7 @@ export interface MergedSegmentMapping {
  *
  * Resolution: the OUTPUT reference grid is sized to the PHYSICAL EXTENT of
  * the included segmentations' ACTUAL nonzero content (their union bounding
- * box, scanned from real data -- see scanContentBbox), not their declared
+ * box, scanned from real data -- see scanBandBbox), not their declared
  * array extent and not the whole base volume. Segmentation files here are
  * commonly exported at the full scan's own dimensions regardless of how
  * much of that space is actually labeled, and a widespread-but-sparse
@@ -164,8 +180,13 @@ export interface MergedSegmentMapping {
 export async function convertSegmentationMergeToOmeZarr(
   volumeZarrGroupPath: string,
   layers: MergeLayerInput[],
-  outputZarrPath: string
+  outputZarrPath: string,
+  options: MergeOptions = {}
 ): Promise<{ mapping: MergedSegmentMapping[] }> {
+  const report = options.onProgress ?? (() => {})
+  const checkCancelled = () => {
+    if (options.isCancelled?.()) throw new MergeCancelledError()
+  }
   const baseLevels = await readZarrLevels(volumeZarrGroupPath)
   const nativeSpacing = baseLevels.find((l) => l.index === 0)!.spacing
 
@@ -207,23 +228,28 @@ export async function convertSegmentationMergeToOmeZarr(
   // touch most of the body even though the labeled voxels themselves are a
   // tiny fraction of it -- would size the reference grid the same as the
   // old whole-volume approach and undo the resolution benefit entirely.
-  // Each layer's data is read once here to scan it, then discarded (not
-  // held) -- the resample loop below reads it again -- trading extra I/O
-  // for bounded memory use regardless of how many layers are included, a
-  // deliberate choice given how directly this app has already been bitten
-  // by unbounded memory growth this session.
+  // Each layer is streamed a band of slices at a time here to scan it, then
+  // streamed again by the resample loop below -- trading extra I/O for
+  // memory bounded by a band, however large the layers are.
   const bboxMin: [number, number, number] = [Infinity, Infinity, Infinity]
   const bboxMax: [number, number, number] = [-Infinity, -Infinity, -Infinity]
   for (let i = 0; i < includedLayers.length; i++) {
     const level = layerLevel0s[i]
-    const data = await readWholeZarrLevel(includedLayers[i].segZarrGroupPath, level)
-    const content = scanContentBbox(data.data, data.size)
-    if (!content) continue // no nonzero voxels in this layer at all
-    const [minX, minY, minZ] = content.min
-    const [maxX, maxY, maxZ] = content.max
-    // content.min/max are [x, y, z] local voxel indices; level.origin/
-    // spacing are [z, y, x] -- convert each local axis to its matching
-    // physical [z, y, x] axis.
+    const arrayDir = path.join(includedLayers[i].segZarrGroupPath, level.levelPath)
+    const [sz, sy, sx] = level.size
+    const min = [Infinity, Infinity, Infinity]
+    const max = [-Infinity, -Infinity, -Infinity]
+    for (let z0 = 0; z0 < sz; z0 += MERGE_BAND_SLICES) {
+      checkCancelled()
+      report({ phase: 'scanning', layer: i + 1, layerCount: includedLayers.length, fraction: z0 / sz })
+      const nz = Math.min(MERGE_BAND_SLICES, sz - z0)
+      scanBandBbox(await readZRange(arrayDir, z0, nz), sx, sy, nz, z0, min, max)
+    }
+    if (!Number.isFinite(max[0])) continue // no nonzero voxels in this layer at all
+    const [minX, minY, minZ] = min
+    const [maxX, maxY, maxZ] = max
+    // min/max are [x, y, z] local voxel indices; level.origin/spacing are
+    // [z, y, x] -- convert each local axis to its matching physical axis.
     const localMin = [minZ, minY, minX]
     const localMax = [maxZ, maxY, maxX]
     for (const axis of [0, 1, 2] as const) {
@@ -263,8 +289,8 @@ export async function convertSegmentationMergeToOmeZarr(
   for (let i = 0; i < includedLayers.length; i++) {
     const { segZarrGroupPath, labelValues, originalIndex: layerIndex } = includedLayers[i]
     const segLevel = layerLevel0s[i]
-    const segData = await readWholeZarrLevel(segZarrGroupPath, segLevel)
-    const [segSizeX, segSizeY, segSizeZ] = segData.size
+    const arrayDir = path.join(segZarrGroupPath, segLevel.levelPath)
+    const [segSizeZ, segSizeY, segSizeX] = segLevel.size
 
     const labelToGlobal = new Map<number, number>()
     for (const originalLabelValue of labelValues) {
@@ -296,66 +322,124 @@ export async function convertSegmentationMergeToOmeZarr(
     const offsetY = (segLevel.origin[1] - refLevel.origin[1]) / refLevel.spacing[1]
     const offsetX = (segLevel.origin[2] - refLevel.origin[2]) / refLevel.spacing[2]
 
-    for (let sz = 0; sz < segSizeZ; sz++) {
-      const rz = Math.round(sz * scaleZ + offsetZ)
-      if (rz < 0 || rz >= refZ) continue
-      const srcZBase = sz * segSizeY * segSizeX
-      const dstZBase = rz * refY * refX
-      for (let sy = 0; sy < segSizeY; sy++) {
-        const ry = Math.round(sy * scaleY + offsetY)
-        if (ry < 0 || ry >= refY) continue
-        const srcRowBase = srcZBase + sy * segSizeX
-        const dstRowBase = dstZBase + ry * refX
-        for (let sx = 0; sx < segSizeX; sx++) {
-          const srcVal = segData.data[srcRowBase + sx]
-          if (srcVal === 0) continue
-          const rx = Math.round(sx * scaleX + offsetX)
-          if (rx < 0 || rx >= refX) continue
-          const globalLabelValue = labelToGlobal.get(srcVal)
-          if (globalLabelValue === undefined) continue
-          // Later layers in the input list win on overlap -- an arbitrary
-          // but deterministic tie-break, since itk-vtk-viewer's label image
-          // has no independent concept of "on top" the way the 2D pane's
-          // ordered overlay list does.
-          combined[dstRowBase + rx] = globalLabelValue
+    for (let z0 = 0; z0 < segSizeZ; z0 += MERGE_BAND_SLICES) {
+      checkCancelled()
+      report({ phase: 'resampling', layer: i + 1, layerCount: includedLayers.length, fraction: z0 / segSizeZ })
+      const nz = Math.min(MERGE_BAND_SLICES, segSizeZ - z0)
+      // One extra slice past the band, for the z+1 neighbor check below.
+      const bandData = await readZRange(arrayDir, z0, Math.min(nz + 1, segSizeZ - z0))
+      for (let sz = z0; sz < z0 + nz; sz++) {
+        const rz = Math.round(sz * scaleZ + offsetZ)
+        if (rz < 0 || rz >= refZ) continue
+        const srcZBase = (sz - z0) * segSizeY * segSizeX
+        const dstZBase = rz * refY * refX
+        for (let sy = 0; sy < segSizeY; sy++) {
+          const ry = Math.round(sy * scaleY + offsetY)
+          if (ry < 0 || ry >= refY) continue
+          const srcRowBase = srcZBase + sy * segSizeX
+          const dstRowBase = dstZBase + ry * refX
+          for (let sx = 0; sx < segSizeX; sx++) {
+            const srcVal = bandData[srcRowBase + sx]
+            if (srcVal === 0) continue
+            const rx = Math.round(sx * scaleX + offsetX)
+            if (rx < 0 || rx >= refX) continue
+            const globalLabelValue = labelToGlobal.get(srcVal)
+            if (globalLabelValue === undefined) continue
+            // Later layers in the input list win on overlap -- an arbitrary
+            // but deterministic tie-break, since itk-vtk-viewer's label image
+            // has no independent concept of "on top" the way the 2D panes'
+            // ordered overlay list does.
+            combined[dstRowBase + rx] = globalLabelValue
 
-          // Connect to the 3 "forward" native neighbors (covers every
-          // face-adjacent pair exactly once across the whole loop) that
-          // share this same label -- if their own downsampled positions
-          // land more than one reference cell away, fillLine bridges
-          // exactly that gap along the true path between them. See
-          // fillLine's own comment for why this is more accurate than
-          // isotropic dilation for a curved/sinuous structure.
-          if (sx + 1 < segSizeX && segData.data[srcRowBase + sx + 1] === srcVal) {
-            const nrx = Math.round((sx + 1) * scaleX + offsetX)
-            fillLine(combined, refX, refY, refZ, rz, ry, rx, rz, ry, nrx, globalLabelValue)
-          }
-          if (sy + 1 < segSizeY && segData.data[srcRowBase + segSizeX + sx] === srcVal) {
-            const nry = Math.round((sy + 1) * scaleY + offsetY)
-            fillLine(combined, refX, refY, refZ, rz, ry, rx, rz, nry, rx, globalLabelValue)
-          }
-          if (sz + 1 < segSizeZ && segData.data[srcRowBase + segSizeY * segSizeX + sx] === srcVal) {
-            const nrz = Math.round((sz + 1) * scaleZ + offsetZ)
-            fillLine(combined, refX, refY, refZ, rz, ry, rx, nrz, ry, rx, globalLabelValue)
+            // Connect to the 3 "forward" native neighbors (covers every
+            // face-adjacent pair exactly once across the whole loop) that
+            // share this same label -- if their own downsampled positions
+            // land more than one reference cell away, fillLine bridges
+            // exactly that gap along the true path between them. See
+            // fillLine's own comment for why this is more accurate than
+            // isotropic dilation for a curved/sinuous structure.
+            if (sx + 1 < segSizeX && bandData[srcRowBase + sx + 1] === srcVal) {
+              const nrx = Math.round((sx + 1) * scaleX + offsetX)
+              fillLine(combined, refX, refY, refZ, rz, ry, rx, rz, ry, nrx, globalLabelValue)
+            }
+            if (sy + 1 < segSizeY && bandData[srcRowBase + segSizeX + sx] === srcVal) {
+              const nry = Math.round((sy + 1) * scaleY + offsetY)
+              fillLine(combined, refX, refY, refZ, rz, ry, rx, rz, nry, rx, globalLabelValue)
+            }
+            if (sz + 1 < segSizeZ && bandData[srcRowBase + segSizeY * segSizeX + sx] === srcVal) {
+              const nrz = Math.round((sz + 1) * scaleZ + offsetZ)
+              fillLine(combined, refX, refY, refZ, rz, ry, rx, nrz, ry, rx, globalLabelValue)
+            }
           }
         }
       }
     }
   }
 
-  const combinedLevel: Level = { data: combined, size: [refX, refY, refZ] }
-  const pyramidLevels = buildPyramid(combinedLevel, Uint16Array, downsample2xNearest)
-  await writeMultiscaleGroup(
-    outputZarrPath,
-    pyramidLevels,
-    '<u2',
-    Uint16Array,
-    [refLevel.spacing[2], refLevel.spacing[1], refLevel.spacing[0]],
-    [refLevel.origin[2], refLevel.origin[1], refLevel.origin[0]],
-    'nearest',
-    // Only itk-vtk-viewer's 3D pane reads the merge, never the 2D panes.
-    { orthogonalCopies: false }
-  )
+  checkCancelled()
+  report({ phase: 'writing', layer: includedLayers.length, layerCount: includedLayers.length, fraction: 0 })
+  const kMin = Math.round(Math.log2(factor))
+  await writeAlignedLabelPyramid(outputZarrPath, { data: combined, size: [refX, refY, refZ] }, refLevel, kMin, Math.max(kMin, baseLevels.length - 1))
 
   return { mapping }
+}
+
+/**
+ * Writes the merged label map so that its pyramid index k has the same
+ * voxel spacing as the base volume's index k. itk-vtk-viewer fetches the
+ * label image at the *same scale index* as the volume it's displaying
+ * (confirmed in its source: `[image, labelImage].map(i => i.getImage(scale,
+ * bounds))`), and on a real scan it can only display the volume at the
+ * coarsest-but-one or so level (its 2^28 voxel cap) -- so if the merge's
+ * own index 0 were the finest grid, itk would never show it: it would show
+ * the merge's index-2 (or whatever) level instead, two more halvings away.
+ *
+ * The finest grid built (`finest`, at native spacing * 2^kMin) is written
+ * at index kMin; indices below kMin (finer than we can afford to build)
+ * alias that same array. Coarser indices are downsampled with
+ * downsample2xLabelMode so thin structures survive them too. Arrays are
+ * cube-chunked: itk-vtk-viewer loads whole regions, never single slices.
+ */
+async function writeAlignedLabelPyramid(
+  outputPath: string,
+  finest: Level,
+  refLevel: ZarrLevelInfo,
+  kMin: number,
+  coarsestIndex: number
+): Promise<void> {
+  await mkdir(outputPath, { recursive: true })
+  await writeFile(path.join(outputPath, '.zgroup'), JSON.stringify({ zarr_format: 2 }))
+  let level = finest
+  for (let k = kMin; k <= coarsestIndex; k++) {
+    if (k > kMin) level = downsample2xLabelMode(level, Uint16Array)
+    await writeZarrArrayV2(path.join(outputPath, `scale${k}`), level, '<u2', Uint16Array, false)
+  }
+  const datasets = []
+  for (let k = 0; k <= coarsestIndex; k++) {
+    const source = Math.max(k, kMin)
+    const f = 2 ** (source - kMin)
+    datasets.push({
+      path: `scale${source}`,
+      coordinateTransformations: [
+        { type: 'scale', scale: [refLevel.spacing[0] * f, refLevel.spacing[1] * f, refLevel.spacing[2] * f] },
+        { type: 'translation', translation: [refLevel.origin[0], refLevel.origin[1], refLevel.origin[2]] }
+      ]
+    })
+  }
+  const zattrs = {
+    multiscales: [
+      {
+        version: '0.4',
+        name: 'labels',
+        axes: [
+          { name: 'z', type: 'space', unit: 'millimeter' },
+          { name: 'y', type: 'space', unit: 'millimeter' },
+          { name: 'x', type: 'space', unit: 'millimeter' }
+        ],
+        datasets,
+        type: 'mode'
+      }
+    ]
+  }
+  await writeFile(path.join(outputPath, '.zattrs'), JSON.stringify(zattrs))
 }

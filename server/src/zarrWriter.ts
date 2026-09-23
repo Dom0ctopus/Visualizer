@@ -207,6 +207,57 @@ export function downsample2xNearest(level: Level, ctor: TypedArrayConstructor): 
   return { data: out, size: [dx, dy, dz] }
 }
 
+// Like downsample2xNearest, but each 2x2x2 block takes its most common
+// *nonzero* label (background only if the whole block is background).
+// Nearest decimation keeps one voxel of eight, so a 1-2 voxel wide vessel
+// survives each halving only where it happens to cross that one sampled
+// corner -- after two halvings it's scattered specks. This keeps any
+// structure that touches a block.
+export function downsample2xLabelMode(level: Level, ctor: TypedArrayConstructor): Level {
+  const [sx, sy, sz] = level.size
+  const dx = Math.max(1, Math.floor(sx / 2))
+  const dy = Math.max(1, Math.floor(sy / 2))
+  const dz = Math.max(1, Math.floor(sz / 2))
+  const src = level.data
+  const out = new ctor(dx * dy * dz)
+  const block = new Float64Array(8)
+  for (let z = 0; z < dz; z++) {
+    const z0 = Math.min(z * 2, sz - 1) * sy * sx
+    const z1 = Math.min(z * 2 + 1, sz - 1) * sy * sx
+    for (let y = 0; y < dy; y++) {
+      const y0 = Math.min(y * 2, sy - 1) * sx
+      const y1 = Math.min(y * 2 + 1, sy - 1) * sx
+      const outRow = z * dy * dx + y * dx
+      for (let x = 0; x < dx; x++) {
+        const x0 = Math.min(x * 2, sx - 1)
+        const x1 = Math.min(x * 2 + 1, sx - 1)
+        block[0] = src[z0 + y0 + x0]
+        block[1] = src[z0 + y0 + x1]
+        block[2] = src[z0 + y1 + x0]
+        block[3] = src[z0 + y1 + x1]
+        block[4] = src[z1 + y0 + x0]
+        block[5] = src[z1 + y0 + x1]
+        block[6] = src[z1 + y1 + x0]
+        block[7] = src[z1 + y1 + x1]
+        let best = 0
+        let bestCount = 0
+        for (let i = 0; i < 8; i++) {
+          const v = block[i]
+          if (v === 0 || v === best) continue
+          let count = 1
+          for (let j = i + 1; j < 8; j++) if (block[j] === v) count++
+          if (count > bestCount) {
+            best = v
+            bestCount = count
+          }
+        }
+        out[outRow + x] = best
+      }
+    }
+  }
+  return { data: out, size: [dx, dy, dz] }
+}
+
 // itk-wasm's `image.spacing` is always a positive magnitude per axis --
 // whether that axis's index actually increases or decreases in physical
 // space (e.g. a NRRD with a negative "space directions" component) lives

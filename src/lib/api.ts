@@ -69,10 +69,20 @@ export interface MergedSegmentMapping {
   originalLabelValue: number
 }
 
+export interface MergeProgress {
+  phase: 'scanning' | 'resampling' | 'writing'
+  /** 1-based layer being processed, of layerCount. */
+  layer: number
+  layerCount: number
+  /** 0..1 through the current layer. */
+  fraction: number
+}
+
 export interface SegmentationMergeStatus {
   status: 'pending' | 'ready' | 'failed' | 'none'
   error?: string
   mapping?: MergedSegmentMapping[]
+  progress?: MergeProgress
 }
 
 /** Kicks off (fire-and-forget on the server) combining every listed

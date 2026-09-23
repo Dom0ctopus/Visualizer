@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { fetchSegmentationMergeStatus, mergeZarrUrl, requestSegmentationMerge, type MergedSegmentMapping } from '../lib/api'
+import { fetchSegmentationMergeStatus, mergeZarrUrl, requestSegmentationMerge, type MergedSegmentMapping, type MergeProgress } from '../lib/api'
 import { groupByLayer, type ZarrLoadedSegmentation } from '../types'
 
 const POLL_INTERVAL_MS = 1000
@@ -32,6 +32,8 @@ export function useSegmentationMerge3D(
 ) {
   const [status, setStatus] = useState<'idle' | 'pending' | 'ready' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [progress, setProgress] = useState<MergeProgress | null>(null)
+  const [pendingSince, setPendingSince] = useState<number | null>(null)
   const mappingRef = useRef<MergedSegmentMapping[]>([])
   const layerOrderRef = useRef<LayerKey[]>([])
   const pollTimerRef = useRef<number | null>(null)
@@ -73,9 +75,11 @@ export function useSegmentationMerge3D(
         const result = await fetchSegmentationMergeStatus()
         if (cancelled || requestIdRef.current !== requestId) return
         if (result.status === 'pending') {
+          setProgress(result.progress ?? null)
           pollTimerRef.current = window.setTimeout(poll, POLL_INTERVAL_MS)
           return
         }
+        setProgress(null)
         if (result.status === 'ready') {
           mappingRef.current = result.mapping ?? []
           layerOrderRef.current = layerOrder
@@ -96,6 +100,8 @@ export function useSegmentationMerge3D(
 
     setStatus('pending')
     setError(null)
+    setProgress(null)
+    setPendingSince(Date.now())
     void (async () => {
       try {
         await requestSegmentationMerge(volumeId, layers)
@@ -138,5 +144,5 @@ export function useSegmentationMerge3D(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, segmentations, setLabelWeights, setLabelNames])
 
-  return { status, error }
+  return { status, error, progress, pendingSince }
 }

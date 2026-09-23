@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { fetchPyramidLevels, type PyramidLevel } from '../lib/zarrClient'
 
 // itk-vtk-viewer ships as a legacy global-script webpack bundle, not an
 // ESM/CJS module -- its own type declarations use `declare namespace
@@ -23,7 +24,30 @@ interface ItkVtkViewerInstance {
   // gets called after a label image reload.
   getCroppingPlanesEnabled: () => boolean
   resetCroppingPlanes: () => void
+  // Sets the displayed pyramid level and turns off itk-vtk-viewer's own
+  // framerate-driven level switching ("Framerate-pick").
+  setImageScale: (scale: number) => void
+  getLabelImageBlend: () => number
+  setLabelImageBlend: (blend: number) => void
   delete: () => void
+}
+
+// itk-vtk-viewer's hard limits for one image update (read from its source:
+// "Voxel count over max" / "Image byte count over max").
+const ITK_MAX_VOXELS = 268_435_456
+const ITK_MAX_BYTES = 536_870_912
+
+function bytesPerElement(dtype: string): number {
+  return Number(dtype.slice(2)) || 1
+}
+
+/** Finest level itk-vtk-viewer will accept for the whole volume. */
+function finestDisplayableScale(levels: PyramidLevel[]): number {
+  for (const level of levels) {
+    const voxels = level.size[0] * level.size[1] * level.size[2]
+    if (voxels <= ITK_MAX_VOXELS && voxels * bytesPerElement(level.dtype) <= ITK_MAX_BYTES) return level.index
+  }
+  return levels.length - 1
 }
 
 interface ItkVtkViewerGlobal {
@@ -126,6 +150,17 @@ export function useItkVtkViewer() {
         // its own heuristic never fires and the full panel crowds the pane.
         // Force the same compact mode its own hamburger-menu toggle uses.
         volumeViewer.setUICollapsed(true)
+        // Pin the finest level itk-vtk-viewer can hold. Left on its default
+        // framerate-driven picking, it keeps trying finer levels that exceed
+        // its voxel cap ("Could not update image ... Voxel count over max")
+        // and switching levels mid-session, which also changes which level
+        // of the label image it shows (it fetches both at the same index).
+        // The level is still changeable from itk-vtk-viewer's own UI.
+        try {
+          volumeViewer.setImageScale(finestDisplayableScale(await fetchPyramidLevels(url)))
+        } catch (e) {
+          console.warn('Could not pin itk-vtk-viewer scale:', e)
+        }
         volumeViewerRef.current = volumeViewer
         setLoadedName(name)
       } catch (e) {
@@ -194,6 +229,16 @@ export function useItkVtkViewer() {
     // wrong state; only doing it while cropping is actually enabled avoids
     // any unnecessary work/render when it was never touched.
     if (viewer.getCroppingPlanesEnabled()) viewer.resetCroppingPlanes()
+
+    // A label-image reload can leave the render in a different-looking
+    // state that re-applying the blend fixes (the same thing moving the
+    // "label image blend" slider does). setLabelImageBlend ignores an
+    // unchanged value, so nudge it off and back.
+    const blend = viewer.getLabelImageBlend()
+    if (typeof blend === 'number') {
+      viewer.setLabelImageBlend(blend > 0.5 ? blend - 0.01 : blend + 0.01)
+      viewer.setLabelImageBlend(blend)
+    }
   }, [])
 
   const setLabelWeights = useCallback((weights: Map<number, number>) => {

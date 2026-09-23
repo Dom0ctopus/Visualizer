@@ -6,7 +6,7 @@ import path from 'node:path'
 import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
 import { enqueueJob } from './jobQueue.js'
 import { readNrrdHeader } from './nrrdHeader.js'
-import { convertSegmentationMergeToOmeZarr, type MergedSegmentMapping } from './segmentationMergeConvert.js'
+import { convertSegmentationMergeToOmeZarr, MergeCancelledError, type MergedSegmentMapping, type MergeProgress } from './segmentationMergeConvert.js'
 import { convertSegmentationNrrdToOmeZarr } from './segmentationZarrConvert.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
 import { generateSegmentationMeshes } from './surfaceMesh.js'
@@ -139,6 +139,9 @@ interface MergeState {
   status: 'pending' | 'ready' | 'failed'
   error?: string
   mapping?: MergedSegmentMapping[]
+  /** While pending: what the merge is doing, and since when (epoch ms). */
+  progress?: MergeProgress
+  startedAt?: number
 }
 
 // In-memory only, not persisted to store.ts's index.json -- a merge is
@@ -171,24 +174,49 @@ let mergeGeneration = 0
 // ever touching the canonical path or `currentMerge` at all.
 function convertMergeInBackground(generation: number, volumeId: string, layers: Array<{ segmentationId: string; layer: number; labelValues: number[] }>): void {
   const tempPath = path.join(ZARR_DIR, `_merge.tmp-${generation}.ome.zarr`)
+  const startedAt = Date.now()
+  const elapsed = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`
+  const isCurrent = () => generation === mergeGeneration
+  let lastLogged = ''
+  console.log(`[merge ${generation}] start: ${layers.length} layer(s)`)
   void (async () => {
     try {
       const layerInputs = layers.map((l) => ({
         segZarrGroupPath: path.join(segZarrPathFor(l.segmentationId), `layer${l.layer}`),
         labelValues: l.labelValues
       }))
-      const { mapping } = await convertSegmentationMergeToOmeZarr(zarrPathFor(volumeId), layerInputs, tempPath)
-      if (generation !== mergeGeneration) {
+      const { mapping } = await convertSegmentationMergeToOmeZarr(zarrPathFor(volumeId), layerInputs, tempPath, {
+        // A newer request supersedes this one: stop instead of finishing
+        // work that would only be discarded (each merge streams every
+        // layer at native resolution, twice).
+        isCancelled: () => !isCurrent(),
+        onProgress: (progress) => {
+          if (isCurrent()) currentMerge = { status: 'pending', progress, startedAt }
+          // Log each phase/layer transition once, not every band.
+          const key = `${progress.phase} ${progress.layer}/${progress.layerCount}`
+          if (key !== lastLogged) {
+            lastLogged = key
+            console.log(`[merge ${generation}] ${progress.phase === 'writing' ? 'writing output' : `${progress.phase} layer ${key.split(' ')[1]}`} (${elapsed()})`)
+          }
+        }
+      })
+      if (!isCurrent()) {
         await rm(tempPath, { recursive: true, force: true })
+        console.log(`[merge ${generation}] superseded after finishing; discarded (${elapsed()})`)
         return
       }
       await rm(mergeZarrPathFor(), { recursive: true, force: true })
       await rename(tempPath, mergeZarrPathFor())
       currentMerge = { status: 'ready', mapping }
+      console.log(`[merge ${generation}] done (${elapsed()})`)
     } catch (e) {
       await rm(tempPath, { recursive: true, force: true }).catch(() => {})
-      if (generation !== mergeGeneration) return
-      console.error('Segmentation merge failed:', e)
+      if (e instanceof MergeCancelledError) {
+        console.log(`[merge ${generation}] stopped: superseded by a newer request (${elapsed()})`)
+        return
+      }
+      if (!isCurrent()) return
+      console.error(`[merge ${generation}] failed (${elapsed()}):`, e)
       currentMerge = { status: 'failed', error: e instanceof Error ? e.message : 'Merge failed' }
     }
   })()
@@ -302,7 +330,7 @@ app.post('/api/segmentation-merges', express.json(), (req, res) => {
     return
   }
   const generation = ++mergeGeneration
-  currentMerge = { status: 'pending' }
+  currentMerge = { status: 'pending', startedAt: Date.now() }
   res.json(currentMerge)
   convertMergeInBackground(generation, volumeId, validLayers)
 })

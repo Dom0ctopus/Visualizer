@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import Blosc from 'numcodecs/blosc'
-import { type Level, type TypedArray, type TypedArrayConstructor } from './zarrWriter.js'
+import { type TypedArray, type TypedArrayConstructor } from './zarrWriter.js'
 
 interface ZarrArrayMeta {
   shape: [number, number, number] // z, y, x -- see zarrWriter.ts's writeZarrArrayV2
@@ -62,8 +62,7 @@ export interface ZarrLevelInfo {
 /** Lists every pyramid level's own geometry directly from disk -- the
  *  server-side, filesystem-reading counterpart to src/lib/zarrClient.ts's
  *  fetchPyramidLevels (which reads the same NGFF metadata over HTTP from
- *  the browser). Used by segmentationMergeConvert.ts to pick a reference
- *  resolution and align each input layer to it by physical position. */
+ *  the browser). */
 export async function readZarrLevels(zarrGroupPath: string): Promise<ZarrLevelInfo[]> {
   const attrs = JSON.parse(await readFile(path.join(zarrGroupPath, '.zattrs'), 'utf8')) as OmeZarrAttrs
   const datasets = attrs.multiscales[0].datasets
@@ -83,58 +82,6 @@ export async function readZarrLevels(zarrGroupPath: string): Promise<ZarrLevelIn
     })
   }
   return levels
-}
-
-/**
- * Reads one whole zarr array level into a single in-memory Level (X
- * fastest-varying, matching zarrWriter.ts's own Level convention), decoding
- * every chunk file. Only intended for levels small enough to comfortably
- * hold in memory at once -- callers (segmentationMergeConvert.ts) pick a
- * suitably coarse reference level specifically so this is always true, the
- * same way the rest of this codebase already holds one whole pyramid level
- * in memory at a time during conversion.
- */
-export async function readWholeZarrLevel(zarrGroupPath: string, level: ZarrLevelInfo): Promise<Level> {
-  const levelDir = path.join(zarrGroupPath, level.levelPath)
-  const zarray = JSON.parse(await readFile(path.join(levelDir, '.zarray'), 'utf8')) as ZarrArrayMeta
-  const [shapeZ, shapeY, shapeX] = zarray.shape
-  const [chunkZ, chunkY, chunkX] = zarray.chunks
-  const ctor = dtypeCtor(zarray.dtype)
-  const codec = zarray.compressor ? Blosc.fromConfig(zarray.compressor) : null
-
-  const out = new ctor(shapeX * shapeY * shapeZ) as TypedArray
-  const nChunksZ = Math.ceil(shapeZ / chunkZ)
-  const nChunksY = Math.ceil(shapeY / chunkY)
-  const nChunksX = Math.ceil(shapeX / chunkX)
-
-  for (let bz = 0; bz < nChunksZ; bz++) {
-    for (let by = 0; by < nChunksY; by++) {
-      for (let bx = 0; bx < nChunksX; bx++) {
-        let raw: Uint8Array
-        try {
-          const compressed = await readFile(path.join(levelDir, `${bz}.${by}.${bx}`))
-          raw = codec ? ((await codec.decode(new Uint8Array(compressed))) as Uint8Array) : new Uint8Array(compressed)
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue // every chunk is written by this app's own writer, but tolerate a missing one as all-fill (0)
-          throw e
-        }
-        const chunkData = new ctor(raw.buffer, raw.byteOffset, raw.byteLength / ctor.BYTES_PER_ELEMENT)
-        const rowLen = Math.min(chunkX, shapeX - bx * chunkX)
-        const rowsInChunk = Math.min(chunkY, shapeY - by * chunkY)
-        const slicesInChunk = Math.min(chunkZ, shapeZ - bz * chunkZ)
-        for (let z = 0; z < slicesInChunk; z++) {
-          const gz = bz * chunkZ + z
-          for (let y = 0; y < rowsInChunk; y++) {
-            const gy = by * chunkY + y
-            const srcOffset = z * chunkY * chunkX + y * chunkX
-            const dstOffset = gz * shapeY * shapeX + gy * shapeX + bx * chunkX
-            out.set(chunkData.subarray(srcOffset, srcOffset + rowLen), dstOffset)
-          }
-        }
-      }
-    }
-  }
-  return { data: out, size: [shapeX, shapeY, shapeZ] }
 }
 
 export interface ZarrArrayInfo {
