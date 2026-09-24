@@ -433,28 +433,37 @@ function setTitle(segs: ReadySegmentation[]): string {
   return segs.map((s) => s.record.name).join(', ')
 }
 
+type ColorOverrides = Record<string, Record<string, [number, number, number]>>
+const COLORS_ERROR = 'colors must map record id -> segment key -> [r, g, b] (0-255)'
+
+/** Optional per-segment colors (0-255) by record id and segment key
+ *  ("layer:labelValue"), e.g. from a color scheme; absent means the files'
+ *  own colors. */
+function parseColorOverrides(raw: unknown): ColorOverrides | undefined | 'invalid' {
+  if (raw === undefined) return undefined
+  const valid =
+    typeof raw === 'object' &&
+    raw !== null &&
+    Object.values(raw).every(
+      (m) => typeof m === 'object' && m !== null && Object.values(m as object).every((c) => Array.isArray(c) && c.length === 3 && c.every((v) => typeof v === 'number' && v >= 0 && v <= 255))
+    )
+  return valid ? (raw as ColorOverrides) : 'invalid'
+}
+
+function colorsKeyOf(colors: ColorOverrides | undefined): string | undefined {
+  return colors ? createHash('sha1').update(JSON.stringify(colors)).digest('hex').slice(0, 16) : undefined
+}
+
 app.post('/api/luxar/meshes', express.json(), async (req, res) => {
   const segs = await readySegmentations(req.body?.segmentationIds)
   if (typeof segs === 'string') {
     res.status(400).json({ error: segs })
     return
   }
-  // Optional per-segment colors (0-255) by record id and segment key, e.g.
-  // from a color scheme; absent means the files' own colors.
-  const rawColors = req.body?.colors
-  let colorOverrides: Record<string, Record<string, [number, number, number]>> | undefined
-  if (rawColors !== undefined) {
-    const valid =
-      typeof rawColors === 'object' &&
-      rawColors !== null &&
-      Object.values(rawColors).every(
-        (m) => typeof m === 'object' && m !== null && Object.values(m as object).every((c) => Array.isArray(c) && c.length === 3 && c.every((v) => typeof v === 'number' && v >= 0 && v <= 255))
-      )
-    if (!valid) {
-      res.status(400).json({ error: 'colors must map record id -> segment key -> [r, g, b] (0-255)' })
-      return
-    }
-    colorOverrides = rawColors as Record<string, Record<string, [number, number, number]>>
+  const colorOverrides = parseColorOverrides(req.body?.colors)
+  if (colorOverrides === 'invalid') {
+    res.status(400).json({ error: COLORS_ERROR })
+    return
   }
   const notReady = segs.find((s) => s.record.meshStatus !== 'ready')
   if (notReady) {
@@ -494,7 +503,7 @@ app.post('/api/luxar/meshes', express.json(), async (req, res) => {
       segments,
       title: setTitle(segs),
       rebuild: req.body?.rebuild === true,
-      colorsKey: colorOverrides ? createHash('sha1').update(JSON.stringify(colorOverrides)).digest('hex').slice(0, 16) : undefined
+      colorsKey: colorsKeyOf(colorOverrides)
     })
   )
 })
@@ -518,11 +527,17 @@ app.post('/api/luxar/atlas', express.json(), async (req, res) => {
     res.status(400).json({ error: segs })
     return
   }
+  const colorOverrides = parseColorOverrides(req.body?.colors)
+  if (colorOverrides === 'invalid') {
+    res.status(400).json({ error: COLORS_ERROR })
+    return
+  }
   const segmentations: AtlasSegmentation[] = segs.map(({ record, segments }) => {
     const layers = new Map<number, AtlasSegmentation['layers'][number]>()
     for (const seg of segments) {
       const layer = layers.get(seg.layer) ?? { layer: seg.layer, segments: [] }
-      layer.segments.push({ labelValue: seg.labelValue, name: segmentDisplayName(seg), system: seg.system === 'Ungrouped' ? record.name : seg.system, color: rgb01(seg.color) })
+      const color = colorOverrides?.[record.id]?.[`${seg.layer}:${seg.labelValue}`] ?? seg.color
+      layer.segments.push({ labelValue: seg.labelValue, name: segmentDisplayName(seg), system: seg.system === 'Ungrouped' ? record.name : seg.system, color: rgb01(color) })
       layers.set(seg.layer, layer)
     }
     return { name: record.name, store: segZarrPathFor(record.id), layers: [...layers.values()] }
@@ -533,11 +548,12 @@ app.post('/api/luxar/atlas', express.json(), async (req, res) => {
     segmentationIds: segs.map((s) => s.record.id),
     segmentations,
     quality,
+    colorsKey: colorsKeyOf(colorOverrides),
     title: `${volume.name} + ${setTitle(segs)}`,
     build: req.body?.build === true,
     rebuild: req.body?.rebuild === true
   })
-  res.json({ ...status, key: atlasKey(volume.id, segs.map((s) => s.record.id), quality) })
+  res.json({ ...status, key: atlasKey(volume.id, segs.map((s) => s.record.id), quality, colorsKeyOf(colorOverrides)) })
 })
 
 app.get('/api/segmentation-merges', (_req, res) => {

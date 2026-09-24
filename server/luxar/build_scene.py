@@ -557,7 +557,76 @@ def bbox(mask: np.ndarray, pad: int = 2) -> tuple[slice, ...]:
     return tuple(slice(max(0, int(a.min()) - pad), min(n, int(a.max()) + pad + 1)) for a, n in zip(nz, mask.shape))
 
 
+# Bump when a change to the fitting makes cached fits stale.
+ATLAS_FIT_VERSION = 1
+
+
+def segment_identity(seg: dict, layer: dict, s: dict) -> str:
+    return f"{seg['store']}|{layer['layer']}|{s['labelValue']}"
+
+
+def load_fit_cache(path: Path | None, identities: list[str]):
+    """A cached fit (centers, raw amplitudes, cholesky factors, splat ids,
+    pixel size) with its splat ids remapped to this spec's atlas ids, or
+    None. The fit depends only on the volume, the segments' voxels and the
+    quality, not on colors, so a recolored atlas reuses it."""
+    if path is None or not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            if int(z["version"]) != ATLAS_FIT_VERSION:
+                return None
+            cached_ids = [str(i) for i in z["identities"]]
+            if sorted(cached_ids) != sorted(identities):
+                return None
+            index = {ident: n + 1 for n, ident in enumerate(identities)}
+            remap = np.array([0] + [index[i] for i in cached_ids], dtype=np.int64)
+            return z["centers"], z["amplitudes"], z["cholesky"], remap[z["splat_ids"]], float(z["pixel"])
+    except Exception as e:
+        log(f"atlas fit cache unreadable ({e}); refitting")
+        return None
+
+
+def save_fit_cache(path: Path | None, identities, centers, amplitudes, cholesky, splat_ids, pixel: float) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp.npz")
+    np.savez(
+        tmp,
+        version=ATLAS_FIT_VERSION,
+        identities=np.array(identities),
+        centers=centers,
+        amplitudes=amplitudes,
+        cholesky=cholesky,
+        splat_ids=splat_ids,
+        pixel=pixel,
+    )
+    tmp.replace(path)
+
+
 def build_atlas(spec: dict) -> None:
+    entries = []  # atlas id - 1 -> segment info
+    identities = []
+    for seg in spec["segmentations"]:
+        for layer in seg["layers"]:
+            for s in layer["segments"]:
+                entries.append(s)
+                identities.append(segment_identity(seg, layer, s))
+    fit_cache = Path(spec["fitCache"]) if spec.get("fitCache") else None
+    cached = load_fit_cache(fit_cache, identities)
+    if cached is not None:
+        log("reusing the cached fit (only colors changed)")
+        centers, amplitudes, cholesky, splat_ids, pixel = cached
+    else:
+        centers, amplitudes, cholesky, splat_ids, pixel = fit_atlas(spec, entries)
+        save_fit_cache(fit_cache, identities, centers, amplitudes, cholesky, splat_ids, pixel)
+    color_atlas(spec, entries, centers, amplitudes.astype(np.float32), cholesky, splat_ids, pixel)
+
+
+def fit_atlas(spec: dict, entries: list) -> tuple:
+    """Fits the atlas splats; returns (centers, raw amplitudes, cholesky
+    factors, splat atlas ids, pixel size) in physical LPS mm."""
     quality = spec["quality"]
     max_dim = int(quality["maxDim"])
     total_budget = int(quality["maxSplats"])
@@ -581,18 +650,18 @@ def build_atlas(spec: dict) -> None:
     log(f"atlas grid {grid_shape} at {spacing.round(4).tolist()} mm")
 
     # --- Segment coverage of each grid voxel --------------------------------
-    entries = []  # atlas id - 1 -> segment info
     coverage_parts: dict = {}
     cell_volume = float(np.prod(spacing))
     voxels_per_cell: dict = {}
+    atlas_id = 0
     for seg in spec["segmentations"]:
         for layer in seg["layers"]:
             progress(f"measuring segments: {seg['name']}, layer {layer['layer']}")
             max_value = max((s["labelValue"] for s in layer["segments"]), default=0)
             lut = np.zeros(max(256, max_value + 1), dtype=np.int32)
             for s in layer["segments"]:
-                entries.append(s)
-                lut[s["labelValue"]] = len(entries)
+                atlas_id += 1
+                lut[s["labelValue"]] = atlas_id
             ms = Multiscale(str(Path(seg["store"]) / f"layer{layer['layer']}"))
             # The coarsest label level at least 2x finer than the grid.
             fine = [lv for lv in ms.levels if np.all(lv["scale"] <= spacing / 2 * 1.001)]
@@ -673,7 +742,12 @@ def build_atlas(spec: dict) -> None:
     amplitudes = np.concatenate([f.amplitudes for _, f in fits]).astype(np.float32)
     cholesky = np.concatenate([f.cholesky_factors for _, f in fits])
     splat_ids = np.concatenate([np.full(len(f.amplitudes), a, dtype=np.int64) for a, f in fits])
+    return centers, amplitudes, cholesky, splat_ids, float(spacing.min())
 
+
+def color_atlas(spec: dict, entries: list, centers, amplitudes, cholesky, splat_ids, pixel: float) -> None:
+    """Colors the fitted splats by segment, balances each segment's
+    brightness and writes the scene."""
     colors_by_id = np.zeros((len(entries) + 1, 3), dtype=np.float32)
     colors_by_id[0] = 0.55
     names_by_id = ["Unlabeled tissue"]
@@ -682,9 +756,8 @@ def build_atlas(spec: dict) -> None:
         names_by_id.append(s["name"])
 
     # Per-segment gains (see ATLAS_EXPOSURE); the context gets CONTEXT_GAIN.
-    pixel = float(spacing.min())
     brightness = {}
-    for atlas_id, _ in fits:
+    for atlas_id in np.unique(splat_ids):
         if atlas_id == 0:
             continue
         m = splat_ids == atlas_id

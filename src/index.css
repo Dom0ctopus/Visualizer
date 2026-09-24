@@ -589,6 +589,10 @@ input[type='range'] {
 .itk-volume-container {
   position: absolute;
   inset: 0;
+  /* Keeps itk-vtk-viewer's own z-indexed layers (its corner-annotation
+     rows are z-index 100 and span the view) inside this box, so they can't
+     cover the render toolbar and swallow its clicks. */
+  isolation: isolate;
 }
 
 /* itk-vtk-viewer's menu toggle (three dark lines) disappears against a black
@@ -703,6 +707,10 @@ input[type='range'] {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+.luxar-view-retry {
+  margin-left: 8px;
 }
 
 .luxar-view-status {

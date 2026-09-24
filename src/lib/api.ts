@@ -227,12 +227,12 @@ export async function requestLuxarAtlas(
   volumeId: string,
   segmentationIds: string[],
   quality: AtlasQuality,
-  options: { build?: boolean; rebuild?: boolean } = {}
+  options: { build?: boolean; rebuild?: boolean; colors?: Record<string, Record<string, [number, number, number]>> } = {}
 ): Promise<LuxarSceneStatus> {
   const res = await fetch('/api/luxar/atlas', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ volumeId, segmentationIds, quality, build: options.build ?? false, rebuild: options.rebuild ?? false })
+    body: JSON.stringify({ volumeId, segmentationIds, quality, build: options.build ?? false, rebuild: options.rebuild ?? false, colors: options.colors })
   })
   return handleJson<LuxarSceneStatus>(res)
 }

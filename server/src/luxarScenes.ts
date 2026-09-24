@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { enqueueJob, dequeueJob, getJobQueueState } from './jobQueue.js'
@@ -30,6 +30,13 @@ const BUILDER_VERSION = createHash('sha1').update(readFileSync(SCRIPT)).digest('
  *  rebuild with other colors skips the slow decimation. */
 export function ladderDirFor(recordId: string): string {
   return path.join(LUXAR_DIR, 'ladders', recordId)
+}
+/** Cached atlas fits, keyed by what the fit depends on (not colors), so
+ *  recoloring an atlas skips the fitting. Each has an inputs.json listing
+ *  its record ids, for invalidation. */
+const FITS_DIR = path.join(LUXAR_DIR, 'atlas-fits')
+function fitDirFor(fitKey: string): string {
+  return path.join(FITS_DIR, fitKey)
 }
 const VENV_DIR = path.resolve(import.meta.dirname, '..', '.luxar-venv')
 const SCENE_DIRNAME = 'scene.luxar.zarr'
@@ -247,6 +254,14 @@ function staleFailure(status: StoredSceneStatus | undefined): boolean {
 
 export async function invalidateScenesFor(recordId: string, kind?: LuxarSceneKind): Promise<void> {
   if (!kind || kind === 'meshes') await rm(ladderDirFor(recordId), { recursive: true, force: true })
+  if (!kind || kind === 'atlas') {
+    for (const fitKey of await readdir(FITS_DIR).catch(() => [] as string[])) {
+      const inputs = await readFile(path.join(fitDirFor(fitKey), 'inputs.json'), 'utf8')
+        .then((t) => JSON.parse(t) as string[])
+        .catch(() => null)
+      if (!inputs || inputs.includes(recordId)) await rm(fitDirFor(fitKey), { recursive: true, force: true })
+    }
+  }
   for (const [key, status] of statuses) {
     if (!status.inputIds.includes(recordId) || (kind && status.kind !== kind)) continue
     statuses.delete(key)
@@ -374,27 +389,41 @@ export interface AtlasRequest {
   segmentationIds: string[]
   segmentations: AtlasSegmentation[]
   quality: AtlasQuality
+  /** As in MeshSceneRequest: identifies colors that differ from the files'. */
+  colorsKey?: string
   title: string
   /** Start a build if none exists (otherwise only report status). */
   build: boolean
   rebuild?: boolean
 }
 
-export function atlasKey(volumeId: string, segmentationIds: string[], quality: AtlasQuality): string {
-  return sceneKey('atlas', [volumeId, ...[...segmentationIds].sort(), quality])
+export function atlasKey(volumeId: string, segmentationIds: string[], quality: AtlasQuality, colorsKey?: string): string {
+  const inputs = [volumeId, ...[...segmentationIds].sort(), quality]
+  return sceneKey('atlas', colorsKey ? [...inputs, `colors:${colorsKey}`] : inputs)
 }
 
 export function requestAtlas(req: AtlasRequest): SceneStatus {
-  const key = atlasKey(req.volumeId, req.segmentationIds, req.quality)
+  const key = atlasKey(req.volumeId, req.segmentationIds, req.quality, req.colorsKey)
   if (req.build) dropStaleQueuedBuilds('atlas', key)
   const existing = statuses.get(key)
-  const wantsBuild = (req.build && (!existing || (req.rebuild && existing.status !== 'pending'))) || staleFailure(existing)
+  // The fit is shared by every coloring of the same inputs, so once one
+  // coloring is built, another (e.g. switching color scheme) builds without
+  // being asked: it only recolors. An explicit rebuild refits.
+  const fitDir = fitDirFor(atlasKey(req.volumeId, req.segmentationIds, req.quality))
+  const fitCache = path.join(fitDir, 'fit.npz')
+  const recolorOnly = !existing && existsSync(fitCache)
+  const wantsBuild = (req.build && (!existing || (req.rebuild && existing.status !== 'pending'))) || recolorOnly || staleFailure(existing)
   if (!wantsBuild) return sceneStatus(key, 'atlas')
+  if (recolorOnly) dropStaleQueuedBuilds('atlas', key)
+  const inputIds = [req.volumeId, ...req.segmentationIds]
+  if (req.rebuild) rmSync(fitCache, { force: true })
+  mkdirSync(fitDir, { recursive: true })
+  writeFileSync(path.join(fitDir, 'inputs.json'), JSON.stringify(inputIds))
   startBuild(
     key,
     'atlas',
     `build Luxar splat atlas (${req.quality}) for ${req.title}`,
-    { title: req.title, volume: { store: req.volumeStore }, segmentations: req.segmentations, quality: ATLAS_QUALITY[req.quality], context: true },
+    { title: req.title, volume: { store: req.volumeStore }, segmentations: req.segmentations, quality: ATLAS_QUALITY[req.quality], context: true, fitCache },
     [req.volumeId, ...req.segmentationIds],
     req.quality
   )

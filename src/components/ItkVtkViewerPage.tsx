@@ -382,25 +382,66 @@ export function ItkVtkViewerPage() {
   // a row asks for one scene rather than one per intermediate set.
   const settledSegKey = useSettledValue(loadedSegKey, 2000)
   // Luxar bakes colors into a scene, so a color scheme other than the
-  // files' own is a separate (cached) scene, built with these colors.
-  const meshColors = useMemo(() => {
+  // files' own is a separate (cached) scene, built with these colors (the
+  // splat atlas too; its server reuses the fit, so switching only recolors).
+  const sceneColors = useMemo(() => {
     if (zarrSeg.colorScheme === 'slicer') return undefined
     const colors: Record<string, Record<string, [number, number, number]>> = {}
     for (const l of zarrSeg.segmentations) colors[l.recordId] = Object.fromEntries(l.segments.map((seg) => [seg.key, seg.color]))
     return colors
   }, [zarrSeg.colorScheme, zarrSeg.segmentations])
   const meshSceneKey = meshTabOpened && luxarMeshes && meshesReady && settledSegKey === loadedSegKey ? `${loadedSegKey}|${zarrSeg.colorScheme}` : null
-  const meshScene = useLuxarScene(meshSceneKey, () => requestLuxarMeshes(loadedSegIds, false, meshColors))
+  const meshScene = useLuxarScene(meshSceneKey, () => requestLuxarMeshes(loadedSegIds, false, sceneColors))
 
   const atlasQuality: AtlasQuality = atlasQualityChoice ?? (luxar?.device && luxar.device !== 'cpu' ? 'standard' : 'draft')
   const atlasReady = luxar?.available === true && luxar.gsplats && activeVolumeId !== null && loadedSegIds.length > 0
-  const atlasScene = useLuxarScene(atlasTabOpened && atlasReady ? `${activeVolumeId}|${loadedSegKey}|${atlasQuality}` : null, () =>
-    requestLuxarAtlas(activeVolumeId!, loadedSegIds, atlasQuality)
+  const atlasScene = useLuxarScene(
+    atlasTabOpened && atlasReady ? `${activeVolumeId}|${loadedSegKey}|${atlasQuality}|${zarrSeg.colorScheme}` : null,
+    () => requestLuxarAtlas(activeVolumeId!, loadedSegIds, atlasQuality, { colors: sceneColors })
   )
   const buildAtlas = () => {
     const rebuild = atlasScene.scene?.status === 'ready' || atlasScene.scene?.status === 'failed'
-    void atlasScene.run(() => requestLuxarAtlas(activeVolumeId!, loadedSegIds, atlasQuality, { build: true, rebuild }))
+    void atlasScene.run(() => requestLuxarAtlas(activeVolumeId!, loadedSegIds, atlasQuality, { build: true, rebuild, colors: sceneColors }))
   }
+
+  // The same color choice in every 3D tab's toolbar as in the Segments
+  // panel; the voxel render adds itk-vtk-viewer's own palette.
+  const colorToggle = (withPalette: boolean) => (
+    <>
+      <span className="render-toolbar-label">Colors</span>
+      <div className="segmented">
+        <button
+          className={zarrSeg.colorScheme === 'slicer' && !(withPalette && voxelColors === 'palette') ? 'active' : ''}
+          title="Each segment's color from its segmentation file, as in the 2D panes and segment tree"
+          onClick={() => {
+            zarrSeg.setColorScheme('slicer')
+            setVoxelColors('segments')
+          }}
+        >
+          Segmentation
+        </button>
+        <button
+          className={zarrSeg.colorScheme === 'realistic' && !(withPalette && voxelColors === 'palette') ? 'active' : ''}
+          title="General tissue-type colors sampled from dissection photographs (see the Segments panel)"
+          onClick={() => {
+            zarrSeg.setColorScheme('realistic')
+            setVoxelColors('segments')
+          }}
+        >
+          Real to life
+        </button>
+        {withPalette && (
+          <button
+            className={voxelColors === 'palette' ? 'active' : ''}
+            title="itk-vtk-viewer's categorical palette (colors don't correspond to the segment tree)"
+            onClick={() => setVoxelColors('palette')}
+          >
+            Palette
+          </button>
+        )}
+      </div>
+    </>
+  )
 
   const showLuxarMeshes = renderTab === 'mesh' && luxarMeshes && meshScene.scene?.status === 'ready'
   const showLuxarAtlas = renderTab === 'atlas' && atlasScene.scene?.status === 'ready'
@@ -672,25 +713,12 @@ export function ItkVtkViewerPage() {
                   so switching never reloads or re-lays-out either renderer. */}
               <div className={renderTab === 'voxel' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
                 <div ref={volumeContainerRef} className="itk-volume-container" />
-                <div className="render-toolbar">
-                  <span className="render-toolbar-label">Label colors</span>
-                  <div className="segmented">
-                    <button
-                      className={voxelColors === 'segments' ? 'active' : ''}
-                      title="Each segment's own color, as in the 2D panes, surface meshes and segment tree"
-                      onClick={() => setVoxelColors('segments')}
-                    >
-                      Segments
-                    </button>
-                    <button
-                      className={voxelColors === 'palette' ? 'active' : ''}
-                      title="itk-vtk-viewer's categorical palette (colors don't correspond to the segment tree)"
-                      onClick={() => setVoxelColors('palette')}
-                    >
-                      Palette
-                    </button>
+                {zarrSeg.segmentations.length > 0 && (
+                  <div className="render-toolbar">
+                    {colorToggle(true)}
+                    {mergeStatus === 'pending' && <span className="render-toolbar-hint">Colors apply once the combined label map is built</span>}
                   </div>
-                </div>
+                )}
               </div>
               {luxar?.available && (
                 <div className={luxarSrc ? 'render-tab-panel' : 'render-tab-panel inactive'}>
@@ -705,6 +733,7 @@ export function ItkVtkViewerPage() {
                     <MeshViewer segmentations={zarrSeg.segmentations} records={segmentationRecords} active={renderTab === 'mesh'} />
                   )}
                   <div className="render-toolbar">
+                    {zarrSeg.segmentations.length > 0 && colorToggle(false)}
                     {luxar?.available ? (
                       <>
                         <span className="render-toolbar-label">Viewer</span>
@@ -723,7 +752,7 @@ export function ItkVtkViewerPage() {
                             scene={meshScene.scene}
                             error={meshScene.error}
                             now={now}
-                            onRetry={() => void meshScene.run(() => requestLuxarMeshes(loadedSegIds, true, meshColors))}
+                            onRetry={() => void meshScene.run(() => requestLuxarMeshes(loadedSegIds, true, sceneColors))}
                           />
                         )}
                       </>
@@ -753,6 +782,7 @@ export function ItkVtkViewerPage() {
                       <span>Load a volume and at least one segmentation to build a splat atlas.</span>
                     ) : (
                       <>
+                        {colorToggle(false)}
                         <span className="render-toolbar-label">Quality</span>
                         <select value={atlasQuality} onChange={(e) => setAtlasQualityChoice(e.target.value as AtlasQuality)}>
                           {(Object.keys(ATLAS_QUALITY_LABELS) as AtlasQuality[]).map((q) => (
@@ -920,7 +950,7 @@ export function ItkVtkViewerPage() {
                   title="Each segment's color from its segmentation file"
                   onClick={() => zarrSeg.setColorScheme('slicer')}
                 >
-                  File
+                  Segmentation
                 </button>
                 <button
                   className={zarrSeg.colorScheme === 'realistic' ? 'active' : ''}
