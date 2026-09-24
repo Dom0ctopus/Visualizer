@@ -381,10 +381,16 @@ export function ItkVtkViewerPage() {
   // Waits for the loaded set to settle, so loading several segmentations in
   // a row asks for one scene rather than one per intermediate set.
   const settledSegKey = useSettledValue(loadedSegKey, 2000)
-  const meshScene = useLuxarScene(
-    meshTabOpened && luxarMeshes && meshesReady && settledSegKey === loadedSegKey ? loadedSegKey : null,
-    () => requestLuxarMeshes(loadedSegIds)
-  )
+  // Luxar bakes colors into a scene, so a color scheme other than the
+  // files' own is a separate (cached) scene, built with these colors.
+  const meshColors = useMemo(() => {
+    if (zarrSeg.colorScheme === 'slicer') return undefined
+    const colors: Record<string, Record<string, [number, number, number]>> = {}
+    for (const l of zarrSeg.segmentations) colors[l.recordId] = Object.fromEntries(l.segments.map((seg) => [seg.key, seg.color]))
+    return colors
+  }, [zarrSeg.colorScheme, zarrSeg.segmentations])
+  const meshSceneKey = meshTabOpened && luxarMeshes && meshesReady && settledSegKey === loadedSegKey ? `${loadedSegKey}|${zarrSeg.colorScheme}` : null
+  const meshScene = useLuxarScene(meshSceneKey, () => requestLuxarMeshes(loadedSegIds, false, meshColors))
 
   const atlasQuality: AtlasQuality = atlasQualityChoice ?? (luxar?.device && luxar.device !== 'cpu' ? 'standard' : 'draft')
   const atlasReady = luxar?.available === true && luxar.gsplats && activeVolumeId !== null && loadedSegIds.length > 0
@@ -711,15 +717,13 @@ export function ItkVtkViewerPage() {
                           </button>
                         </div>
                         {luxarMeshes && loadedSegIds.length > 0 && !meshesReady && <span>Luxar scene builds once surface meshes are ready…</span>}
-                        {showLuxarMeshes && zarrSeg.colorScheme === 'realistic' && (
-                          <span className="render-toolbar-hint">Luxar meshes show file colors; Basic follows the color scheme.</span>
-                        )}
+
                         {luxarMeshes && meshesReady && (
                           <LuxarSceneLine
                             scene={meshScene.scene}
                             error={meshScene.error}
                             now={now}
-                            onRetry={() => void meshScene.run(() => requestLuxarMeshes(loadedSegIds, true))}
+                            onRetry={() => void meshScene.run(() => requestLuxarMeshes(loadedSegIds, true, meshColors))}
                           />
                         )}
                       </>

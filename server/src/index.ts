@@ -1,4 +1,5 @@
 import cors from 'cors'
+import { createHash } from 'node:crypto'
 import express from 'express'
 import multer from 'multer'
 import { readFile, rename, rm } from 'node:fs/promises'
@@ -11,6 +12,7 @@ import {
   getLuxarStatus,
   initLuxarScenes,
   invalidateScenesFor,
+  ladderDirFor,
   requestAtlas,
   requestMeshScene,
   sceneStatus,
@@ -437,6 +439,23 @@ app.post('/api/luxar/meshes', express.json(), async (req, res) => {
     res.status(400).json({ error: segs })
     return
   }
+  // Optional per-segment colors (0-255) by record id and segment key, e.g.
+  // from a color scheme; absent means the files' own colors.
+  const rawColors = req.body?.colors
+  let colorOverrides: Record<string, Record<string, [number, number, number]>> | undefined
+  if (rawColors !== undefined) {
+    const valid =
+      typeof rawColors === 'object' &&
+      rawColors !== null &&
+      Object.values(rawColors).every(
+        (m) => typeof m === 'object' && m !== null && Object.values(m as object).every((c) => Array.isArray(c) && c.length === 3 && c.every((v) => typeof v === 'number' && v >= 0 && v <= 255))
+      )
+    if (!valid) {
+      res.status(400).json({ error: 'colors must map record id -> segment key -> [r, g, b] (0-255)' })
+      return
+    }
+    colorOverrides = rawColors as Record<string, Record<string, [number, number, number]>>
+  }
   const notReady = segs.find((s) => s.record.meshStatus !== 'ready')
   if (notReady) {
     res.status(409).json({ error: `Surface meshes for ${notReady.record.name} aren't ready yet` })
@@ -456,17 +475,28 @@ app.post('/api/luxar/meshes', express.json(), async (req, res) => {
       if (usedNames.has(layerName)) layerName = `${layerName} (${record.name.replaceAll('/', '-')})`
       for (let n = 2; usedNames.has(layerName); n++) layerName = `${name.replaceAll('/', '-')} (${n})`
       usedNames.add(layerName)
+      const segmentKey = `${entry.layer}:${entry.labelValue}`
+      const override = colorOverrides?.[record.id]?.[segmentKey]
       segments.push({
         file: path.join(meshDirFor(record.id), entry.file),
+        ladderDir: ladderDirFor(record.id),
         name,
         layerName,
         recordId: record.id,
-        segmentKey: `${entry.layer}:${entry.labelValue}`,
-        color: info ? rgb01(info.color) : [0.8, 0.8, 0.8]
+        segmentKey,
+        color: override ? rgb01(override) : info ? rgb01(info.color) : [0.8, 0.8, 0.8]
       })
     }
   }
-  res.json(requestMeshScene({ segmentationIds: segs.map((s) => s.record.id), segments, title: setTitle(segs), rebuild: req.body?.rebuild === true }))
+  res.json(
+    requestMeshScene({
+      segmentationIds: segs.map((s) => s.record.id),
+      segments,
+      title: setTitle(segs),
+      rebuild: req.body?.rebuild === true,
+      colorsKey: colorOverrides ? createHash('sha1').update(JSON.stringify(colorOverrides)).digest('hex').slice(0, 16) : undefined
+    })
+  )
 })
 
 const ATLAS_QUALITIES: AtlasQuality[] = ['draft', 'standard', 'high']

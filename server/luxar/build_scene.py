@@ -27,6 +27,7 @@ Usage: build_scene.py meshes|atlas <spec.json>
 from __future__ import annotations
 
 import json
+import pickle
 import shutil
 import sys
 import time
@@ -194,6 +195,21 @@ def decimate_part(args: tuple) -> tuple:
     return ladder_key(vertices, faces), ladder
 
 
+def ladder_cache_path(ladder_dir: str | None, vertices: np.ndarray, faces: np.ndarray) -> Path | None:
+    """Where a part's ladder is cached on disk: keyed by its geometry and the
+    LOD settings, so a rebuild with different colors (or a different set of
+    segmentations sharing this one) reuses it."""
+    if not ladder_dir:
+        return None
+    import hashlib
+
+    h = hashlib.sha1()
+    h.update(json.dumps(MESH_LOD_SPEC, sort_keys=True).encode())
+    h.update(np.ascontiguousarray(vertices, dtype=np.float32).tobytes())
+    h.update(np.ascontiguousarray(faces, dtype=np.uint32).tobytes())
+    return Path(ladder_dir) / f"{h.hexdigest()}.pkl"
+
+
 # Ladders computed ahead of time by the worker pool, consumed by the patched
 # decimate_ladder below when Luxar's writer asks for them.
 PRECOMPUTED_LADDERS: dict = {}
@@ -320,11 +336,28 @@ def build_meshes(spec: dict) -> None:
                     for j, part in enumerate(parts):
                         vi = part.vertex_index
                         items.append((seg, (j, len(parts)), vertices[vi], part.faces, normals[vi]))
-            jobs = [(v, f, n) for _, _, v, f, n in items if len(f) > MESH_LOD_MIN_TRIANGLES] if pool else []
+            jobs, job_paths = [], []
+            for seg, _, v, f, n in items:
+                if not pool or len(f) <= MESH_LOD_MIN_TRIANGLES:
+                    continue
+                cache_path = ladder_cache_path(seg.get("ladderDir"), v, f)
+                if cache_path is not None and cache_path.exists():
+                    try:
+                        PRECOMPUTED_LADDERS[ladder_key(v, f)] = pickle.loads(cache_path.read_bytes())
+                        continue
+                    except Exception:
+                        pass  # unreadable: recompute
+                jobs.append((v, f, n))
+                job_paths.append(cache_path)
             if jobs:
                 finished = 0
-                for key, ladder in pool.map(decimate_part, jobs):
+                for (key, ladder), cache_path in zip(pool.map(decimate_part, jobs), job_paths):
                     PRECOMPUTED_LADDERS[key] = ladder
+                    if cache_path is not None:
+                        cache_path.parent.mkdir(parents=True, exist_ok=True)
+                        tmp = cache_path.with_suffix(".tmp")
+                        tmp.write_bytes(pickle.dumps(ladder, protocol=pickle.HIGHEST_PROTOCOL))
+                        tmp.replace(cache_path)
                     finished += 1
                     progress(f"simplifying surfaces: {finished}/{len(jobs)} ({done:,}/{total:,} triangles written)")
             groups = {}

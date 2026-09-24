@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { enqueueJob, dequeueJob, getJobQueueState } from './jobQueue.js'
@@ -22,6 +22,15 @@ import { DATA_DIR, writeFileAtomic } from './store.js'
 
 export const LUXAR_DIR = path.join(DATA_DIR, 'luxar')
 const SCRIPT = path.resolve(import.meta.dirname, '..', 'luxar', 'build_scene.py')
+// Identifies the builder that made a scene, so a scene that failed under an
+// older builder is retried automatically once the builder changes (e.g. a
+// fix for the failure), instead of showing the stale error until Retry.
+const BUILDER_VERSION = createHash('sha1').update(readFileSync(SCRIPT)).digest('hex').slice(0, 12)
+/** Per-segmentation cache of simplified mesh levels (build_scene.py), so a
+ *  rebuild with other colors skips the slow decimation. */
+export function ladderDirFor(recordId: string): string {
+  return path.join(LUXAR_DIR, 'ladders', recordId)
+}
 const VENV_DIR = path.resolve(import.meta.dirname, '..', '.luxar-venv')
 const SCENE_DIRNAME = 'scene.luxar.zarr'
 export const LUXAR_SETUP_COMMAND = 'npm run setup:luxar'
@@ -76,6 +85,7 @@ interface StoredSceneStatus {
   inputIds: string[]
   /** Mesh scenes: which segment each Luxar layer shows. */
   layers?: SceneLayer[]
+  builderVersion?: string
 }
 
 /** Ties a Luxar layer (by name) to the app's segment, so the segment tree
@@ -90,6 +100,8 @@ export interface SceneLayer {
 export interface MeshSceneSegment {
   /** A server/src/surfaceMesh.ts .bin file. */
   file: string
+  /** Where build_scene.py caches this segment's simplified levels. */
+  ladderDir: string
   name: string
   layerName: string
   recordId: string
@@ -228,7 +240,13 @@ export function sceneStatus(key: string, kind: LuxarSceneKind): SceneStatus {
 /** Removes every scene (of `kind`, if given) built from this library record
  *  -- on delete, or when its meshes are regenerated -- stopping its build if
  *  one is running. */
+/** A failed build from an older builder: worth retrying without being asked. */
+function staleFailure(status: StoredSceneStatus | undefined): boolean {
+  return status?.status === 'failed' && status.builderVersion !== BUILDER_VERSION
+}
+
 export async function invalidateScenesFor(recordId: string, kind?: LuxarSceneKind): Promise<void> {
+  if (!kind || kind === 'meshes') await rm(ladderDirFor(recordId), { recursive: true, force: true })
   for (const [key, status] of statuses) {
     if (!status.inputIds.includes(recordId) || (kind && status.kind !== kind)) continue
     statuses.delete(key)
@@ -243,7 +261,8 @@ export async function invalidateScenesFor(recordId: string, kind?: LuxarSceneKin
 // ---------------------------------------------------------------------------
 
 function startBuild(key: string, kind: LuxarSceneKind, label: string, spec: object, inputIds: string[], quality?: AtlasQuality, layers?: SceneLayer[]): void {
-  void persistStatus(key, { kind, status: 'pending', inputIds, quality, layers })
+  const builderVersion = BUILDER_VERSION
+  void persistStatus(key, { kind, status: 'pending', inputIds, quality, layers, builderVersion })
   enqueueJob('luxar', key, label, async (ctx) => {
     if (!statuses.has(key)) return // invalidated while queued
     const dir = sceneDir(key)
@@ -254,13 +273,13 @@ function startBuild(key: string, kind: LuxarSceneKind, label: string, spec: obje
     try {
       await runBuilder(key, kind, specPath, logPath, (p) => ctx.setProgress(p))
       if (!statuses.has(key)) return
-      await persistStatus(key, { kind, status: 'ready', inputIds, quality, layers, builtAt: new Date().toISOString() })
+      await persistStatus(key, { kind, status: 'ready', inputIds, quality, layers, builderVersion, builtAt: new Date().toISOString() })
       console.log(`[luxar] ${label}: built in ${Math.round((Date.now() - t0) / 1000)}s`)
     } catch (e) {
       if (!statuses.has(key)) return
       const error = e instanceof Error ? e.message : String(e)
       console.error(`[luxar] ${label} failed: ${error} (full log: ${logPath})`)
-      await persistStatus(key, { kind, status: 'failed', inputIds, quality, layers, error })
+      await persistStatus(key, { kind, status: 'failed', inputIds, quality, layers, builderVersion, error })
     }
   })
 }
@@ -316,6 +335,9 @@ function lastErrorLine(stderr: string): string {
 
 export interface MeshSceneRequest {
   segmentationIds: string[]
+  /** Set when segment colors differ from the files' (e.g. a color scheme):
+   *  identifies them, so each coloring is its own cached scene. */
+  colorsKey?: string
   /** Per segmentation, in request order. */
   segments: MeshSceneSegment[]
   title: string
@@ -337,10 +359,10 @@ function dropStaleQueuedBuilds(kind: LuxarSceneKind, keepKey: string): void {
 
 export function requestMeshScene(req: MeshSceneRequest): SceneStatus {
   const ids = [...req.segmentationIds].sort()
-  const key = sceneKey('meshes', ids)
+  const key = sceneKey('meshes', req.colorsKey ? [...ids, `colors:${req.colorsKey}`] : ids)
   dropStaleQueuedBuilds('meshes', key)
   const existing = statuses.get(key)
-  if (existing && (!req.rebuild || existing.status === 'pending')) return sceneStatus(key, 'meshes')
+  if (existing && (!req.rebuild || existing.status === 'pending') && !staleFailure(existing)) return sceneStatus(key, 'meshes')
   const layers = req.segments.map((s) => ({ name: s.layerName, recordId: s.recordId, segmentKey: s.segmentKey }))
   startBuild(key, 'meshes', `build Luxar meshes for ${req.title}`, { title: req.title, segments: req.segments }, ids, undefined, layers)
   return sceneStatus(key, 'meshes')
@@ -366,7 +388,7 @@ export function requestAtlas(req: AtlasRequest): SceneStatus {
   const key = atlasKey(req.volumeId, req.segmentationIds, req.quality)
   if (req.build) dropStaleQueuedBuilds('atlas', key)
   const existing = statuses.get(key)
-  const wantsBuild = req.build && (!existing || (req.rebuild && existing.status !== 'pending'))
+  const wantsBuild = (req.build && (!existing || (req.rebuild && existing.status !== 'pending'))) || staleFailure(existing)
   if (!wantsBuild) return sceneStatus(key, 'atlas')
   startBuild(
     key,

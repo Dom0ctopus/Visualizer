@@ -205,11 +205,18 @@ export async function fetchLuxarScene(key: string): Promise<LuxarSceneStatus> {
 
 /** Returns the cached mesh scene for these segmentations, starting its build
  *  if there is none (or `rebuild`). */
-export async function requestLuxarMeshes(segmentationIds: string[], rebuild = false): Promise<LuxarSceneStatus> {
+export async function requestLuxarMeshes(
+  segmentationIds: string[],
+  rebuild = false,
+  /** Per-segment colors (0-255) by record id and segment key, when they
+   *  differ from the files' own (e.g. a color scheme). Each coloring is its
+   *  own cached scene. */
+  colors?: Record<string, Record<string, [number, number, number]>>
+): Promise<LuxarSceneStatus> {
   const res = await fetch('/api/luxar/meshes', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ segmentationIds, rebuild })
+    body: JSON.stringify({ segmentationIds, rebuild, colors })
   })
   return handleJson<LuxarSceneStatus>(res)
 }
