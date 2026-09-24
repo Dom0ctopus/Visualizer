@@ -24,6 +24,10 @@ export function LuxarView({ src, visible, layerPatches }: LuxarViewProps) {
   // Serializes init/switchDataset/dispose, which are async.
   const chainRef = useRef<Promise<unknown>>(Promise.resolve())
   const loadedSrcRef = useRef<string | null>(null)
+  // Only an app whose init() finished may switchDataset; one whose init
+  // failed is disposed and replaced on the next attempt.
+  const readyRef = useRef(false)
+  const [retryToken, setRetryToken] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [layersVersion, setLayersVersion] = useState(0)
@@ -31,8 +35,13 @@ export function LuxarView({ src, visible, layerPatches }: LuxarViewProps) {
   useEffect(() => {
     return () => {
       chainRef.current = chainRef.current.then(() => {
-        appRef.current?.dispose()
+        try {
+          appRef.current?.dispose()
+        } catch {
+          // already torn down
+        }
         appRef.current = null
+        readyRef.current = false
         loadedSrcRef.current = null
       })
     }
@@ -41,12 +50,35 @@ export function LuxarView({ src, visible, layerPatches }: LuxarViewProps) {
   useEffect(() => {
     if (!src) return
     const absolute = new URL(src, window.location.href).href
+    const discard = () => {
+      try {
+        appRef.current?.dispose()
+      } catch {
+        // half-initialized: nothing more to release
+      }
+      appRef.current = null
+      readyRef.current = false
+      loadedSrcRef.current = null
+    }
     chainRef.current = chainRef.current.then(async () => {
       if (loadedSrcRef.current === absolute) return
       setLoading(true)
       setError(null)
       try {
-        if (!appRef.current) {
+        if (appRef.current && readyRef.current) {
+          try {
+            await appRef.current.switchDataset(absolute)
+            loadedSrcRef.current = absolute
+            return
+          } catch (e) {
+            // Fall through to a fresh viewer rather than staying stuck.
+            console.error('Luxar switchDataset failed; restarting the viewer:', e)
+            discard()
+          }
+        } else if (appRef.current) {
+          discard()
+        }
+        {
           const [{ LuxarApp }] = await Promise.all([import('@luxar/viewer'), import('@luxar/viewer/styles.css')])
           const app = new LuxarApp()
           app.on('dataset-loaded', () => {
@@ -64,16 +96,17 @@ export function LuxarView({ src, visible, layerPatches }: LuxarViewProps) {
           // Dev builds: reachable from the console / browser tests.
           if (import.meta.env.DEV) (window as unknown as { __luxarApp?: LuxarApp }).__luxarApp = app
           await app.init({ canvas: canvasRef.current!, container: containerRef.current!, src: absolute, updateBrowserUrl: false })
-        } else {
-          await appRef.current.switchDataset(absolute)
+          readyRef.current = true
         }
         loadedSrcRef.current = absolute
       } catch (e) {
+        console.error('Luxar viewer failed to load', absolute, e)
+        if (!readyRef.current) discard()
         setLoading(false)
         setError(e instanceof Error ? e.message : 'Failed to start the Luxar viewer')
       }
     })
-  }, [src])
+  }, [src, retryToken])
 
   useEffect(() => {
     const app = appRef.current
@@ -102,7 +135,22 @@ export function LuxarView({ src, visible, layerPatches }: LuxarViewProps) {
   return (
     <div ref={containerRef} className="luxar-view">
       <canvas ref={canvasRef} className="luxar-view-canvas" />
-      {(loading || error) && <div className="luxar-view-status">{error ? `Luxar viewer: ${error}` : 'Loading Luxar scene…'}</div>}
+      {(loading || error) && (
+        <div className="luxar-view-status">
+          {error ? `Luxar viewer: ${error}` : 'Loading Luxar scene…'}
+          {error && (
+            <button
+              className="btn btn-secondary btn-small luxar-view-retry"
+              onClick={() => {
+                loadedSrcRef.current = null
+                setRetryToken((t) => t + 1)
+              }}
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
