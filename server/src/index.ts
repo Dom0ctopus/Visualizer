@@ -421,6 +421,20 @@ async function readySegmentations(ids: unknown): Promise<ReadySegmentation[] | s
   return out
 }
 
+/**
+ * A segment or system name made safe as a node name in a Luxar scene. Nodes
+ * are directories that the viewer fetches by URL without encoding their
+ * names, so '#', '?', '%' and '\' would cut or alter the URL ("Not found:
+ * v2 group"), and '/' would nest a node. Those, characters file systems
+ * reject and leading/trailing dots and spaces become '-' or are dropped;
+ * hover labels keep the full name.
+ */
+function sceneNodeName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const safe = name.replace(/[/\\#?%:*"<>|\u0000-\u001f]/g, '-').replace(/^[\s.]+|[\s.]+$/g, '')
+  return safe || 'segment'
+}
+
 function segmentDisplayName(seg: { name: string; system: string }): string {
   return seg.system === 'Ungrouped' ? seg.name : `${seg.system} · ${seg.name}`
 }
@@ -479,11 +493,13 @@ app.post('/api/luxar/meshes', express.json(), async (req, res) => {
     for (const entry of manifest.segments) {
       const info = infos.find((i) => i.layer === entry.layer && i.labelValue === entry.labelValue)
       const name = info ? segmentDisplayName(info) : `Layer ${entry.layer} label ${entry.labelValue}`
-      // Layer names are node names in the archive: unique, and no '/'.
-      let layerName = name.replaceAll('/', '-')
-      if (usedNames.has(layerName)) layerName = `${layerName} (${record.name.replaceAll('/', '-')})`
-      for (let n = 2; usedNames.has(layerName); n++) layerName = `${name.replaceAll('/', '-')} (${n})`
-      usedNames.add(layerName)
+      // Layer names are node names in the archive (see sceneNodeName),
+      // unique even on a case-insensitive file system.
+      const base = sceneNodeName(name)
+      let layerName = base
+      if (usedNames.has(layerName.toLowerCase())) layerName = `${base} (${sceneNodeName(record.name)})`
+      for (let n = 2; usedNames.has(layerName.toLowerCase()); n++) layerName = `${base} (${n})`
+      usedNames.add(layerName.toLowerCase())
       const segmentKey = `${entry.layer}:${entry.labelValue}`
       const override = colorOverrides?.[record.id]?.[segmentKey]
       segments.push({

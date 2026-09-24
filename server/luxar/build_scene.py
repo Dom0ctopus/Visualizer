@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import re
 import shutil
 import sys
 import time
@@ -75,6 +76,14 @@ def front_camera(lo: np.ndarray, hi: np.ndarray):
         near=float(max(0.01, distance * 0.01)),
         far=float(distance * 10.0 + size * 5.0),
     )
+
+
+def scene_node_name(name: str) -> str:
+    """As sceneNodeName in server/src/index.ts: node names become URL paths
+    the viewer doesn't encode, so '#', '?', '%', '\\' and '/' (and characters
+    file systems reject) are replaced."""
+    safe = re.sub(r'[/\\#?%:*"<>|\x00-\x1f]', "-", name).strip(" .\t\n")
+    return safe or "layer"
 
 
 def compile_to(output: Path, build) -> None:
@@ -787,13 +796,21 @@ def color_atlas(spec: dict, entries: list, centers, amplitudes, cholesky, splat_
         )
         scene.attrs["title"] = spec.get("title", "Splat atlas")
 
+        used_names: set[str] = set()
+
         def add_layer(name: str, mask: np.ndarray, opacity: float) -> None:
             n = int(mask.sum())
             if n == 0:
                 return
             ids = splat_ids[mask]
+            node = base = scene_node_name(name)
+            for k in range(2, 10_000):
+                if node.lower() not in used_names:
+                    break
+                node = f"{base} ({k})"
+            used_names.add(node.lower())
             scene.add_gsplats(
-                name=name.replace("/", "-"),
+                name=node,
                 centers=centers[mask],
                 amplitudes=amplitudes[mask],
                 cholesky_factors=cholesky[mask],

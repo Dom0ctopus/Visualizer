@@ -93,6 +93,8 @@ interface StoredSceneStatus {
   /** Mesh scenes: which segment each Luxar layer shows. */
   layers?: SceneLayer[]
   builderVersion?: string
+  /** SCENE_FORMAT when built (absent: 1). */
+  format?: number
 }
 
 /** Ties a Luxar layer (by name) to the app's segment, so the segment tree
@@ -195,8 +197,13 @@ function sceneDir(key: string): string {
   return path.join(LUXAR_DIR, key)
 }
 
+/** Bumped when scenes built before a change can't be reused (2: node names
+ *  made URL-safe; older scenes whose names had '#', '?' or '%' don't load),
+ *  so they're rebuilt under new keys rather than served. */
+const SCENE_FORMAT = 2
+
 export function sceneKey(kind: LuxarSceneKind, parts: string[]): string {
-  return `${kind}-${createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 16)}`
+  return `${kind}-${createHash('sha1').update([`format:${SCENE_FORMAT}`, ...parts].join('|')).digest('hex').slice(0, 16)}`
 }
 
 const statuses = new Map<string, StoredSceneStatus>()
@@ -214,6 +221,11 @@ export async function initLuxarScenes(): Promise<void> {
   for (const key of await readdir(LUXAR_DIR)) {
     try {
       const status = JSON.parse(await readFile(path.join(sceneDir(key), 'status.json'), 'utf8')) as StoredSceneStatus
+      if ((status.format ?? 1) < SCENE_FORMAT) {
+        // Unreachable: its key predates the current format.
+        await rm(sceneDir(key), { recursive: true, force: true })
+        continue
+      }
       if (status.status === 'pending') {
         status.status = 'failed'
         status.error = 'Interrupted by a server restart; rebuild to try again.'
@@ -277,7 +289,7 @@ export async function invalidateScenesFor(recordId: string, kind?: LuxarSceneKin
 
 function startBuild(key: string, kind: LuxarSceneKind, label: string, spec: object, inputIds: string[], quality?: AtlasQuality, layers?: SceneLayer[]): void {
   const builderVersion = BUILDER_VERSION
-  void persistStatus(key, { kind, status: 'pending', inputIds, quality, layers, builderVersion })
+  void persistStatus(key, { kind, status: 'pending', inputIds, quality, layers, builderVersion, format: SCENE_FORMAT })
   enqueueJob('luxar', key, label, async (ctx) => {
     if (!statuses.has(key)) return // invalidated while queued
     const dir = sceneDir(key)
@@ -288,13 +300,13 @@ function startBuild(key: string, kind: LuxarSceneKind, label: string, spec: obje
     try {
       await runBuilder(key, kind, specPath, logPath, (p) => ctx.setProgress(p))
       if (!statuses.has(key)) return
-      await persistStatus(key, { kind, status: 'ready', inputIds, quality, layers, builderVersion, builtAt: new Date().toISOString() })
+      await persistStatus(key, { kind, status: 'ready', inputIds, quality, layers, builderVersion, format: SCENE_FORMAT, builtAt: new Date().toISOString() })
       console.log(`[luxar] ${label}: built in ${Math.round((Date.now() - t0) / 1000)}s`)
     } catch (e) {
       if (!statuses.has(key)) return
       const error = e instanceof Error ? e.message : String(e)
       console.error(`[luxar] ${label} failed: ${error} (full log: ${logPath})`)
-      await persistStatus(key, { kind, status: 'failed', inputIds, quality, layers, builderVersion, error })
+      await persistStatus(key, { kind, status: 'failed', inputIds, quality, layers, builderVersion, format: SCENE_FORMAT, error })
     }
   })
 }
@@ -409,7 +421,9 @@ export function requestAtlas(req: AtlasRequest): SceneStatus {
   // The fit is shared by every coloring of the same inputs, so once one
   // coloring is built, another (e.g. switching color scheme) builds without
   // being asked: it only recolors. An explicit rebuild refits.
-  const fitDir = fitDirFor(atlasKey(req.volumeId, req.segmentationIds, req.quality))
+  // Keyed by the fit's inputs only (not colors or the scene format).
+  const fitKey = createHash('sha1').update([req.volumeId, ...[...req.segmentationIds].sort(), req.quality].join('|')).digest('hex').slice(0, 16)
+  const fitDir = fitDirFor(fitKey)
   const fitCache = path.join(fitDir, 'fit.npz')
   const recolorOnly = !existing && existsSync(fitCache)
   const wantsBuild = (req.build && (!existing || (req.rebuild && existing.status !== 'pending'))) || recolorOnly || staleFailure(existing)
