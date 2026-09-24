@@ -4,12 +4,14 @@ import json, numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import sys
 # Usage: sample_reference_colors.py <figures dir> <output dir>
-# The figures dir holds the page images as 25.webp (Fig 3.9), 26.webp (Fig 3.12)
-# and 27.webp (Fig 3.19). Requires numpy and Pillow.
+# The figures dir holds the page images as 25.webp (Fig 3.9), 26.webp (Fig 3.12),
+# 27.webp (Fig 3.19) and 28.png (cephalopod brain, dark-field photo).
+# Requires numpy and Pillow.
 IMG=sys.argv[1]
 OUT=sys.argv[2]
-imgs={n: np.asarray(Image.open(f'{IMG}/{n}.webp').convert('RGB')).astype(np.float64) for n in (25,26,27)}
-FIG={25:'Fig. 3.9',26:'Fig. 3.12',27:'Fig. 3.19'}
+FILES={25:'25.webp',26:'26.webp',27:'27.webp',28:'28.png'}
+imgs={n: np.asarray(Image.open(f'{IMG}/{f}').convert('RGB')).astype(np.float64) for n,f in FILES.items()}
+FIG={25:'Fig. 3.9',26:'Fig. 3.12',27:'Fig. 3.19',28:'Brain photo (b)'}
 # White references (white foam) -> per-channel gains; None = uncorrected.
 WHITE={25:[(220,200,400,300),(1250,200,1350,300)], 27:[(860,250,960,330),(870,975,940,1005)]}
 def region(n,r):
@@ -53,6 +55,9 @@ S=[
  ('spermatophoric (Needham\'s) sac',27,(1035,350,1065,420),'spss (b)'),
  ('spermatophoric sac gland',27,(1150,500,1175,530),'spsg (b)'),
  ('terminal organ',27,(1055,230,1080,260),'to (b)'),
+ ('brain',28,(155,410,195,450),'supraoesophageal mass'),
+ ('brain',28,(95,395,130,440),'optic lobe, left (cream part)'),
+ ('brain',28,(215,395,250,435),'optic lobe, right (cream part)'),
 ]
 samples=[]
 for cls,n,r,note in S:
@@ -61,8 +66,24 @@ for cls,n,r,note in S:
     corrected = n in gains and not (n==27 and r[0]<700)
     wb=np.clip(raw*gains[n],0,255) if corrected else raw
     samples.append(dict(cls=cls,fig=FIG[n],img=n,rect=r,note=note,raw=raw.round().tolist(),color=wb.round().tolist(),white_balanced=bool(corrected)))
-classes={}
-for s in samples: classes.setdefault(s['cls'],[]).append(s)
-palette={c:np.median([s['color'] for s in v],axis=0).round().tolist() for c,v in classes.items()}
+# Organs -> general tissue classes (what the app's palette uses): colors
+# are for a kind of tissue, not a species' particular organ.
+GENERAL={
+ 'brain':'nervous','gill':'gill','gill vessel':'vessel','aorta / vessels':'vessel',
+ 'systemic heart':'heart','branchial heart':'branchialHeart','digestive gland':'digestiveGland',
+ 'ink sac':'pigmented','posterior salivary gland':'exocrineGland','buccal mass':'muscle',
+ 'crop / oesophagus':'gutWall','caecum':'gutWall','intestine':'gutWall','stomach':'stomach',
+ 'testis':'gonad','spermatophoric gland':'reproductiveTract',"spermatophoric (Needham's) sac":'reproductiveTract',
+ 'spermatophoric sac gland':'reproductiveTract','terminal organ':'reproductiveTract',
+}
+groups={}
+for s in samples: groups.setdefault(GENERAL[s['cls']],[]).append(s)
+palette={}
+for g,v in groups.items():
+    # Prefer white-balanced samples; in-situ/uncorrected ones only if none.
+    use=[s for s in v if s['white_balanced']] or v
+    col=np.median([s['color'] for s in use],axis=0).round().astype(int).tolist()
+    palette[g]=dict(color=col,hex='#%02x%02x%02x'%tuple(col),white_balanced=any(s['white_balanced'] for s in use),
+                    samples=len(use),organs=sorted({s['cls'] for s in use}),figures=sorted({s['fig'] for s in use}))
 json.dump(dict(samples=samples,palette=palette),open(f'{OUT}/samples.json','w'),indent=1)
-for c,v in palette.items(): print(f"{c:32s} #{int(v[0]):02x}{int(v[1]):02x}{int(v[2]):02x}  from {len(classes[c])} sample(s)")
+for g,v in palette.items(): print(f"{g:20s} {v['hex']}  {'WB ' if v['white_balanced'] else 'raw'} n={v['samples']}  {', '.join(v['organs'])}")

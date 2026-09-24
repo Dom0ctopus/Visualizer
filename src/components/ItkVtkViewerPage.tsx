@@ -191,7 +191,7 @@ function LuxarSceneLine({
 function RealisticCoverage({ segmentations }: { segmentations: ZarrLoadedSegmentation[] }) {
   let total = 0
   const unmatched: string[] = []
-  const provisional = new Set<string>()
+  const uncorrected = new Set<string>()
   const byFile: string[] = []
   for (const l of segmentations) {
     for (const seg of l.segments) {
@@ -199,22 +199,22 @@ function RealisticCoverage({ segmentations }: { segmentations: ZarrLoadedSegment
       const match = realisticColor(seg.name, seg.system, l.name)
       if (!match) unmatched.push(`${seg.name} (${l.name})`)
       else {
-        if (match.tissue.confidence === 'provisional') provisional.add(match.tissue.label)
+        if (match.tissue.confidence === 'uncorrected') uncorrected.add(match.tissue.label)
         if (match.via === 'file') byFile.push(`${seg.name} -> ${match.tissue.label}`)
       }
     }
   }
   const details = [
     unmatched.length ? `Unmatched (file colors):\n  ${unmatched.join('\n  ')}` : '',
-    byFile.length ? `Matched by file, not name:\n  ${byFile.join('\n  ')}` : ''
+    byFile.length ? `Matched by file, not name:\n  ${byFile.join('\n  ')}` : '',
+    uncorrected.size ? `Sampled without a white reference (lower confidence): ${[...uncorrected].join(', ')}` : ''
   ]
     .filter(Boolean)
     .join('\n\n')
   return (
     <p className="tf-hint color-scheme-hint" title={details || undefined}>
-      {total - unmatched.length} of {total} segments colored from dissection photos
+      {total - unmatched.length} of {total} segments colored by tissue type
       {unmatched.length > 0 && `; ${unmatched.length} unmatched keep their file colors`}
-      {provisional.size > 0 && `. Provisional (no reference photo yet): ${[...provisional].join(', ')}`}
       {details && ' (hover for details)'}
     </p>
   )
@@ -920,7 +920,7 @@ export function ItkVtkViewerPage() {
                 </button>
                 <button
                   className={zarrSeg.colorScheme === 'realistic' ? 'active' : ''}
-                  title="Tissue colors sampled from photographs of fresh dissections, matched to segments by name"
+                  title="General tissue-type colors (nervous tissue, muscle, gut, gland, ...) sampled from dissection photographs, matched to segments by name"
                   onClick={() => zarrSeg.setColorScheme('realistic')}
                 >
                   Real to life

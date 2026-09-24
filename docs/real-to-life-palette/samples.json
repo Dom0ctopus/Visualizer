@@ -574,98 +574,291 @@
     192.0
    ],
    "white_balanced": true
+  },
+  {
+   "cls": "brain",
+   "fig": "Brain photo (b)",
+   "img": 28,
+   "rect": [
+    155,
+    410,
+    195,
+    450
+   ],
+   "note": "supraoesophageal mass",
+   "raw": [
+    201.0,
+    190.0,
+    189.0
+   ],
+   "color": [
+    201.0,
+    190.0,
+    189.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "brain",
+   "fig": "Brain photo (b)",
+   "img": 28,
+   "rect": [
+    95,
+    395,
+    130,
+    440
+   ],
+   "note": "optic lobe, left (cream part)",
+   "raw": [
+    210.0,
+    205.0,
+    199.0
+   ],
+   "color": [
+    210.0,
+    205.0,
+    199.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "brain",
+   "fig": "Brain photo (b)",
+   "img": 28,
+   "rect": [
+    215,
+    395,
+    250,
+    435
+   ],
+   "note": "optic lobe, right (cream part)",
+   "raw": [
+    219.0,
+    220.0,
+    223.0
+   ],
+   "color": [
+    219.0,
+    220.0,
+    223.0
+   ],
+   "white_balanced": false
   }
  ],
  "palette": {
-  "gill": [
-   154.0,
-   133.0,
-   117.0
-  ],
-  "gill vessel": [
-   204.0,
-   178.0,
-   149.0
-  ],
-  "branchial heart": [
-   106.0,
-   106.0,
-   115.0
-  ],
-  "systemic heart": [
-   227.0,
-   190.0,
-   160.0
-  ],
-  "aorta / vessels": [
-   212.0,
-   204.0,
-   192.0
-  ],
-  "digestive gland": [
-   100.0,
-   77.0,
-   57.0
-  ],
-  "ink sac": [
-   45.0,
-   61.0,
-   75.0
-  ],
-  "posterior salivary gland": [
-   202.0,
-   166.0,
-   119.0
-  ],
-  "buccal mass": [
-   166.0,
-   141.0,
-   118.0
-  ],
-  "crop / oesophagus": [
-   173.0,
-   133.0,
-   90.0
-  ],
-  "stomach": [
-   144.0,
-   108.0,
-   80.0
-  ],
-  "caecum": [
-   174.0,
-   142.0,
-   106.0
-  ],
-  "intestine": [
-   185.0,
-   144.0,
-   107.0
-  ],
-  "testis": [
-   201.0,
-   176.0,
-   152.0
-  ],
-  "spermatophoric gland": [
-   226.0,
-   191.0,
-   159.0
-  ],
-  "spermatophoric (Needham's) sac": [
-   231.0,
-   183.0,
-   154.0
-  ],
-  "spermatophoric sac gland": [
-   177.0,
-   129.0,
-   104.0
-  ],
-  "terminal organ": [
-   223.0,
-   207.0,
-   192.0
-  ]
+  "gill": {
+   "color": [
+    158,
+    135,
+    120
+   ],
+   "hex": "#9e8778",
+   "white_balanced": true,
+   "samples": 2,
+   "organs": [
+    "gill"
+   ],
+   "figures": [
+    "Fig. 3.9"
+   ]
+  },
+  "vessel": {
+   "color": [
+    210,
+    183,
+    153
+   ],
+   "hex": "#d2b799",
+   "white_balanced": true,
+   "samples": 3,
+   "organs": [
+    "aorta / vessels",
+    "gill vessel"
+   ],
+   "figures": [
+    "Fig. 3.9"
+   ]
+  },
+  "branchialHeart": {
+   "color": [
+    106,
+    106,
+    115
+   ],
+   "hex": "#6a6a73",
+   "white_balanced": true,
+   "samples": 2,
+   "organs": [
+    "branchial heart"
+   ],
+   "figures": [
+    "Fig. 3.9"
+   ]
+  },
+  "heart": {
+   "color": [
+    227,
+    190,
+    160
+   ],
+   "hex": "#e3bea0",
+   "white_balanced": true,
+   "samples": 1,
+   "organs": [
+    "systemic heart"
+   ],
+   "figures": [
+    "Fig. 3.9"
+   ]
+  },
+  "digestiveGland": {
+   "color": [
+    100,
+    77,
+    57
+   ],
+   "hex": "#644d39",
+   "white_balanced": false,
+   "samples": 2,
+   "organs": [
+    "digestive gland"
+   ],
+   "figures": [
+    "Fig. 3.12"
+   ]
+  },
+  "pigmented": {
+   "color": [
+    45,
+    61,
+    75
+   ],
+   "hex": "#2d3d4b",
+   "white_balanced": false,
+   "samples": 1,
+   "organs": [
+    "ink sac"
+   ],
+   "figures": [
+    "Fig. 3.12"
+   ]
+  },
+  "exocrineGland": {
+   "color": [
+    202,
+    166,
+    119
+   ],
+   "hex": "#caa677",
+   "white_balanced": false,
+   "samples": 2,
+   "organs": [
+    "posterior salivary gland"
+   ],
+   "figures": [
+    "Fig. 3.12"
+   ]
+  },
+  "muscle": {
+   "color": [
+    166,
+    141,
+    118
+   ],
+   "hex": "#a68d76",
+   "white_balanced": false,
+   "samples": 1,
+   "organs": [
+    "buccal mass"
+   ],
+   "figures": [
+    "Fig. 3.12"
+   ]
+  },
+  "gutWall": {
+   "color": [
+    174,
+    142,
+    106
+   ],
+   "hex": "#ae8e6a",
+   "white_balanced": false,
+   "samples": 3,
+   "organs": [
+    "caecum",
+    "crop / oesophagus",
+    "intestine"
+   ],
+   "figures": [
+    "Fig. 3.12"
+   ]
+  },
+  "stomach": {
+   "color": [
+    144,
+    108,
+    80
+   ],
+   "hex": "#906c50",
+   "white_balanced": false,
+   "samples": 1,
+   "organs": [
+    "stomach"
+   ],
+   "figures": [
+    "Fig. 3.12"
+   ]
+  },
+  "gonad": {
+   "color": [
+    220,
+    178,
+    149
+   ],
+   "hex": "#dcb295",
+   "white_balanced": true,
+   "samples": 1,
+   "organs": [
+    "testis"
+   ],
+   "figures": [
+    "Fig. 3.19"
+   ]
+  },
+  "reproductiveTract": {
+   "color": [
+    224,
+    187,
+    156
+   ],
+   "hex": "#e0bb9c",
+   "white_balanced": true,
+   "samples": 4,
+   "organs": [
+    "spermatophoric (Needham's) sac",
+    "spermatophoric gland",
+    "spermatophoric sac gland",
+    "terminal organ"
+   ],
+   "figures": [
+    "Fig. 3.19"
+   ]
+  },
+  "nervous": {
+   "color": [
+    210,
+    205,
+    199
+   ],
+   "hex": "#d2cdc7",
+   "white_balanced": false,
+   "samples": 3,
+   "organs": [
+    "brain"
+   ],
+   "figures": [
+    "Brain photo (b)"
+   ]
+  }
  }
 }
