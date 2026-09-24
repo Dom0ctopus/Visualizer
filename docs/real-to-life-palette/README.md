@@ -29,8 +29,8 @@ The figures themselves are not included here.
 - Muscle is sampled from a buccal mass only; body-wall muscle (mantle, arms) can look different.
 - Tissue types with no sample yet (e.g. skin) are left unmatched and keep their file colors.
 
+To add a reference: add the image and its rectangle(s) to `sample_reference_colors.py` (with the organ's class in `GENERAL`), re-run it, and copy the class color into `realisticPalette.ts`.
+
 ## Surface finish
 
 Each class also has a finish used for 3D shading in the Basic mesh viewer: hard structures (beak/chitin, cartilage) get a clear-coated material with crisp highlights so they read as hard; soft tissue keeps a satin finish. The finish follows the tissue type in either color scheme.
-
-To add a reference: add the image and its rectangle(s) to `sample_reference_colors.py` (with the organ's class in `GENERAL`), re-run it, and copy the class color into `realisticPalette.ts`.
