@@ -98,6 +98,12 @@ def compile_to(output: Path, build) -> None:
 # Surfaces above this many triangles get a decimated LOD ladder; smaller ones
 # are cheap enough to draw whole.
 MESH_LOD_MIN_TRIANGLES = 200_000
+# The viewer loads each mesh node whole and refuses one over 512 MiB decoded
+# (~18M triangles with normals and colors). Larger surfaces are split
+# spatially into parts of at most this many triangles, each its own node
+# (with its own LOD ladder) under one layer group; smaller parts also let the
+# viewer skip the ones out of view.
+MESH_PART_MAX_TRIANGLES = 2_000_000
 
 
 def read_mesh_bin(path: str) -> tuple[np.ndarray, np.ndarray]:
@@ -111,11 +117,50 @@ def read_mesh_bin(path: str) -> tuple[np.ndarray, np.ndarray]:
     return vertices, faces
 
 
+def vertex_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Area-weighted vertex normals over the whole surface (so a split
+    surface shades seamlessly across part boundaries)."""
+    v0 = vertices[faces[:, 0]].astype(np.float64)
+    face_normals = np.cross(vertices[faces[:, 1]] - v0, vertices[faces[:, 2]] - v0)
+    normals = np.zeros((len(vertices), 3), dtype=np.float64)
+    for corner in range(3):
+        np.add.at(normals, faces[:, corner], face_normals)
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    return (normals / np.where(lengths > 0, lengths, 1.0)).astype(np.float32)
+
+
+def spatial_face_parts(vertices: np.ndarray, faces: np.ndarray, max_faces: int) -> list[np.ndarray]:
+    """Splits the faces into spatially compact groups of at most `max_faces`
+    each: recursive median cuts of the face centroids along each group's
+    longest axis."""
+    from luxar.mesh.split import face_centroids
+
+    centroids = face_centroids(vertices, faces)
+    pending = [np.arange(len(faces))]
+    parts = []
+    while pending:
+        idx = pending.pop()
+        if len(idx) <= max_faces:
+            parts.append(idx)
+            continue
+        c = centroids[idx]
+        axis = int(np.argmax(c.max(axis=0) - c.min(axis=0)))
+        order = np.argsort(c[:, axis], kind="stable")
+        half = len(idx) // 2
+        pending += [idx[order[:half]], idx[order[half:]]]
+    return parts
+
+
 def build_meshes(spec: dict) -> None:
     segments = spec["segments"]
-    loaded = []
+    max_part = int(spec.get("maxPartTriangles", MESH_PART_MAX_TRIANGLES))
+
+    # Bounds (for the camera) from a first pass, so only one surface is ever
+    # in memory: micro-CT segmentations can total hundreds of millions of
+    # triangles.
     lo = np.full(3, np.inf)
     hi = np.full(3, -np.inf)
+    total = 0
     for i, seg in enumerate(segments):
         progress(f"reading mesh {i + 1}/{len(segments)}")
         vertices, faces = read_mesh_bin(seg["file"])
@@ -123,37 +168,61 @@ def build_meshes(spec: dict) -> None:
             continue
         lo = np.minimum(lo, vertices.min(axis=0))
         hi = np.maximum(hi, vertices.max(axis=0))
-        loaded.append((seg, vertices, faces))
-    if not loaded:
+        total += len(faces)
+    if total == 0:
         raise SystemExit("No non-empty segment meshes to compile")
 
     def build(compiler) -> None:
         from luxar.core.viewer_config import ViewerConfig
+        from luxar.mesh.split import split_mesh_by_faces
 
         scene = compiler.create_scene(
             dimensions=xyz_dimensions(),
             viewer_config=ViewerConfig(camera=front_camera(lo, hi)),
         )
         scene.attrs["title"] = spec.get("title", "Surface meshes")
-        for i, (seg, vertices, faces) in enumerate(loaded):
-            progress(f"compiling mesh {i + 1}/{len(loaded)} ({seg['name']}, {len(faces):,} triangles)")
-            kwargs = {}
-            if len(faces) > MESH_LOD_MIN_TRIANGLES:
-                # 'cluster' (vertex clustering) rather than QEM: it stays fast
-                # on the tens-of-millions-of-triangle surfaces micro-CT
-                # segmentations produce.
-                kwargs["substitutive_lod"] = {"method": "cluster"}
-            scene.add_mesh(
-                name=seg["layerName"],
-                vertices=vertices,
-                faces=faces,
-                colors=tuple(float(c) for c in seg["color"]),
-                labels=[seg["name"]] * len(vertices),
-                shading="smooth" if len(faces) > 0 else None,
-                opacity=float(seg.get("opacity", 1.0)),
-                layer=True,
-                **kwargs,
-            )
+        done = 0
+        for seg in segments:
+            vertices, faces = read_mesh_bin(seg["file"])
+            if len(faces) == 0:
+                continue
+            normals = vertex_normals(vertices, faces)
+            color = tuple(float(c) for c in seg["color"])
+
+            def add(parent, name: str, v: np.ndarray, f: np.ndarray, n: np.ndarray, **attrs) -> None:
+                if len(f) > MESH_LOD_MIN_TRIANGLES:
+                    # 'cluster' (vertex clustering) rather than QEM: it stays
+                    # fast on the huge surfaces micro-CT segmentations produce.
+                    # Two levels at 8x (1/8, 1/64) rather than Luxar's default
+                    # three at 4x: ~25% faster to build, and the coarse end is
+                    # what matters for a whole-specimen view.
+                    attrs["substitutive_lod"] = {"method": "cluster", "levels": 2, "K": 8}
+                parent.add_mesh(
+                    name=name,
+                    vertices=v,
+                    faces=f,
+                    normals=n,
+                    normal_dims=[0, 1, 2],
+                    colors=color,
+                    labels=[seg["name"]] * len(v),
+                    shading="smooth",
+                    **attrs,
+                )
+
+            if len(faces) <= max_part:
+                progress(f"compiling {seg['name']} ({len(faces):,} triangles; {done:,}/{total:,} done)")
+                add(scene, seg["layerName"], vertices, faces, normals, layer=True)
+            else:
+                group = scene.add_group(seg["layerName"], layer=True)
+                parts = split_mesh_by_faces(faces, spatial_face_parts(vertices, faces, max_part))
+                for j, part in enumerate(parts):
+                    progress(f"compiling {seg['name']} part {j + 1}/{len(parts)} ({len(faces):,} triangles; {done:,}/{total:,} done)")
+                    vi = part.vertex_index
+                    add(group, f"part_{j}", vertices[vi], part.faces, normals[vi])
+                    done += len(part.faces)
+                done -= len(faces)
+            done += len(faces)
+            del vertices, faces, normals
 
     compile_to(Path(spec["output"]), build)
 
@@ -200,75 +269,80 @@ class Multiscale:
         self.levels.sort(key=lambda lv: float(np.prod(lv["scale"])))
 
 
-def axis_index_map(n_out: int, out_origin: float, out_spacing: float, in_origin: float, in_spacing: float, n_in: int) -> tuple[np.ndarray, np.ndarray]:
-    """Nearest input index along one axis for each output voxel center, and
-    whether it falls inside the input."""
-    idx = np.round((out_origin + np.arange(n_out) * out_spacing - in_origin) / in_spacing).astype(np.int64)
-    valid = (idx >= 0) & (idx < n_in)
-    return np.clip(idx, 0, n_in - 1), valid
+def axis_index_map(n_in: int, in_origin: float, in_spacing: float, out_origin: float, out_spacing: float, n_out: int) -> np.ndarray:
+    """For each input voxel along one axis, the output (grid) voxel whose
+    cell contains its center, or -1 outside the grid."""
+    idx = np.floor((in_origin + np.arange(n_in) * in_spacing - out_origin) / out_spacing + 0.5).astype(np.int64)
+    idx[(idx < 0) | (idx >= n_out)] = -1
+    return idx
 
 
-def resample_labels_onto(grid_shape, grid_origin, grid_spacing, level, lut: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Nearest-neighbor resample of a label level onto the atlas grid, mapped
-    through `lut` (label value -> atlas id). Stores are all axis-aligned LPS
-    (flips are baked in at conversion), so this is separable per axis."""
-    maps = [axis_index_map(grid_shape[a], grid_origin[a], grid_spacing[a], level["translation"][a], level["scale"][a], level["shape"][a]) for a in range(3)]
-    data = np.asarray(level["array"][...])
-    sub = data[np.ix_(maps[0][0], maps[1][0], maps[2][0])]
-    inside = maps[0][1][:, None, None] & maps[1][1][None, :, None] & maps[2][1][None, None, :]
-    ids = lut[np.clip(sub, 0, len(lut) - 1)] * inside
-    return ids, ids > 0
+# Label voxels processed at a time (the per-voxel index arrays are 8 bytes
+# each, so this bounds working memory to a few hundred MB).
+SLAB_VOXELS = 16 * 1024 * 1024
 
 
-# Bytes of label data read at a time when sampling splat labels from a
-# segmentation's finest level.
-SLAB_BYTES = 256 * 1024 * 1024
+def segment_coverage(level, grid_shape, grid_origin, grid_spacing, lut: np.ndarray, into: dict) -> None:
+    """Accumulates, for each atlas id in `lut`, how many of this label
+    level's voxels fall in each atlas-grid voxel -- a sparse (flat grid
+    index -> count) per id in `into`. Counting at a finer level than the
+    grid keeps structures thinner than a grid voxel (vessels, nerves) as
+    partial coverage instead of losing them to nearest-neighbor sampling.
+    Reads the level in z slabs."""
+    shape = level["shape"]
+    maps = [axis_index_map(shape[a], level["translation"][a], level["scale"][a], grid_origin[a], grid_spacing[a], grid_shape[a]) for a in range(3)]
+    ny, nx = grid_shape[1], grid_shape[2]
+    yx = np.where((maps[1][:, None] >= 0) & (maps[2][None, :] >= 0), maps[1][:, None] * nx + maps[2][None, :], -1)
+    slab = max(1, SLAB_VOXELS // max(1, shape[1] * shape[2]))
+    for z0 in range(0, shape[0], slab):
+        block = np.asarray(level["array"][z0 : min(z0 + slab, shape[0])])
+        ids = lut[np.clip(block, 0, len(lut) - 1)]
+        gz = maps[0][z0 : z0 + block.shape[0]]
+        flat = np.where((gz[:, None, None] >= 0) & (yx[None] >= 0), gz[:, None, None] * (ny * nx) + yx[None], -1)
+        hit = (ids > 0) & (flat >= 0)
+        if not hit.any():
+            continue
+        ids_hit = ids[hit]
+        flat_hit = flat[hit]
+        for atlas_id in np.unique(ids_hit):
+            cells, counts = np.unique(flat_hit[ids_hit == atlas_id], return_counts=True)
+            into.setdefault(int(atlas_id), []).append((cells, counts))
 
 
-def sample_finest_labels(points_zyx_mm: np.ndarray, level, lut: np.ndarray, out: np.ndarray) -> None:
-    """For each point (physical [z, y, x] mm), writes the atlas id of the
-    finest-level label voxel containing it into `out`, where nonzero. Reads
-    the level in z slabs so a large segmentation never loads whole."""
-    idx = np.round((points_zyx_mm - level["translation"]) / level["scale"]).astype(np.int64)
-    shape = np.asarray(level["shape"])
-    inside = np.all((idx >= 0) & (idx < shape), axis=1)
-    order = np.argsort(idx[:, 0], kind="stable")
-    order = order[inside[order]]
-    if len(order) == 0:
-        return
-    z_sorted = idx[order, 0]
-    slice_bytes = int(shape[1] * shape[2] * level["array"].dtype.itemsize)
-    slab = max(1, SLAB_BYTES // max(1, slice_bytes))
-    z = int(z_sorted[0])
-    while z <= int(z_sorted[-1]):
-        lo = np.searchsorted(z_sorted, z)
-        hi = np.searchsorted(z_sorted, z + slab)
-        if hi > lo:
-            sel = order[lo:hi]
-            block = np.asarray(level["array"][z : min(z + slab, int(shape[0]))])
-            values = block[idx[sel, 0] - z, idx[sel, 1], idx[sel, 2]]
-            ids = lut[np.clip(values, 0, len(lut) - 1)]
-            hit = ids > 0
-            out[sel[hit]] = ids[hit]
-        nxt = np.searchsorted(z_sorted, z + slab)
-        if nxt >= len(z_sorted):
-            break
-        z = int(z_sorted[nxt])
+def coverage_grid(parts: list, grid_size: int, voxels_per_cell: float) -> np.ndarray:
+    """Dense per-grid-voxel coverage fraction (0-1) from segment_coverage's
+    sparse counts."""
+    out = np.zeros(grid_size, dtype=np.float32)
+    for cells, counts in parts:
+        np.add.at(out, cells, counts.astype(np.float32))
+    return np.minimum(out / voxels_per_cell, 1.0)
 
 
-# Fitted intensity of labeled voxels: LABELED_FLOOR + (1 - floor) * windowed CT.
+# Fitted intensity of segment tissue: coverage x (LABELED_FLOOR + (1 - floor)
+# x windowed CT). Artistic license, as in Luxar's own CT atlas: left as-is,
+# dense bone takes nearly all the brightness and soft tissue barely shows, so
+# segment tissue is lifted onto a floor, keeping its CT texture on top.
 LABELED_FLOOR = 0.4
-# Fitted intensity of unlabeled context tissue: CONTEXT_SCALE * windowed CT.
+# Fitted intensity of unlabeled context tissue: CONTEXT_SCALE x windowed CT.
 CONTEXT_SCALE = 0.6
-# Per-layer brightness equalization. The viewer draws each splat as a flat
-# blob summed additively, so a layer's on-screen brightness grows with how
-# many splats stack along a ray (bone: many small ones) and with its color's
-# luminance (white bone vs dark red vessels) -- left alone, the skeleton blows
-# out and vessels vanish. Each layer's gain brings its estimated brightness
-# (luminance x summed splat footprint per projected area, seen from the
-# front) to the median layer's, times ATLAS_EXPOSURE, within
-# LAYER_GAIN_RANGE. The viewer's Layers panel can still adjust each layer.
-ATLAS_EXPOSURE = 1.25
+# Share of the splat budget for the unlabeled-tissue context layer, and its
+# brightness gain: a faint glow that shows the body without veiling the
+# segments inside it.
+CONTEXT_BUDGET_SHARE = 0.1
+CONTEXT_GAIN = 0.1
+# Each segment is fitted on its own, with a budget proportional to the square
+# root of its size (so a large organ can't take the whole budget and starve
+# small structures), but at least this many splats.
+MIN_SEGMENT_SPLATS = 40
+# Per-segment brightness equalization. The viewer draws each splat as a flat
+# blob summed additively, so on-screen brightness grows with how many splats
+# stack along a ray and with the color's luminance -- left alone, dense or
+# white structures blow out and thin or dark ones vanish. Each segment's gain
+# brings its estimated brightness (luminance x summed splat footprint per
+# projected area, seen from the front) to the median segment's, times
+# ATLAS_EXPOSURE, within LAYER_GAIN_RANGE. The viewer's Layers panel can
+# still adjust each layer.
+ATLAS_EXPOSURE = 0.9
 LAYER_GAIN_RANGE = (0.2, 2.5)
 
 
@@ -285,12 +359,40 @@ def layer_brightness(centers: np.ndarray, amplitudes: np.ndarray, cholesky: np.n
     return luminance * float((amplitudes * footprint).sum()) / (len(cells) * pixel * pixel)
 
 
-def build_atlas(spec: dict) -> None:
+def fit_region(values: np.ndarray, budget: int, quality: dict, on_pass=None):
+    """Fits splats to one region's (cropped) intensity volume; returns the
+    GSplatData, or None if nothing could be fitted."""
     from luxar.gsplats import fit_progressive_gaussian_splats
-    from luxar.gsplats.gsplat_data import GSplatData
 
+    budget = max(1, int(budget))
+    return fit_progressive_gaussian_splats(
+        np.ascontiguousarray(values, dtype=np.float32),
+        max_splats=budget,
+        max_splats_per_pass=min(int(quality["splatsPerPass"]), budget),
+        iters_per_pass=int(quality["itersPerPass"]),
+        residual_pass_min_iters=int(quality.get("residualMinIters", 500)),
+        psnr_patience=0.1,
+        on_pass_complete=on_pass,
+        # Luxar's default floor="auto" subtracts the most common non-zero
+        # intensity as "background" -- for a segment that's the segment
+        # itself, leaving near-empty splats. Background is already zeroed
+        # here, and a fixed 0-1 range keeps amplitudes comparable across the
+        # separately fitted regions.
+        floor=None,
+        norm_range=(0.0, 1.0),
+        verbose=False,
+    )
+
+
+def bbox(mask: np.ndarray, pad: int = 2) -> tuple[slice, ...]:
+    nz = np.nonzero(mask)
+    return tuple(slice(max(0, int(a.min()) - pad), min(n, int(a.max()) + pad + 1)) for a, n in zip(nz, mask.shape))
+
+
+def build_atlas(spec: dict) -> None:
     quality = spec["quality"]
     max_dim = int(quality["maxDim"])
+    total_budget = int(quality["maxSplats"])
 
     # --- Atlas grid: the finest volume level that fits max_dim ------------
     progress("reading volume")
@@ -307,34 +409,36 @@ def build_atlas(spec: dict) -> None:
         volume = zoom(volume, factor, order=1).astype(np.float32)
         spacing = spacing / factor
     grid_shape = volume.shape
+    grid_size = int(np.prod(grid_shape))
     log(f"atlas grid {grid_shape} at {spacing.round(4).tolist()} mm")
 
-    # --- Atlas ids: one per (segmentation, layer, label value) -------------
+    # --- Segment coverage of each grid voxel --------------------------------
     entries = []  # atlas id - 1 -> segment info
-    label_grid = np.zeros(grid_shape, dtype=np.int32)
-    sources = []  # (multiscale, lut) per segmentation layer, for per-splat sampling
-    for si, seg in enumerate(spec["segmentations"]):
+    coverage_parts: dict = {}
+    cell_volume = float(np.prod(spacing))
+    voxels_per_cell: dict = {}
+    for seg in spec["segmentations"]:
         for layer in seg["layers"]:
-            progress(f"resampling labels: {seg['name']}, layer {layer['layer']}")
+            progress(f"measuring segments: {seg['name']}, layer {layer['layer']}")
             max_value = max((s["labelValue"] for s in layer["segments"]), default=0)
             lut = np.zeros(max(256, max_value + 1), dtype=np.int32)
             for s in layer["segments"]:
                 entries.append(s)
                 lut[s["labelValue"]] = len(entries)
             ms = Multiscale(str(Path(seg["store"]) / f"layer{layer['layer']}"))
-            # The coarsest label level still at least as fine as the grid.
-            fine_enough = [lv for lv in ms.levels if np.all(lv["scale"] <= spacing * 1.001)]
-            coarse = fine_enough[-1] if fine_enough else ms.levels[0]
-            ids, hit = resample_labels_onto(grid_shape, origin, spacing, coarse, lut)
-            label_grid[hit] = ids[hit]
-            sources.append((ms, lut))
+            # The coarsest label level at least 2x finer than the grid.
+            fine = [lv for lv in ms.levels if np.all(lv["scale"] <= spacing / 2 * 1.001)]
+            lv = fine[-1] if fine else ms.levels[0]
+            segment_coverage(lv, grid_shape, origin, spacing, lut, coverage_parts)
+            for s in layer["segments"]:
+                voxels_per_cell[lut[s["labelValue"]]] = cell_volume / float(np.prod(lv["scale"]))
 
-    # --- What gets fitted --------------------------------------------------
-    # Window from the volume's background (1st percentile) up to the labeled
-    # tissue's 99.8th percentile, then keep the labeled anatomy plus
-    # (optionally) unlabeled tissue above an Otsu threshold as dim context;
-    # air is zeroed so no splats are spent on it.
-    labeled = label_grid > 0
+    # --- Intensity window and unlabeled context ------------------------------
+    labeled = np.zeros(grid_size, dtype=bool)
+    for atlas_id, parts in coverage_parts.items():
+        for cells, _ in parts:
+            labeled[cells] = True
+    labeled = labeled.reshape(grid_shape)
     lo = float(np.percentile(volume, 1))
     hi = float(np.percentile(volume[labeled] if labeled.any() else volume, 99.8))
     if hi <= lo:
@@ -342,48 +446,51 @@ def build_atlas(spec: dict) -> None:
     if hi <= lo:
         raise SystemExit("The volume is constant at the atlas resolution; nothing to fit")
     windowed = np.clip((volume - lo) / (hi - lo), 0.0, 1.0)
-    context = np.zeros_like(labeled)
+    del volume
+    tissue = LABELED_FLOOR + (1.0 - LABELED_FLOOR) * windowed
+
+    # --- Budgets --------------------------------------------------------------
+    sizes = {a: float(sum(c.sum() for _, c in parts)) / voxels_per_cell[a] for a, parts in coverage_parts.items()}
+    sizes = {a: v for a, v in sizes.items() if v >= 0.5}  # under half a grid voxel: invisible
+    context = np.zeros(grid_shape, dtype=bool)
     if spec.get("context", True):
         positive = windowed[windowed > 0]
         context = ~labeled & (windowed > otsu_threshold(positive if positive.size else windowed.ravel()))
-    # Artistic license, as in Luxar's own CT atlas: left as-is, dense bone
-    # takes nearly all of the splat budget and brightness and soft-tissue
-    # segments barely show. Labeled tissue is lifted onto a floor (keeping
-    # its internal texture on top) so every segment gets splats; unlabeled
-    # context stays dimmer.
-    fit_vol = np.where(labeled, LABELED_FLOOR + (1.0 - LABELED_FLOOR) * windowed, np.where(context, CONTEXT_SCALE * windowed, 0.0))
-    fit_vol = np.ascontiguousarray(fit_vol.astype(np.float32))
-    del volume, windowed
-    if not (fit_vol > 0).any():
-        raise SystemExit("No labeled or above-background tissue to fit at the atlas resolution")
+    segment_budget = total_budget * (1.0 - (CONTEXT_BUDGET_SHARE if context.any() else 0.0))
+    weights = {a: np.sqrt(v) for a, v in sizes.items()}
+    total_weight = sum(weights.values()) or 1.0
+    budgets = {a: max(MIN_SEGMENT_SPLATS, int(segment_budget * w / total_weight)) for a, w in weights.items()}
+    if not budgets and not context.any():
+        raise SystemExit("No segment or above-background tissue to fit at the atlas resolution")
 
-    progress("fitting splats (pass 1)")
+    # --- Fit each segment, then the context -----------------------------------
     t0 = time.time()
-
-    def on_pass(pass_index, _lod, psnr) -> None:
-        progress(f"fitting splats (pass {pass_index + 2}, {psnr:.1f} dB so far, {time.time() - t0:.0f}s)")
-
-    fit: GSplatData = fit_progressive_gaussian_splats(
-        fit_vol,
-        max_splats=int(quality["maxSplats"]),
-        max_splats_per_pass=int(quality["splatsPerPass"]),
-        iters_per_pass=int(quality["itersPerPass"]),
-        residual_pass_min_iters=int(quality.get("residualMinIters", 500)),
-        psnr_patience=0.1,
-        on_pass_complete=on_pass,
-        verbose=False,
-    )
-    log(f"fitted {len(fit.amplitudes):,} splats in {time.time() - t0:.0f}s; amplitude p5/p50/p95 = {np.percentile(fit.amplitudes, [5, 50, 95]).round(4).tolist()}; fit_vol max {float(fit_vol.max()):.3f}, nonzero {int((fit_vol > 0).sum()):,}")
-
-    # --- Per-splat labels ---------------------------------------------------
-    # From each segmentation's FINEST level, not the coarse grid, so a splat
-    # over a thin vessel still takes the vessel's color. Later segmentations
-    # win where they overlap. Centers are [z, y, x] grid voxels.
-    progress("sampling segment labels")
-    centers_mm = origin + fit.centers * spacing
-    splat_ids = np.zeros(len(fit.amplitudes), dtype=np.int64)
-    for ms, lut in sources:
-        sample_finest_labels(centers_mm, ms.levels[0], lut, splat_ids)
+    fits = []  # (atlas id, GSplatData in grid voxel coords)
+    order = sorted(budgets, key=lambda a: -budgets[a])
+    for k, atlas_id in enumerate(order):
+        name = entries[atlas_id - 1]["name"]
+        progress(f"fitting segment {k + 1}/{len(order)} ({name}, {budgets[atlas_id]:,} splats; {time.time() - t0:.0f}s)")
+        cover = coverage_grid(coverage_parts.pop(atlas_id), grid_size, voxels_per_cell[atlas_id]).reshape(grid_shape)
+        crop = bbox(cover > 0)
+        try:
+            fit = fit_region(cover[crop] * tissue[crop], budgets[atlas_id], quality)
+        except Exception as e:  # a tiny or degenerate segment: skip it, don't fail the atlas
+            log(f"segment {name!r}: fit failed ({e}); skipped")
+            continue
+        if fit is not None and len(fit.amplitudes):
+            fits.append((atlas_id, fit.translate(np.array([sl.start for sl in crop], dtype=np.float64))))
+    if context.any():
+        progress(f"fitting unlabeled tissue ({time.time() - t0:.0f}s)")
+        crop = bbox(context)
+        try:
+            fit = fit_region(np.where(context, CONTEXT_SCALE * windowed, 0.0)[crop], max(MIN_SEGMENT_SPLATS, int(total_budget * CONTEXT_BUDGET_SHARE)), quality)
+            if len(fit.amplitudes):
+                fits.append((0, fit.translate(np.array([sl.start for sl in crop], dtype=np.float64))))
+        except Exception as e:
+            log(f"unlabeled tissue: fit failed ({e}); skipped")
+    if not fits:
+        raise SystemExit("No splats could be fitted")
+    log(f"fitted {sum(len(f.amplitudes) for _, f in fits):,} splats for {len(fits)} regions in {time.time() - t0:.0f}s")
 
     # Grid voxel [z, y, x] -> physical LPS [x, y, z] mm, for centers and
     # covariances alike.
@@ -392,19 +499,43 @@ def build_atlas(spec: dict) -> None:
         affine[out_axis, in_axis] = spacing[in_axis]
         affine[out_axis, 3] = origin[in_axis]
     affine[3, 3] = 1.0
-    fit = fit.transform(affine)
+    fits = [(a, f.transform(affine)) for a, f in fits]
 
-    groups: dict[str, list[int]] = {}
-    for atlas_id, s in enumerate(entries, start=1):
-        groups.setdefault(s["system"], []).append(atlas_id)
+    centers = np.concatenate([f.centers for _, f in fits])
+    amplitudes = np.concatenate([f.amplitudes for _, f in fits]).astype(np.float32)
+    cholesky = np.concatenate([f.cholesky_factors for _, f in fits])
+    splat_ids = np.concatenate([np.full(len(f.amplitudes), a, dtype=np.int64) for a, f in fits])
+
     colors_by_id = np.zeros((len(entries) + 1, 3), dtype=np.float32)
+    colors_by_id[0] = 0.55
     names_by_id = ["Unlabeled tissue"]
     for atlas_id, s in enumerate(entries, start=1):
         colors_by_id[atlas_id] = s["color"]
         names_by_id.append(s["name"])
 
-    lo_xyz = np.percentile(fit.centers, 1, axis=0)
-    hi_xyz = np.percentile(fit.centers, 99, axis=0)
+    # Per-segment gains (see ATLAS_EXPOSURE); the context gets CONTEXT_GAIN.
+    pixel = float(spacing.min())
+    brightness = {}
+    for atlas_id, _ in fits:
+        if atlas_id == 0:
+            continue
+        m = splat_ids == atlas_id
+        brightness[atlas_id] = layer_brightness(centers[m], amplitudes[m], cholesky[m], colors_by_id[splat_ids[m]], pixel)
+    reference = float(np.median(list(brightness.values()))) if brightness else 1.0
+    gains = np.full(len(entries) + 1, 1.0, dtype=np.float32)
+    gains[0] = CONTEXT_GAIN
+    for atlas_id, b in brightness.items():
+        gains[atlas_id] = np.clip(ATLAS_EXPOSURE * reference / max(b, 1e-12), *LAYER_GAIN_RANGE)
+    amplitudes = amplitudes * gains[splat_ids]
+    for atlas_id, b in brightness.items():
+        m = splat_ids == atlas_id
+        log(f"segment {names_by_id[atlas_id]!r}: {int(m.sum()):,} splats, brightness {b:.3g}, gain {gains[atlas_id]:.2f}")
+
+    groups: dict[str, list[int]] = {}
+    for atlas_id, s in enumerate(entries, start=1):
+        groups.setdefault(s["system"], []).append(atlas_id)
+    lo_xyz = np.percentile(centers, 1, axis=0)
+    hi_xyz = np.percentile(centers, 99, axis=0)
 
     def build(compiler) -> None:
         from luxar.core.viewer_config import ViewerConfig
@@ -415,35 +546,27 @@ def build_atlas(spec: dict) -> None:
         )
         scene.attrs["title"] = spec.get("title", "Splat atlas")
 
-        def add_layer(name: str, mask: np.ndarray, opacity: float, gain: float, colors=None) -> None:
+        def add_layer(name: str, mask: np.ndarray, opacity: float) -> None:
             n = int(mask.sum())
             if n == 0:
                 return
             ids = splat_ids[mask]
             scene.add_gsplats(
                 name=name.replace("/", "-"),
-                centers=fit.centers[mask],
-                amplitudes=(fit.amplitudes[mask] * gain).astype(np.float32),
-                cholesky_factors=fit.cholesky_factors[mask],
-                colors=colors_by_id[ids] if colors is None else colors,
+                centers=centers[mask],
+                amplitudes=amplitudes[mask],
+                cholesky_factors=cholesky[mask],
+                colors=colors_by_id[ids],
                 labels=[names_by_id[i] for i in ids],
                 opacity=opacity,
                 blending_mode="additive",
                 layer=True,
             )
-            log(f"layer {name!r}: {n:,} splats, gain {gain:.2f}")
+            log(f"layer {name!r}: {n:,} splats")
 
-        masks = {group: m for group, ids in groups.items() if (m := np.isin(splat_ids, ids)).any()}
-        pixel = float(spacing.min())
-        brightness = {
-            g: layer_brightness(fit.centers[m], fit.amplitudes[m], fit.cholesky_factors[m], colors_by_id[splat_ids[m]], pixel) for g, m in masks.items()
-        }
-        reference = float(np.median(list(brightness.values()))) if brightness else 1.0
-        for group, mask in masks.items():
-            gain = float(np.clip(ATLAS_EXPOSURE * reference / max(brightness[group], 1e-12), *LAYER_GAIN_RANGE))
-            add_layer(group, mask, 1.0, gain)
-        unlabeled = splat_ids == 0
-        add_layer("Unlabeled tissue", unlabeled, 0.35, 0.5, np.full((int(unlabeled.sum()), 3), 0.55, dtype=np.float32))
+        for group, ids in groups.items():
+            add_layer(group, np.isin(splat_ids, ids), 1.0)
+        add_layer("Unlabeled tissue", splat_ids == 0, 0.35)
 
     progress("writing scene")
     compile_to(Path(spec["output"]), build)

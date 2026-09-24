@@ -50,6 +50,16 @@ const SAGITTAL_LABELS: OrientationLabels = { left: 'A', right: 'P', top: 'S', bo
 
 type RenderTab = 'voxel' | 'mesh' | 'atlas'
 
+/** `value`, once it has stayed unchanged for `delayMs`. */
+function useSettledValue<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(value), delayMs)
+    return () => window.clearTimeout(timer)
+  }, [value, delayMs])
+  return settled
+}
+
 const ATLAS_QUALITY_LABELS: Record<AtlasQuality, string> = { draft: 'Draft', standard: 'Standard', high: 'High' }
 
 function formatElapsed(ms: number): string {
@@ -328,7 +338,13 @@ export function ItkVtkViewerPage() {
   const meshesReady =
     loadedSegIds.length > 0 && loadedSegIds.every((id) => segmentationRecords.find((r) => r.id === id)?.meshStatus === 'ready')
   const luxarMeshes = luxar?.available === true && meshRenderer === 'luxar'
-  const meshScene = useLuxarScene(meshTabOpened && luxarMeshes && meshesReady ? loadedSegKey : null, () => requestLuxarMeshes(loadedSegIds))
+  // Waits for the loaded set to settle, so loading several segmentations in
+  // a row asks for one scene rather than one per intermediate set.
+  const settledSegKey = useSettledValue(loadedSegKey, 2000)
+  const meshScene = useLuxarScene(
+    meshTabOpened && luxarMeshes && meshesReady && settledSegKey === loadedSegKey ? loadedSegKey : null,
+    () => requestLuxarMeshes(loadedSegIds)
+  )
 
   const atlasQuality: AtlasQuality = atlasQualityChoice ?? (luxar?.device && luxar.device !== 'cpu' ? 'standard' : 'draft')
   const atlasReady = luxar?.available === true && luxar.gsplats && activeVolumeId !== null && loadedSegIds.length > 0

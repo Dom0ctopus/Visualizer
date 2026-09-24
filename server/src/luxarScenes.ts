@@ -302,11 +302,14 @@ function runBuilder(key: string, kind: LuxarSceneKind, specPath: string, logPath
 }
 
 // The most useful line of a Python failure is its last "SomethingError: ..."
-// (or SystemExit message), not the traceback frames above it.
+// (or SystemExit message), not the traceback frames above it or the hint
+// lines Luxar prints after it. Terminal color codes are stripped.
 function lastErrorLine(stderr: string): string {
-  const lines = stderr.trim().split('\n').map((l) => l.trim()).filter(Boolean)
+  // eslint-disable-next-line no-control-regex
+  const lines = stderr.replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').map((l) => l.trim()).filter(Boolean)
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (/^[A-Za-z_.]*(Error|Exception)\b/.test(lines[i])) return lines[i]
+    const match = /\b[A-Za-z_.]*(?:Error|Exception): .*/.exec(lines[i])
+    if (match) return match[0]
   }
   return lines[lines.length - 1] ?? ''
 }
@@ -319,9 +322,23 @@ export interface MeshSceneRequest {
   rebuild?: boolean
 }
 
+/** Drops queued (not yet started) builds of `kind` other than `keepKey`:
+ *  only one scene per kind is on screen, so a queued build for a set the
+ *  user has since changed is wasted work. It's rebuilt if asked for again. */
+function dropStaleQueuedBuilds(kind: LuxarSceneKind, keepKey: string): void {
+  for (const [key, status] of statuses) {
+    if (key === keepKey || status.kind !== kind || status.status !== 'pending') continue
+    if (dequeueJob('luxar', key)) {
+      statuses.delete(key)
+      void rm(sceneDir(key), { recursive: true, force: true })
+    }
+  }
+}
+
 export function requestMeshScene(req: MeshSceneRequest): SceneStatus {
   const ids = [...req.segmentationIds].sort()
   const key = sceneKey('meshes', ids)
+  dropStaleQueuedBuilds('meshes', key)
   const existing = statuses.get(key)
   if (existing && (!req.rebuild || existing.status === 'pending')) return sceneStatus(key, 'meshes')
   const layers = req.segments.map((s) => ({ name: s.layerName, recordId: s.recordId, segmentKey: s.segmentKey }))
@@ -347,6 +364,7 @@ export function atlasKey(volumeId: string, segmentationIds: string[], quality: A
 
 export function requestAtlas(req: AtlasRequest): SceneStatus {
   const key = atlasKey(req.volumeId, req.segmentationIds, req.quality)
+  if (req.build) dropStaleQueuedBuilds('atlas', key)
   const existing = statuses.get(key)
   const wantsBuild = req.build && (!existing || (req.rebuild && existing.status !== 'pending'))
   if (!wantsBuild) return sceneStatus(key, 'atlas')
