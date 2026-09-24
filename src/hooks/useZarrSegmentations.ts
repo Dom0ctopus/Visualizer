@@ -1,5 +1,16 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
+import { realisticColor } from '../lib/realisticPalette'
 import type { SegmentationRecord, SegmentState, ZarrLoadedSegmentation } from '../types'
+
+/** 'slicer': each segment's color from its file. 'realistic': colors
+ *  sampled from dissection photos, matched by tissue (realisticPalette.ts);
+ *  segments it can't match keep their file color. */
+export type ColorScheme = 'slicer' | 'realistic'
+
+function schemeColor(scheme: ColorScheme, seg: Pick<SegmentState, 'name' | 'system' | 'sourceColor'>, fileName: string): [number, number, number] {
+  if (scheme === 'realistic') return realisticColor(seg.name, seg.system, fileName)?.color ?? seg.sourceColor
+  return seg.sourceColor
+}
 
 const DEFAULT_SEGMENT_OPACITY = 0.6
 
@@ -10,6 +21,8 @@ const DEFAULT_SEGMENT_OPACITY = 0.6
  */
 export function useZarrSegmentations() {
   const [segmentations, setSegmentations] = useState<ZarrLoadedSegmentation[]>([])
+  const [colorScheme, setColorSchemeState] = useState<ColorScheme>('slicer')
+  const colorSchemeRef = useRef<ColorScheme>('slicer')
 
   const loadSegmentationRecord = useCallback((record: SegmentationRecord) => {
     const allSegments = record.systems.flatMap((sys) => sys.segments.map((seg) => ({ ...seg, system: sys.name })))
@@ -19,7 +32,8 @@ export function useZarrSegmentations() {
       name: seg.name,
       labelValue: seg.labelValue,
       layer: seg.layer,
-      color: seg.color,
+      color: schemeColor(colorSchemeRef.current, { name: seg.name, system: seg.system, sourceColor: seg.color }, record.name),
+      sourceColor: seg.color,
       visible: true,
       opacity: DEFAULT_SEGMENT_OPACITY
     }))
@@ -34,6 +48,14 @@ export function useZarrSegmentations() {
 
   const removeSegmentation = useCallback((recordId: string) => {
     setSegmentations((prev) => prev.filter((s) => s.recordId !== recordId))
+  }, [])
+
+  const setColorScheme = useCallback((scheme: ColorScheme) => {
+    colorSchemeRef.current = scheme
+    setColorSchemeState(scheme)
+    setSegmentations((prev) =>
+      prev.map((l) => ({ ...l, segments: l.segments.map((seg) => ({ ...seg, color: schemeColor(scheme, seg, l.name) })) }))
+    )
   }, [])
 
   const clearAll = useCallback(() => {
@@ -128,6 +150,8 @@ export function useZarrSegmentations() {
     setSystemVisible,
     setSystemOpacity,
     setFileVisible,
-    setFileOpacity
+    setFileOpacity,
+    colorScheme,
+    setColorScheme
   }
 }

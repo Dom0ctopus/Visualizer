@@ -26,7 +26,8 @@ import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
 import { SegmentTree } from './SegmentTree'
 import { ZarrSliceCanvas, type CanvasPan, type OrientationLabels } from './ZarrSliceCanvas'
-import type { LibraryRecord, SegmentationRecord, VolumeRecord } from '../types'
+import { realisticColor } from '../lib/realisticPalette'
+import type { LibraryRecord, SegmentationRecord, VolumeRecord, ZarrLoadedSegmentation } from '../types'
 
 const POLL_INTERVAL_MS = 1500
 const ZOOM_BUTTON_FACTOR = 1.25
@@ -184,6 +185,39 @@ function LuxarSceneLine({
     case 'ready':
       return null
   }
+}
+
+/** How the "Real to life" scheme covers the loaded segments. */
+function RealisticCoverage({ segmentations }: { segmentations: ZarrLoadedSegmentation[] }) {
+  let total = 0
+  const unmatched: string[] = []
+  const provisional = new Set<string>()
+  const byFile: string[] = []
+  for (const l of segmentations) {
+    for (const seg of l.segments) {
+      total++
+      const match = realisticColor(seg.name, seg.system, l.name)
+      if (!match) unmatched.push(`${seg.name} (${l.name})`)
+      else {
+        if (match.tissue.confidence === 'provisional') provisional.add(match.tissue.label)
+        if (match.via === 'file') byFile.push(`${seg.name} -> ${match.tissue.label}`)
+      }
+    }
+  }
+  const details = [
+    unmatched.length ? `Unmatched (file colors):\n  ${unmatched.join('\n  ')}` : '',
+    byFile.length ? `Matched by file, not name:\n  ${byFile.join('\n  ')}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  return (
+    <p className="tf-hint color-scheme-hint" title={details || undefined}>
+      {total - unmatched.length} of {total} segments colored from dissection photos
+      {unmatched.length > 0 && `; ${unmatched.length} unmatched keep their file colors`}
+      {provisional.size > 0 && `. Provisional (no reference photo yet): ${[...provisional].join(', ')}`}
+      {details && ' (hover for details)'}
+    </p>
+  )
 }
 
 interface HoveredSegment {
@@ -677,6 +711,9 @@ export function ItkVtkViewerPage() {
                           </button>
                         </div>
                         {luxarMeshes && loadedSegIds.length > 0 && !meshesReady && <span>Luxar scene builds once surface meshes are ready…</span>}
+                        {showLuxarMeshes && zarrSeg.colorScheme === 'realistic' && (
+                          <span className="render-toolbar-hint">Luxar meshes show file colors; Basic follows the color scheme.</span>
+                        )}
                         {luxarMeshes && meshesReady && (
                           <LuxarSceneLine
                             scene={meshScene.scene}
@@ -871,6 +908,26 @@ export function ItkVtkViewerPage() {
         {zarrSeg.segmentations.length > 0 && (
           <section className="panel">
             <h2 className="panel-title">Segments</h2>
+            <div className="color-scheme-row">
+              <span className="render-toolbar-label">Colors</span>
+              <div className="segmented">
+                <button
+                  className={zarrSeg.colorScheme === 'slicer' ? 'active' : ''}
+                  title="Each segment's color from its segmentation file"
+                  onClick={() => zarrSeg.setColorScheme('slicer')}
+                >
+                  File
+                </button>
+                <button
+                  className={zarrSeg.colorScheme === 'realistic' ? 'active' : ''}
+                  title="Tissue colors sampled from photographs of fresh dissections, matched to segments by name"
+                  onClick={() => zarrSeg.setColorScheme('realistic')}
+                >
+                  Real to life
+                </button>
+              </div>
+            </div>
+            {zarrSeg.colorScheme === 'realistic' && <RealisticCoverage segmentations={zarrSeg.segmentations} />}
             <SearchBar
               value={searchText}
               onChange={setSearchText}

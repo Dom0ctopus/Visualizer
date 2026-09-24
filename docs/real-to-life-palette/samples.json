@@ -1,0 +1,671 @@
+{
+ "samples": [
+  {
+   "cls": "gill",
+   "fig": "Fig. 3.9",
+   "img": 25,
+   "rect": [
+    390,
+    460,
+    470,
+    560
+   ],
+   "note": "g/gl, left gill",
+   "raw": [
+    139.0,
+    118.0,
+    102.0
+   ],
+   "color": [
+    163.0,
+    137.0,
+    123.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "gill",
+   "fig": "Fig. 3.9",
+   "img": 25,
+   "rect": [
+    980,
+    420,
+    1060,
+    520
+   ],
+   "note": "g/gl, right gill",
+   "raw": [
+    132.0,
+    114.0,
+    97.0
+   ],
+   "color": [
+    154.0,
+    133.0,
+    117.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "gill",
+   "fig": "Fig. 3.19",
+   "img": 27,
+   "rect": [
+    160,
+    560,
+    240,
+    640
+   ],
+   "note": "g, in situ (a)",
+   "raw": [
+    152.0,
+    131.0,
+    101.0
+   ],
+   "color": [
+    152.0,
+    131.0,
+    101.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "gill vessel",
+   "fig": "Fig. 3.9",
+   "img": 25,
+   "rect": [
+    355,
+    440,
+    395,
+    520
+   ],
+   "note": "egv, left",
+   "raw": [
+    169.0,
+    149.0,
+    120.0
+   ],
+   "color": [
+    198.0,
+    173.0,
+    145.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "gill vessel",
+   "fig": "Fig. 3.9",
+   "img": 25,
+   "rect": [
+    1150,
+    470,
+    1190,
+    560
+   ],
+   "note": "egv, right",
+   "raw": [
+    180.0,
+    157.0,
+    127.0
+   ],
+   "color": [
+    210.0,
+    183.0,
+    153.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "branchial heart",
+   "fig": "Fig. 3.9",
+   "img": 25,
+   "rect": [
+    360,
+    790,
+    430,
+    850
+   ],
+   "note": "bh, left",
+   "raw": [
+    88.0,
+    89.0,
+    95.0
+   ],
+   "color": [
+    103.0,
+    104.0,
+    114.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "branchial heart",
+   "fig": "Fig. 3.9",
+   "img": 25,
+   "rect": [
+    1070,
+    720,
+    1110,
+    790
+   ],
+   "note": "bh, right",
+   "raw": [
+    94.0,
+    92.0,
+    96.0
+   ],
+   "color": [
+    110.0,
+    107.0,
+    116.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "systemic heart",
+   "fig": "Fig. 3.9",
+   "img": 25,
+   "rect": [
+    850,
+    625,
+    885,
+    655
+   ],
+   "note": "sh ventricle",
+   "raw": [
+    194.0,
+    163.0,
+    133.0
+   ],
+   "color": [
+    227.0,
+    190.0,
+    160.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "aorta / vessels",
+   "fig": "Fig. 3.9",
+   "img": 25,
+   "rect": [
+    792,
+    300,
+    802,
+    420
+   ],
+   "note": "da, dorsal aorta",
+   "raw": [
+    181.0,
+    175.0,
+    159.0
+   ],
+   "color": [
+    212.0,
+    204.0,
+    192.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "digestive gland",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    760,
+    480,
+    830,
+    560
+   ],
+   "note": "dg",
+   "raw": [
+    102.0,
+    78.0,
+    54.0
+   ],
+   "color": [
+    102.0,
+    78.0,
+    54.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "digestive gland",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    800,
+    430,
+    840,
+    470
+   ],
+   "note": "dg, upper",
+   "raw": [
+    97.0,
+    76.0,
+    60.0
+   ],
+   "color": [
+    97.0,
+    76.0,
+    60.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "ink sac",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    880,
+    740,
+    940,
+    785
+   ],
+   "note": "ins",
+   "raw": [
+    45.0,
+    61.0,
+    75.0
+   ],
+   "color": [
+    45.0,
+    61.0,
+    75.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "posterior salivary gland",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    650,
+    480,
+    690,
+    540
+   ],
+   "note": "psg, upper",
+   "raw": [
+    226.0,
+    199.0,
+    152.0
+   ],
+   "color": [
+    226.0,
+    199.0,
+    152.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "posterior salivary gland",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    470,
+    640,
+    520,
+    720
+   ],
+   "note": "psg, lower",
+   "raw": [
+    178.0,
+    132.0,
+    86.0
+   ],
+   "color": [
+    178.0,
+    132.0,
+    86.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "buccal mass",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    545,
+    480,
+    600,
+    530
+   ],
+   "note": "bm",
+   "raw": [
+    166.0,
+    141.0,
+    118.0
+   ],
+   "color": [
+    166.0,
+    141.0,
+    118.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "crop / oesophagus",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    610,
+    720,
+    650,
+    790
+   ],
+   "note": "cr",
+   "raw": [
+    173.0,
+    133.0,
+    90.0
+   ],
+   "color": [
+    173.0,
+    133.0,
+    90.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "stomach",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    860,
+    1060,
+    910,
+    1130
+   ],
+   "note": "st",
+   "raw": [
+    144.0,
+    108.0,
+    80.0
+   ],
+   "color": [
+    144.0,
+    108.0,
+    80.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "caecum",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    1000,
+    1040,
+    1060,
+    1090
+   ],
+   "note": "cae",
+   "raw": [
+    174.0,
+    142.0,
+    106.0
+   ],
+   "color": [
+    174.0,
+    142.0,
+    106.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "intestine",
+   "fig": "Fig. 3.12",
+   "img": 26,
+   "rect": [
+    1240,
+    600,
+    1310,
+    760
+   ],
+   "note": "int",
+   "raw": [
+    185.0,
+    144.0,
+    107.0
+   ],
+   "color": [
+    185.0,
+    144.0,
+    107.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "testis",
+   "fig": "Fig. 3.19",
+   "img": 27,
+   "rect": [
+    850,
+    820,
+    1000,
+    900
+   ],
+   "note": "te (b)",
+   "raw": [
+    147.0,
+    113.0,
+    86.0
+   ],
+   "color": [
+    220.0,
+    178.0,
+    149.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "testis",
+   "fig": "Fig. 3.19",
+   "img": 27,
+   "rect": [
+    320,
+    830,
+    400,
+    880
+   ],
+   "note": "te, in situ (a)",
+   "raw": [
+    182.0,
+    173.0,
+    156.0
+   ],
+   "color": [
+    182.0,
+    173.0,
+    156.0
+   ],
+   "white_balanced": false
+  },
+  {
+   "cls": "spermatophoric gland",
+   "fig": "Fig. 3.19",
+   "img": 27,
+   "rect": [
+    985,
+    660,
+    1015,
+    720
+   ],
+   "note": "spgl (b)",
+   "raw": [
+    151.0,
+    121.0,
+    92.0
+   ],
+   "color": [
+    226.0,
+    191.0,
+    159.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "spermatophoric (Needham's) sac",
+   "fig": "Fig. 3.19",
+   "img": 27,
+   "rect": [
+    1035,
+    350,
+    1065,
+    420
+   ],
+   "note": "spss (b)",
+   "raw": [
+    154.0,
+    116.0,
+    89.0
+   ],
+   "color": [
+    231.0,
+    183.0,
+    154.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "spermatophoric sac gland",
+   "fig": "Fig. 3.19",
+   "img": 27,
+   "rect": [
+    1150,
+    500,
+    1175,
+    530
+   ],
+   "note": "spsg (b)",
+   "raw": [
+    118.0,
+    82.0,
+    60.0
+   ],
+   "color": [
+    177.0,
+    129.0,
+    104.0
+   ],
+   "white_balanced": true
+  },
+  {
+   "cls": "terminal organ",
+   "fig": "Fig. 3.19",
+   "img": 27,
+   "rect": [
+    1055,
+    230,
+    1080,
+    260
+   ],
+   "note": "to (b)",
+   "raw": [
+    149.0,
+    131.0,
+    111.0
+   ],
+   "color": [
+    223.0,
+    207.0,
+    192.0
+   ],
+   "white_balanced": true
+  }
+ ],
+ "palette": {
+  "gill": [
+   154.0,
+   133.0,
+   117.0
+  ],
+  "gill vessel": [
+   204.0,
+   178.0,
+   149.0
+  ],
+  "branchial heart": [
+   106.0,
+   106.0,
+   115.0
+  ],
+  "systemic heart": [
+   227.0,
+   190.0,
+   160.0
+  ],
+  "aorta / vessels": [
+   212.0,
+   204.0,
+   192.0
+  ],
+  "digestive gland": [
+   100.0,
+   77.0,
+   57.0
+  ],
+  "ink sac": [
+   45.0,
+   61.0,
+   75.0
+  ],
+  "posterior salivary gland": [
+   202.0,
+   166.0,
+   119.0
+  ],
+  "buccal mass": [
+   166.0,
+   141.0,
+   118.0
+  ],
+  "crop / oesophagus": [
+   173.0,
+   133.0,
+   90.0
+  ],
+  "stomach": [
+   144.0,
+   108.0,
+   80.0
+  ],
+  "caecum": [
+   174.0,
+   142.0,
+   106.0
+  ],
+  "intestine": [
+   185.0,
+   144.0,
+   107.0
+  ],
+  "testis": [
+   201.0,
+   176.0,
+   152.0
+  ],
+  "spermatophoric gland": [
+   226.0,
+   191.0,
+   159.0
+  ],
+  "spermatophoric (Needham's) sac": [
+   231.0,
+   183.0,
+   154.0
+  ],
+  "spermatophoric sac gland": [
+   177.0,
+   129.0,
+   104.0
+  ],
+  "terminal organ": [
+   223.0,
+   207.0,
+   192.0
+  ]
+ }
+}

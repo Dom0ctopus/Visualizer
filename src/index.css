@@ -320,6 +320,18 @@ input[type='range'] {
   color: var(--text-dim);
 }
 
+.color-scheme-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.color-scheme-hint {
+  margin-bottom: 8px;
+}
+
 .job-queue-line {
   margin-top: 6px;
 }

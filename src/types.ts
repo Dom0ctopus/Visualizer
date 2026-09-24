@@ -55,7 +55,10 @@ export interface SegmentState {
   name: string
   labelValue: number
   layer: number
+  /** Displayed color (0-255), per the active color scheme. */
   color: [number, number, number]
+  /** The color from the segmentation file (3D Slicer). */
+  sourceColor: [number, number, number]
   visible: boolean
   opacity: number
 }
