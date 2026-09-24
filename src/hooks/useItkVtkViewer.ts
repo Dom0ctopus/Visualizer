@@ -32,12 +32,31 @@ interface ItkVtkViewerInstance {
   setBackgroundColor: (rgb: [number, number, number]) => void
   setImageColorMap: (colorMap: string) => void
   on: (event: string, callback: () => void) => void
+  setLabelImageLookupTable: (lookupTable: string) => void
   getViewProxy: () => {
     getInteractorStyle3D: () => { setCenterOfRotation: (center: [number, number, number]) => void }
+    getRepresentations: () => Array<{ getVolumes?: () => VtkVolume[] }>
+    renderLater: () => void
   }
   // No delete/destroy/dispose exists (checked against its bundled source);
   // see clearViewer for how a replaced viewer's resources are released.
 }
+
+// The slices of vtk.js objects reached through getViewProxy() for
+// applyLabelColors below.
+interface VtkColorTransferFunction {
+  removeAllPoints: () => void
+  addRGBPointLong: (x: number, r: number, g: number, b: number, midpoint: number, sharpness: number) => void
+  setMappingRange: (min: number, max: number) => void
+  onModified: (callback: () => void) => { unsubscribe: () => void }
+}
+interface VtkVolume {
+  getProperty: () => { getRGBTransferFunction: (component: number) => VtkColorTransferFunction | null }
+  getMapper: () => { getInputData: () => { getPointData: () => { getScalars: () => { getNumberOfComponents: () => number } | null } } | null } | null
+}
+
+// The name of itk-vtk-viewer's default categorical palette.
+const DEFAULT_LABEL_PALETTE = 'glasbey'
 
 // How often label weight/name updates reach itk-vtk-viewer while a slider
 // is being dragged: each one re-renders the whole labeled volume.
@@ -111,6 +130,8 @@ function loadItkVtkViewerScript(): Promise<void> {
 export function useItkVtkViewer() {
   const volumeContainerRef = useRef<HTMLDivElement | null>(null)
   const volumeViewerRef = useRef<ItkVtkViewerInstance | null>(null)
+  // applyLabelColors (defined below) for the loaders above it.
+  const applyLabelColorsRef = useRef<() => void>(() => {})
 
   const [scriptReady, setScriptReady] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -190,6 +211,9 @@ export function useItkVtkViewer() {
           const center: [number, number, number] = [2, 1, 0].map((a) => origin[a] + ((size[a] - 1) * spacing[a]) / 2) as [number, number, number]
           let colorMapApplied = false
           const onImageUpdate = () => {
+            // Catches the first label render, before the transfer function
+            // is hooked (see applyLabelColors).
+            window.setTimeout(() => applyLabelColorsRef.current(), 0)
             try {
               volumeViewer.getViewProxy().getInteractorStyle3D().setCenterOfRotation(center)
               if (!colorMapApplied) {
@@ -221,18 +245,12 @@ export function useItkVtkViewer() {
   // the library's own source (its public types don't document any of
   // this): a viewer instance holds exactly one label image, so only one
   // segmentation layer can show here at a time -- see
-  // ItkVtkViewerPage.tsx's own comment for which one it picks. Colors also
-  // can't be set per-label through any public method: setLabelImageLookupTable
-  // only accepts the *name* of a built-in categorical palette (e.g.
-  // "glasbey", its own default), assigned by rank order of each unique
-  // label value present in the data -- there is no arbitrary-RGB path, so
-  // colors here will not match the segment's own 3D-Slicer-defined color
-  // the way the slice pane's own compositing does (see
-  // useSegmentationOverlays.ts). What *is* fully controllable per label is
-  // visibility/opacity (setLabelImageWeights, a Map<labelValue, 0-1>) and
-  // display names (setLabelImageLabelNames), which is what
-  // setLabelWeights/setLabelNames below drive from this app's own segment
-  // tree state.
+  // ItkVtkViewerPage.tsx's own comment for which one it picks. Per label,
+  // the public API controls visibility/opacity (setLabelImageWeights, a
+  // Map<labelValue, 0-1>) and display names (setLabelImageLabelNames),
+  // which setLabelWeights/setLabelNames below drive from the segment tree.
+  // Colors have no public per-label method (only a palette name, assigned
+  // by rank); setLabelColors below sets them another way.
   const loadLabelImageUrl = useCallback(async (url: string) => {
     const viewer = volumeViewerRef.current
     if (!viewer) return
@@ -283,6 +301,7 @@ export function useItkVtkViewer() {
       viewer.setLabelImageBlend(blend > 0.5 ? blend - 0.01 : blend + 0.01)
       viewer.setLabelImageBlend(blend)
     }
+    applyLabelColorsRef.current()
   }, [])
 
   // Opacity sliders fire continuously; forwarding every tick made
@@ -311,6 +330,95 @@ export function useItkVtkViewer() {
     []
   )
 
+  // Label colors. itk-vtk-viewer's API only takes a palette *name* and
+  // assigns its colors by rank of each label value present, so the voxel
+  // render can't match the segment colors the 2D panes and meshes use through
+  // it. But it writes that palette into a vtk color transfer function on the
+  // volume (applyLookupTable in its source), which is reachable through the
+  // view proxy: the segment colors are written into it directly, keyed by
+  // label value. itk-vtk-viewer rewrites the function whenever it re-applies
+  // its palette (every progressive image update), so a modification listener
+  // on the function writes the segment colors back once that rewrite is done
+  // (vtk.js objects are frozen, so its methods can't be wrapped instead).
+  // itk's own slice views share the same function, so they match too.
+  const labelColorsRef = useRef<Map<number, [number, number, number]> | null>(null)
+  const hookedFunctions = useRef(new WeakSet<VtkColorTransferFunction>())
+  const applyingColors = useRef(false)
+  const reapplyScheduled = useRef(false)
+
+  const applyLabelColors = useCallback(() => {
+    const viewer = volumeViewerRef.current
+    const colors = labelColorsRef.current
+    if (!viewer || !colors || colors.size === 0) return
+    let viewProxy: ReturnType<ItkVtkViewerInstance['getViewProxy']>
+    try {
+      viewProxy = viewer.getViewProxy()
+    } catch {
+      return
+    }
+    for (const representation of viewProxy.getRepresentations?.() ?? []) {
+      const volume = representation.getVolumes?.()?.[0]
+      const components = volume?.getMapper()?.getInputData()?.getPointData()?.getScalars()?.getNumberOfComponents() ?? 0
+      // The label image is fused in as the last component; with only one
+      // component there's no label image (yet), and the image's own color
+      // map must be left alone.
+      if (!volume || components < 2) continue
+      const ctf = volume.getProperty().getRGBTransferFunction(components - 1)
+      if (!ctf) continue
+      if (!hookedFunctions.current.has(ctf)) {
+        hookedFunctions.current.add(ctf)
+        ctf.onModified(() => {
+          // Ignore our own writes; coalesce itk's point-by-point rewrite
+          // into one re-apply after it finishes.
+          if (applyingColors.current || reapplyScheduled.current || !labelColorsRef.current) return
+          reapplyScheduled.current = true
+          queueMicrotask(() => {
+            reapplyScheduled.current = false
+            applyLabelColorsRef.current()
+          })
+        })
+      }
+      const values = [...colors.keys()].sort((a, b) => a - b)
+      applyingColors.current = true
+      try {
+        ctf.removeAllPoints()
+        // Background, as itk-vtk-viewer sets it.
+        ctf.addRGBPointLong(0, 0, 0, 0, 0.5, 1.0)
+        for (const value of values) {
+          const [r, g, b] = colors.get(value)!
+          ctf.addRGBPointLong(value, r, g, b, 0.5, 1.0)
+        }
+        ctf.setMappingRange(0, values[values.length - 1])
+      } finally {
+        applyingColors.current = false
+      }
+      viewProxy.renderLater()
+    }
+  }, [])
+
+  useEffect(() => {
+    applyLabelColorsRef.current = applyLabelColors
+  }, [applyLabelColors])
+
+  /** Segment colors (RGB 0-1) per merged label value, or null for
+   *  itk-vtk-viewer's own palette. */
+  const setLabelColors = useCallback(
+    (colors: Map<number, [number, number, number]> | null) => {
+      const wasOverriding = labelColorsRef.current !== null
+      labelColorsRef.current = colors
+      if (colors) {
+        applyLabelColors()
+      } else if (wasOverriding) {
+        // Make itk-vtk-viewer rewrite its own palette (setting an unchanged
+        // name is a no-op, so switch away and back).
+        const viewer = volumeViewerRef.current
+        viewer?.setLabelImageLookupTable('glasbey_light')
+        viewer?.setLabelImageLookupTable(DEFAULT_LABEL_PALETTE)
+      }
+    },
+    [applyLabelColors]
+  )
+
   const setLabelWeights = useCallback((weights: Map<number, number>) => scheduleLabelUpdate({ weights }), [scheduleLabelUpdate])
   const setLabelNames = useCallback((names: Map<number, string>) => scheduleLabelUpdate({ names }), [scheduleLabelUpdate])
 
@@ -324,6 +432,8 @@ export function useItkVtkViewer() {
     loadZarrUrl,
     loadLabelImageUrl,
     setLabelWeights,
-    setLabelNames
+    setLabelNames,
+    setLabelColors,
+    applyLabelColors
   }
 }

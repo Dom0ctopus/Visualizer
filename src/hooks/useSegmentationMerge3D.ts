@@ -28,7 +28,11 @@ export function useSegmentationMerge3D(
   segmentations: ZarrLoadedSegmentation[],
   loadLabelImageUrl: (url: string) => Promise<void>,
   setLabelWeights: (weights: Map<number, number>) => void,
-  setLabelNames: (names: Map<number, string>) => void
+  setLabelNames: (names: Map<number, string>) => void,
+  /** Segment colors (RGB 0-1) per merged label value, or null to keep
+   *  itk-vtk-viewer's own palette. */
+  setLabelColors: (colors: Map<number, [number, number, number]> | null) => void,
+  useSegmentColors: boolean
 ) {
   const [status, setStatus] = useState<'idle' | 'pending' | 'ready' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -130,6 +134,7 @@ export function useSegmentationMerge3D(
     if (status !== 'ready' || mappingRef.current.length === 0) return
     const weights = new Map<number, number>()
     const names = new Map<number, string>()
+    const colors = new Map<number, [number, number, number]>()
     for (const { globalLabelValue, layerIndex, originalLabelValue } of mappingRef.current) {
       const key = layerOrderRef.current[layerIndex]
       if (!key) continue
@@ -138,11 +143,13 @@ export function useSegmentationMerge3D(
       if (!segment) continue
       weights.set(globalLabelValue, segment.visible ? segment.opacity : 0)
       names.set(globalLabelValue, segment.name)
+      colors.set(globalLabelValue, [segment.color[0] / 255, segment.color[1] / 255, segment.color[2] / 255])
     }
     setLabelWeights(weights)
     setLabelNames(names)
+    setLabelColors(useSegmentColors ? colors : null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, segmentations, setLabelWeights, setLabelNames])
+  }, [status, segmentations, setLabelWeights, setLabelNames, setLabelColors, useSegmentColors])
 
   return { status, error, progress, pendingSince }
 }

@@ -151,13 +151,113 @@ def spatial_face_parts(vertices: np.ndarray, faces: np.ndarray, max_faces: int) 
     return parts
 
 
+# The LOD ladder (see add() in build_meshes): two levels at 8x.
+MESH_LOD_SPEC = {"method": "cluster", "levels": 2, "K": 8}
+# Segments are processed in batches of about this many triangles, so memory
+# stays bounded; within a batch, every part's decimation runs in parallel.
+MESH_BATCH_TRIANGLES = 24_000_000
+
+
+def ladder_targets(n_vertices: int) -> list[int]:
+    """The vertex targets Luxar's substitutive-LOD writer asks decimation for,
+    for MESH_LOD_SPEC (coarsest first)."""
+    k, levels = MESH_LOD_SPEC["K"], MESH_LOD_SPEC["levels"]
+    return [n_vertices // k**p for p in range(levels, 0, -1) if n_vertices // k**p >= 4]
+
+
+def ladder_key(vertices: np.ndarray, faces: np.ndarray) -> tuple:
+    v = np.ascontiguousarray(vertices, dtype=np.float32)
+    f = np.ascontiguousarray(faces, dtype=np.uint32).reshape(-1, 3)
+    return (len(v), len(f), v[0].tobytes(), v[-1].tobytes(), f[:4].tobytes(), f[-4:].tobytes())
+
+
+def decimate_part(args: tuple) -> tuple:
+    """Worker: one part's LOD ladder, exactly as Luxar's writer would compute
+    it (same targets, method and attributes)."""
+    from arbol import Arbol
+    from luxar.mesh.decimate import decimate_ladder
+
+    Arbol.enable_output = False
+    vertices, faces, normals = args
+    ladder = decimate_ladder(
+        vertices,
+        faces,
+        target_vertices=ladder_targets(len(vertices)),
+        method="cluster",
+        normals=normals,
+        normal_dims=(0, 1, 2),
+        colors=None,
+        scalars=None,
+        spatial_dims=None,
+        attribute_weight=0.0,
+    )
+    return ladder_key(vertices, faces), ladder
+
+
+# Ladders computed ahead of time by the worker pool, consumed by the patched
+# decimate_ladder below when Luxar's writer asks for them.
+PRECOMPUTED_LADDERS: dict = {}
+
+
+def install_ladder_cache() -> None:
+    """Luxar decimates inside add_mesh, one surface at a time on one core --
+    most of a big mesh scene's build time. build_meshes computes the ladders
+    in parallel first; this makes Luxar's writer take a precomputed ladder
+    when it asks for one with the same arguments, and compute it itself
+    otherwise."""
+    import importlib
+
+    # By module path: `luxar.mesh.decimate` as an attribute is a function
+    # (the package re-exports `decimate`), not this module.
+    decimate_module = importlib.import_module("luxar.mesh.decimate")
+
+    original = decimate_module.decimate_ladder
+
+    def cached(vertices, faces, *, target_vertices, method="auto", **kwargs):
+        hit = PRECOMPUTED_LADDERS.pop(ladder_key(vertices, faces), None)
+        same_request = (
+            hit is not None
+            and method == "cluster"
+            and list(target_vertices) == ladder_targets(len(vertices))
+            and kwargs.get("colors") is None
+            and kwargs.get("scalars") is None
+            and float(kwargs.get("attribute_weight", 0.0)) == 0.0
+            and kwargs.get("spatial_dims") in (None, (0, 1, 2), [0, 1, 2])
+        )
+        if same_request:
+            return hit
+        return original(vertices, faces, target_vertices=target_vertices, method=method, **kwargs)
+
+    decimate_module.decimate_ladder = cached
+
+
+def mesh_worker_count() -> int:
+    """Worker processes for decimation: the cores (less one), capped so each
+    has ~1.5 GB of memory for a 2M-triangle part. LUXAR_MESH_WORKERS
+    overrides; 0 leaves decimation to Luxar (serial, in this process)."""
+    import os
+
+    if os.environ.get("LUXAR_MESH_WORKERS"):
+        return max(0, int(os.environ["LUXAR_MESH_WORKERS"]))
+    cores = max(1, (os.cpu_count() or 2) - 1)
+    try:
+        memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        cores = min(cores, max(1, int(memory / (1.5 * 1024**3))))
+    except (ValueError, OSError, AttributeError):
+        pass
+    return cores
+
+
 def build_meshes(spec: dict) -> None:
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
     segments = spec["segments"]
     max_part = int(spec.get("maxPartTriangles", MESH_PART_MAX_TRIANGLES))
 
-    # Bounds (for the camera) from a first pass, so only one surface is ever
-    # in memory: micro-CT segmentations can total hundreds of millions of
-    # triangles.
+    # Bounds (for the camera) from a first pass, so only one batch of
+    # surfaces is ever in memory: micro-CT segmentations can total hundreds
+    # of millions of triangles.
     lo = np.full(3, np.inf)
     hi = np.full(3, -np.inf)
     total = 0
@@ -172,6 +272,11 @@ def build_meshes(spec: dict) -> None:
     if total == 0:
         raise SystemExit("No non-empty segment meshes to compile")
 
+    workers = mesh_worker_count()
+    log(f"{total:,} triangles; decimating on {workers or 'no'} worker process(es)")
+    if workers:
+        install_ladder_cache()
+
     def build(compiler) -> None:
         from luxar.core.viewer_config import ViewerConfig
         from luxar.mesh.split import split_mesh_by_faces
@@ -182,47 +287,77 @@ def build_meshes(spec: dict) -> None:
         )
         scene.attrs["title"] = spec.get("title", "Surface meshes")
         done = 0
-        for seg in segments:
-            vertices, faces = read_mesh_bin(seg["file"])
-            if len(faces) == 0:
-                continue
-            normals = vertex_normals(vertices, faces)
-            color = tuple(float(c) for c in seg["color"])
 
-            def add(parent, name: str, v: np.ndarray, f: np.ndarray, n: np.ndarray, **attrs) -> None:
-                if len(f) > MESH_LOD_MIN_TRIANGLES:
-                    # 'cluster' (vertex clustering) rather than QEM: it stays
-                    # fast on the huge surfaces micro-CT segmentations produce.
-                    # Two levels at 8x (1/8, 1/64) rather than Luxar's default
-                    # three at 4x: ~25% faster to build, and the coarse end is
-                    # what matters for a whole-specimen view.
-                    attrs["substitutive_lod"] = {"method": "cluster", "levels": 2, "K": 8}
-                parent.add_mesh(
-                    name=name,
-                    vertices=v,
-                    faces=f,
-                    normals=n,
-                    normal_dims=[0, 1, 2],
-                    colors=color,
-                    labels=[seg["name"]] * len(v),
-                    shading="smooth",
-                    **attrs,
-                )
+        def add(parent, seg, name: str, v: np.ndarray, f: np.ndarray, n: np.ndarray, **attrs) -> None:
+            if len(f) > MESH_LOD_MIN_TRIANGLES:
+                # 'cluster' (vertex clustering) rather than QEM: it stays fast
+                # on the huge surfaces micro-CT segmentations produce. Two
+                # levels at 8x rather than Luxar's default three at 4x: ~25%
+                # less work, and the coarse end is what matters for a
+                # whole-specimen view.
+                attrs["substitutive_lod"] = dict(MESH_LOD_SPEC)
+            parent.add_mesh(
+                name=name,
+                vertices=v,
+                faces=f,
+                normals=n,
+                normal_dims=[0, 1, 2],
+                colors=tuple(float(c) for c in seg["color"]),
+                labels=[seg["name"]] * len(v),
+                shading="smooth",
+                **attrs,
+            )
 
-            if len(faces) <= max_part:
-                progress(f"compiling {seg['name']} ({len(faces):,} triangles; {done:,}/{total:,} done)")
-                add(scene, seg["layerName"], vertices, faces, normals, layer=True)
-            else:
-                group = scene.add_group(seg["layerName"], layer=True)
-                parts = split_mesh_by_faces(faces, spatial_face_parts(vertices, faces, max_part))
-                for j, part in enumerate(parts):
-                    progress(f"compiling {seg['name']} part {j + 1}/{len(parts)} ({len(faces):,} triangles; {done:,}/{total:,} done)")
-                    vi = part.vertex_index
-                    add(group, f"part_{j}", vertices[vi], part.faces, normals[vi])
-                    done += len(part.faces)
-                done -= len(faces)
-            done += len(faces)
-            del vertices, faces, normals
+        def flush(batch: list, pool) -> None:
+            nonlocal done
+            # Every part (a whole segment counts as one) of the batch.
+            items = []
+            for seg, vertices, faces, normals in batch:
+                if len(faces) <= max_part:
+                    items.append((seg, None, vertices, faces, normals))
+                else:
+                    parts = split_mesh_by_faces(faces, spatial_face_parts(vertices, faces, max_part))
+                    for j, part in enumerate(parts):
+                        vi = part.vertex_index
+                        items.append((seg, (j, len(parts)), vertices[vi], part.faces, normals[vi]))
+            jobs = [(v, f, n) for _, _, v, f, n in items if len(f) > MESH_LOD_MIN_TRIANGLES] if pool else []
+            if jobs:
+                finished = 0
+                for key, ladder in pool.map(decimate_part, jobs):
+                    PRECOMPUTED_LADDERS[key] = ladder
+                    finished += 1
+                    progress(f"simplifying surfaces: {finished}/{len(jobs)} ({done:,}/{total:,} triangles written)")
+            groups = {}
+            for seg, part, v, f, n in items:
+                if part is None:
+                    progress(f"writing {seg['name']} ({done:,}/{total:,} triangles)")
+                    add(scene, seg, seg["layerName"], v, f, n, layer=True)
+                else:
+                    j, count = part
+                    progress(f"writing {seg['name']} part {j + 1}/{count} ({done:,}/{total:,} triangles)")
+                    if seg["layerName"] not in groups:
+                        groups[seg["layerName"]] = scene.add_group(seg["layerName"], layer=True)
+                    add(groups[seg["layerName"]], seg, f"part_{j}", v, f, n)
+                done += len(f)
+            PRECOMPUTED_LADDERS.clear()
+
+        pool = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) if workers else None
+        try:
+            batch, batch_triangles = [], 0
+            for seg in segments:
+                vertices, faces = read_mesh_bin(seg["file"])
+                if len(faces) == 0:
+                    continue
+                batch.append((seg, vertices, faces, vertex_normals(vertices, faces)))
+                batch_triangles += len(faces)
+                if batch_triangles >= MESH_BATCH_TRIANGLES:
+                    flush(batch, pool)
+                    batch, batch_triangles = [], 0
+            if batch:
+                flush(batch, pool)
+        finally:
+            if pool:
+                pool.shutdown()
 
     compile_to(Path(spec["output"]), build)
 

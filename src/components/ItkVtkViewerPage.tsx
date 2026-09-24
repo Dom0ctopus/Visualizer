@@ -241,6 +241,9 @@ export function ItkVtkViewerPage() {
   const [atlasTabOpened, setAtlasTabOpened] = useState(false)
   const [meshRenderer, setMeshRenderer] = useState<'luxar' | 'basic'>('luxar')
   const [atlasQualityChoice, setAtlasQualityChoice] = useState<AtlasQuality | null>(null)
+  // Voxel render label colors: the segments' own (matching the 2D panes,
+  // meshes and segment tree) or itk-vtk-viewer's categorical palette.
+  const [voxelColors, setVoxelColors] = useState<'segments' | 'palette'>('segments')
   const pollTimerRef = useRef<number | null>(null)
   const volumeInputRef = useRef<HTMLInputElement | null>(null)
   const segInputRef = useRef<HTMLInputElement | null>(null)
@@ -255,7 +258,8 @@ export function ItkVtkViewerPage() {
     loadZarrUrl,
     loadLabelImageUrl,
     setLabelWeights,
-    setLabelNames
+    setLabelNames,
+    setLabelColors
   } = useItkVtkViewer()
   const {
     levels,
@@ -297,7 +301,9 @@ export function ItkVtkViewerPage() {
     zarrSeg.segmentations,
     loadLabelImageUrl,
     setLabelWeights,
-    setLabelNames
+    setLabelNames,
+    setLabelColors,
+    voxelColors === 'segments'
   )
 
   const refreshLibrary = useCallback(async () => {
@@ -626,6 +632,25 @@ export function ItkVtkViewerPage() {
                   so switching never reloads or re-lays-out either renderer. */}
               <div className={renderTab === 'voxel' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
                 <div ref={volumeContainerRef} className="itk-volume-container" />
+                <div className="render-toolbar">
+                  <span className="render-toolbar-label">Label colors</span>
+                  <div className="segmented">
+                    <button
+                      className={voxelColors === 'segments' ? 'active' : ''}
+                      title="Each segment's own color, as in the 2D panes, surface meshes and segment tree"
+                      onClick={() => setVoxelColors('segments')}
+                    >
+                      Segments
+                    </button>
+                    <button
+                      className={voxelColors === 'palette' ? 'active' : ''}
+                      title="itk-vtk-viewer's categorical palette (colors don't correspond to the segment tree)"
+                      onClick={() => setVoxelColors('palette')}
+                    >
+                      Palette
+                    </button>
+                  </div>
+                </div>
               </div>
               {luxar?.available && (
                 <div className={luxarSrc ? 'render-tab-panel' : 'render-tab-panel inactive'}>

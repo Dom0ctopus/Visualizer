@@ -26,12 +26,25 @@ function run(command, args, env = process.env) {
   return spawnSync(command, args, { stdio: 'inherit', env }).status === 0
 }
 
+// An Apple-silicon Mac, even if this Node itself runs under Rosetta.
+const appleSilicon =
+  process.platform === 'darwin' && spawnSync('sysctl', ['-n', 'hw.optional.arm64'], { encoding: 'utf8' }).stdout?.trim() === '1'
+
 function findPython() {
   for (const candidate of ['python3.13', 'python3.12', 'python3', 'python']) {
     if (!has(candidate)) continue
     try {
-      const version = execFileSync(candidate, ['-c', 'import sys; print("%d.%d" % sys.version_info[:2])']).toString().trim()
+      const [version, machine] = execFileSync(candidate, ['-c', 'import sys, platform; print("%d.%d" % sys.version_info[:2], platform.machine())'])
+        .toString()
+        .trim()
+        .split(' ')
       const [major, minor] = version.split('.').map(Number)
+      // On Apple silicon an x86_64 Python (e.g. an Intel Anaconda) runs under
+      // Rosetta, where PyTorch can't use the GPU (MPS).
+      if (appleSilicon && machine !== 'arm64') {
+        console.warn(`Skipping ${candidate}: it's an ${machine} build running under Rosetta, which can't use the Apple GPU.`)
+        continue
+      }
       if (major === 3 && minor >= 12) return candidate
     } catch {
       // try the next one
@@ -43,11 +56,14 @@ function findPython() {
 const useUv = has('uv')
 if (!existsSync(venvPython)) {
   if (useUv) {
-    if (!run('uv', ['venv', '--python', '3.12', venv])) process.exit(1)
+    // uv's own managed Pythons are native builds (older uv lacks the flag).
+    if (!run('uv', ['venv', '--python', '3.12', '--managed-python', venv]) && !run('uv', ['venv', '--python', '3.12', venv])) process.exit(1)
   } else {
     const python = findPython()
     if (!python) {
-      console.error('Luxar needs Python 3.12 or newer. Install it (or uv: https://docs.astral.sh/uv/) and re-run.')
+      console.error(
+        `Luxar needs Python 3.12 or newer${appleSilicon ? ' (a native arm64 build)' : ''}. Install it (or uv: https://docs.astral.sh/uv/) and re-run.`
+      )
       process.exit(1)
     }
     if (!run(python, ['-m', 'venv', venv])) process.exit(1)
@@ -69,5 +85,16 @@ if (wantCpuTorch) {
 if (!ok) ok = install([])
 if (!ok) process.exit(1)
 
-execFileSync(venvPython, ['-c', 'import luxar, torch; print("luxar", luxar.__version__, "| torch", torch.__version__, "| device:", "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))'], { stdio: 'inherit' })
-console.log('Luxar is ready. The server picks it up automatically (no restart needed).')
+const device = execFileSync(venvPython, [
+  '-c',
+  'import luxar, torch; print("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))'
+])
+  .toString()
+  .trim()
+console.log(`Luxar is ready (splat fitting device: ${device}). The server picks it up automatically (no restart needed).`)
+if (appleSilicon && device !== 'mps') {
+  console.warn(
+    'This Mac has an Apple GPU but PyTorch in server/.luxar-venv can\'t use it (likely an x86_64 Python under Rosetta). ' +
+      'Delete server/.luxar-venv and re-run with a native arm64 Python 3.12+ or uv on your PATH.'
+  )
+}
