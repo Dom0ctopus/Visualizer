@@ -5,13 +5,15 @@ from PIL import Image, ImageDraw, ImageFont
 import sys
 # Usage: sample_reference_colors.py <figures dir> <output dir>
 # The figures dir holds the page images as 25.webp (Fig 3.9), 26.webp (Fig 3.12),
-# 27.webp (Fig 3.19) and 28.png (cephalopod brain, dark-field photo).
+# 27.webp (Fig 3.19), 28.png (cephalopod brain, dark-field photo; Nixon & Young,
+# The Brains and Lives of Cephalopods), 29.webp (Fig 3.19 at higher resolution,
+# for the renal tissue in panel a) and 30.webp (O. vulgaris upper beak).
 # Requires numpy and Pillow.
 IMG=sys.argv[1]
 OUT=sys.argv[2]
-FILES={25:'25.webp',26:'26.webp',27:'27.webp',28:'28.png'}
+FILES={25:'25.webp',26:'26.webp',27:'27.webp',28:'28.png',29:'29.webp',30:'30.webp'}
 imgs={n: np.asarray(Image.open(f'{IMG}/{f}').convert('RGB')).astype(np.float64) for n,f in FILES.items()}
-FIG={25:'Fig. 3.9',26:'Fig. 3.12',27:'Fig. 3.19',28:'Brain photo (b)'}
+FIG={25:'Fig. 3.9',26:'Fig. 3.12',27:'Fig. 3.19',28:'Nixon & Young brain photo (b)',29:'Fig. 3.19a (hi-res)',30:'Upper beak photo'}
 # White references (white foam) -> per-channel gains; None = uncorrected.
 WHITE={25:[(220,200,400,300),(1250,200,1350,300)], 27:[(860,250,960,330),(870,975,940,1005)]}
 def region(n,r):
@@ -58,14 +60,32 @@ S=[
  ('brain',28,(155,410,195,450),'supraoesophageal mass'),
  ('brain',28,(95,395,130,440),'optic lobe, left (cream part)'),
  ('brain',28,(215,395,250,435),'optic lobe, right (cream part)'),
+ ('renal tissue',29,(235,745,290,790),'renal, left of testis'),
+ ('renal tissue',29,(450,775,500,805),'renal, right of testis'),
+ ('renal tissue',29,(520,790,560,830),'renal, near right bh'),
+ ('beak',30,(400,250,500,330),'upper beak body'),
+ ('beak',30,(650,170,690,210),'hood'),
+ ('beak',30,(430,570,500,620),'lateral wall (section)'),
 ]
+# Photos without a white reference but showing a tissue already measured
+# white-balanced elsewhere: per-channel gains mapping that tissue onto its
+# measured color calibrate the rest of the photo. Fig 3.19a (tray lighting)
+# is calibrated against its gills (gill measured in Fig 3.9).
+CALIBRATE={29:('gill',25,(130,540,200,620))}
 samples=[]
 for cls,n,r,note in S:
     raw=robust(region(n,r))
     # fig 27 (a) is a different photo (tray, no foam): only (b) crops are corrected
     corrected = n in gains and not (n==27 and r[0]<700)
     wb=np.clip(raw*gains[n],0,255) if corrected else raw
-    samples.append(dict(cls=cls,fig=FIG[n],img=n,rect=r,note=note,raw=raw.round().tolist(),color=wb.round().tolist(),white_balanced=bool(corrected)))
+    calibrated=None
+    if n in CALIBRATE:
+        ref_cls,ref_img,ref_rect=CALIBRATE[n]
+        measured=np.median([robust(region(i,rr))*gains[i] for c,i,rr,_ in S if c==ref_cls and i==ref_img],axis=0)
+        cal_gains=measured/robust(region(n,ref_rect))
+        wb=np.clip(raw*cal_gains,0,255)
+        calibrated=f'{ref_cls} ({FIG[ref_img]})'
+    samples.append(dict(cls=cls,fig=FIG[n],img=n,rect=r,note=note,raw=raw.round().tolist(),color=wb.round().tolist(),white_balanced=bool(corrected),calibrated_to=calibrated))
 # Organs -> general tissue classes (what the app's palette uses): colors
 # are for a kind of tissue, not a species' particular organ.
 GENERAL={
@@ -75,15 +95,17 @@ GENERAL={
  'crop / oesophagus':'gutWall','caecum':'gutWall','intestine':'gutWall','stomach':'stomach',
  'testis':'gonad','spermatophoric gland':'reproductiveTract',"spermatophoric (Needham's) sac":'reproductiveTract',
  'spermatophoric sac gland':'reproductiveTract','terminal organ':'reproductiveTract',
+ 'renal tissue':'renal','beak':'beak',
 }
 groups={}
 for s in samples: groups.setdefault(GENERAL[s['cls']],[]).append(s)
 palette={}
 for g,v in groups.items():
     # Prefer white-balanced samples; in-situ/uncorrected ones only if none.
-    use=[s for s in v if s['white_balanced']] or v
+    use=[s for s in v if s['white_balanced'] or s.get('calibrated_to')] or v
     col=np.median([s['color'] for s in use],axis=0).round().astype(int).tolist()
     palette[g]=dict(color=col,hex='#%02x%02x%02x'%tuple(col),white_balanced=any(s['white_balanced'] for s in use),
+                    calibrated_to=next((s['calibrated_to'] for s in use if s.get('calibrated_to')),None),
                     samples=len(use),organs=sorted({s['cls'] for s in use}),figures=sorted({s['fig'] for s in use}))
 json.dump(dict(samples=samples,palette=palette),open(f'{OUT}/samples.json','w'),indent=1)
 for g,v in palette.items(): print(f"{g:20s} {v['hex']}  {'WB ' if v['white_balanced'] else 'raw'} n={v['samples']}  {', '.join(v['organs'])}")

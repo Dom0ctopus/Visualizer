@@ -21,7 +21,8 @@
     137.0,
     123.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "gill",
@@ -44,7 +45,8 @@
     133.0,
     117.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "gill",
@@ -67,7 +69,8 @@
     131.0,
     101.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "gill vessel",
@@ -90,7 +93,8 @@
     173.0,
     145.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "gill vessel",
@@ -113,7 +117,8 @@
     183.0,
     153.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "branchial heart",
@@ -136,7 +141,8 @@
     104.0,
     114.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "branchial heart",
@@ -159,7 +165,8 @@
     107.0,
     116.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "systemic heart",
@@ -182,7 +189,8 @@
     190.0,
     160.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "aorta / vessels",
@@ -205,7 +213,8 @@
     204.0,
     192.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "digestive gland",
@@ -228,7 +237,8 @@
     78.0,
     54.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "digestive gland",
@@ -251,7 +261,8 @@
     76.0,
     60.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "ink sac",
@@ -274,7 +285,8 @@
     61.0,
     75.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "posterior salivary gland",
@@ -297,7 +309,8 @@
     199.0,
     152.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "posterior salivary gland",
@@ -320,7 +333,8 @@
     132.0,
     86.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "buccal mass",
@@ -343,7 +357,8 @@
     141.0,
     118.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "crop / oesophagus",
@@ -366,7 +381,8 @@
     133.0,
     90.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "stomach",
@@ -389,7 +405,8 @@
     108.0,
     80.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "caecum",
@@ -412,7 +429,8 @@
     142.0,
     106.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "intestine",
@@ -435,7 +453,8 @@
     144.0,
     107.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "testis",
@@ -458,7 +477,8 @@
     178.0,
     149.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "testis",
@@ -481,7 +501,8 @@
     173.0,
     156.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "spermatophoric gland",
@@ -504,7 +525,8 @@
     191.0,
     159.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "spermatophoric (Needham's) sac",
@@ -527,7 +549,8 @@
     183.0,
     154.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "spermatophoric sac gland",
@@ -550,7 +573,8 @@
     129.0,
     104.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "terminal organ",
@@ -573,11 +597,12 @@
     207.0,
     192.0
    ],
-   "white_balanced": true
+   "white_balanced": true,
+   "calibrated_to": null
   },
   {
    "cls": "brain",
-   "fig": "Brain photo (b)",
+   "fig": "Nixon & Young brain photo (b)",
    "img": 28,
    "rect": [
     155,
@@ -596,11 +621,12 @@
     190.0,
     189.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "brain",
-   "fig": "Brain photo (b)",
+   "fig": "Nixon & Young brain photo (b)",
    "img": 28,
    "rect": [
     95,
@@ -619,11 +645,12 @@
     205.0,
     199.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
   },
   {
    "cls": "brain",
-   "fig": "Brain photo (b)",
+   "fig": "Nixon & Young brain photo (b)",
    "img": 28,
    "rect": [
     215,
@@ -642,7 +669,152 @@
     220.0,
     223.0
    ],
-   "white_balanced": false
+   "white_balanced": false,
+   "calibrated_to": null
+  },
+  {
+   "cls": "renal tissue",
+   "fig": "Fig. 3.19a (hi-res)",
+   "img": 29,
+   "rect": [
+    235,
+    745,
+    290,
+    790
+   ],
+   "note": "renal, left of testis",
+   "raw": [
+    132.0,
+    103.0,
+    83.0
+   ],
+   "color": [
+    130.0,
+    101.0,
+    95.0
+   ],
+   "white_balanced": false,
+   "calibrated_to": "gill (Fig. 3.9)"
+  },
+  {
+   "cls": "renal tissue",
+   "fig": "Fig. 3.19a (hi-res)",
+   "img": 29,
+   "rect": [
+    450,
+    775,
+    500,
+    805
+   ],
+   "note": "renal, right of testis",
+   "raw": [
+    130.0,
+    96.0,
+    71.0
+   ],
+   "color": [
+    128.0,
+    95.0,
+    81.0
+   ],
+   "white_balanced": false,
+   "calibrated_to": "gill (Fig. 3.9)"
+  },
+  {
+   "cls": "renal tissue",
+   "fig": "Fig. 3.19a (hi-res)",
+   "img": 29,
+   "rect": [
+    520,
+    790,
+    560,
+    830
+   ],
+   "note": "renal, near right bh",
+   "raw": [
+    117.0,
+    92.0,
+    76.0
+   ],
+   "color": [
+    115.0,
+    91.0,
+    87.0
+   ],
+   "white_balanced": false,
+   "calibrated_to": "gill (Fig. 3.9)"
+  },
+  {
+   "cls": "beak",
+   "fig": "Upper beak photo",
+   "img": 30,
+   "rect": [
+    400,
+    250,
+    500,
+    330
+   ],
+   "note": "upper beak body",
+   "raw": [
+    35.0,
+    28.0,
+    23.0
+   ],
+   "color": [
+    35.0,
+    28.0,
+    23.0
+   ],
+   "white_balanced": false,
+   "calibrated_to": null
+  },
+  {
+   "cls": "beak",
+   "fig": "Upper beak photo",
+   "img": 30,
+   "rect": [
+    650,
+    170,
+    690,
+    210
+   ],
+   "note": "hood",
+   "raw": [
+    39.0,
+    51.0,
+    45.0
+   ],
+   "color": [
+    39.0,
+    51.0,
+    45.0
+   ],
+   "white_balanced": false,
+   "calibrated_to": null
+  },
+  {
+   "cls": "beak",
+   "fig": "Upper beak photo",
+   "img": 30,
+   "rect": [
+    430,
+    570,
+    500,
+    620
+   ],
+   "note": "lateral wall (section)",
+   "raw": [
+    32.0,
+    26.0,
+    26.0
+   ],
+   "color": [
+    32.0,
+    26.0,
+    26.0
+   ],
+   "white_balanced": false,
+   "calibrated_to": null
   }
  ],
  "palette": {
@@ -654,6 +826,7 @@
    ],
    "hex": "#9e8778",
    "white_balanced": true,
+   "calibrated_to": null,
    "samples": 2,
    "organs": [
     "gill"
@@ -670,6 +843,7 @@
    ],
    "hex": "#d2b799",
    "white_balanced": true,
+   "calibrated_to": null,
    "samples": 3,
    "organs": [
     "aorta / vessels",
@@ -687,6 +861,7 @@
    ],
    "hex": "#6a6a73",
    "white_balanced": true,
+   "calibrated_to": null,
    "samples": 2,
    "organs": [
     "branchial heart"
@@ -703,6 +878,7 @@
    ],
    "hex": "#e3bea0",
    "white_balanced": true,
+   "calibrated_to": null,
    "samples": 1,
    "organs": [
     "systemic heart"
@@ -719,6 +895,7 @@
    ],
    "hex": "#644d39",
    "white_balanced": false,
+   "calibrated_to": null,
    "samples": 2,
    "organs": [
     "digestive gland"
@@ -735,6 +912,7 @@
    ],
    "hex": "#2d3d4b",
    "white_balanced": false,
+   "calibrated_to": null,
    "samples": 1,
    "organs": [
     "ink sac"
@@ -751,6 +929,7 @@
    ],
    "hex": "#caa677",
    "white_balanced": false,
+   "calibrated_to": null,
    "samples": 2,
    "organs": [
     "posterior salivary gland"
@@ -767,6 +946,7 @@
    ],
    "hex": "#a68d76",
    "white_balanced": false,
+   "calibrated_to": null,
    "samples": 1,
    "organs": [
     "buccal mass"
@@ -783,6 +963,7 @@
    ],
    "hex": "#ae8e6a",
    "white_balanced": false,
+   "calibrated_to": null,
    "samples": 3,
    "organs": [
     "caecum",
@@ -801,6 +982,7 @@
    ],
    "hex": "#906c50",
    "white_balanced": false,
+   "calibrated_to": null,
    "samples": 1,
    "organs": [
     "stomach"
@@ -817,6 +999,7 @@
    ],
    "hex": "#dcb295",
    "white_balanced": true,
+   "calibrated_to": null,
    "samples": 1,
    "organs": [
     "testis"
@@ -833,6 +1016,7 @@
    ],
    "hex": "#e0bb9c",
    "white_balanced": true,
+   "calibrated_to": null,
    "samples": 4,
    "organs": [
     "spermatophoric (Needham's) sac",
@@ -852,12 +1036,47 @@
    ],
    "hex": "#d2cdc7",
    "white_balanced": false,
+   "calibrated_to": null,
    "samples": 3,
    "organs": [
     "brain"
    ],
    "figures": [
-    "Brain photo (b)"
+    "Nixon & Young brain photo (b)"
+   ]
+  },
+  "renal": {
+   "color": [
+    128,
+    95,
+    87
+   ],
+   "hex": "#805f57",
+   "white_balanced": false,
+   "calibrated_to": "gill (Fig. 3.9)",
+   "samples": 3,
+   "organs": [
+    "renal tissue"
+   ],
+   "figures": [
+    "Fig. 3.19a (hi-res)"
+   ]
+  },
+  "beak": {
+   "color": [
+    35,
+    28,
+    26
+   ],
+   "hex": "#231c1a",
+   "white_balanced": false,
+   "calibrated_to": null,
+   "samples": 3,
+   "organs": [
+    "beak"
+   ],
+   "figures": [
+    "Upper beak photo"
    ]
   }
  }

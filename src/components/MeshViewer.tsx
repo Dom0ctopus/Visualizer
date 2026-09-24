@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { fetchMeshManifest, meshFileUrl, regenerateMeshes, type MeshManifest } from '../lib/api'
+import { tissueFinish, type TissueFinish } from '../lib/realisticPalette'
 import type { SegmentationRecord, ZarrLoadedSegmentation } from '../types'
 
 interface MeshViewerProps {
@@ -16,6 +17,16 @@ interface LoadedMeshes {
   manifest: MeshManifest
   /** Keyed by segment key (`${layer}:${labelValue}`), matching SegmentState.key. */
   meshes: Map<string, THREE.Mesh>
+}
+
+/** Soft tissue: a satin, wet-looking surface. Hard structures (beak,
+ *  cartilage): a clear-coated surface with crisp highlights, so they read
+ *  as hard at a glance. */
+function makeMaterial(finish: TissueFinish): THREE.MeshStandardMaterial {
+  if (finish === 'hard') {
+    return new THREE.MeshPhysicalMaterial({ roughness: 0.3, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.08, side: THREE.DoubleSide })
+  }
+  return new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide })
 }
 
 // Drops an attribute's CPU-side copy once three.js has uploaded it to the
@@ -158,8 +169,7 @@ export function MeshViewer({ segmentations, records, active }: MeshViewerProps) 
               const res = await fetch(meshFileUrl(id, entry.file))
               if (!res.ok) throw new Error(`Failed to fetch mesh ${entry.file} (${res.status})`)
               const geometry = parseMeshFile(await res.arrayBuffer())
-              const material = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide })
-              const mesh = new THREE.Mesh(geometry, material)
+              const mesh = new THREE.Mesh(geometry, makeMaterial('soft'))
               meshes.set(`${entry.layer}:${entry.labelValue}`, mesh)
             })
           )
@@ -189,6 +199,11 @@ export function MeshViewer({ segmentations, records, active }: MeshViewerProps) 
       for (const s of seg.segments) {
         const mesh = entry.meshes.get(s.key)
         if (!mesh) continue
+        const hard = tissueFinish(s.name, s.system, seg.name) === 'hard'
+        if ((mesh.material instanceof THREE.MeshPhysicalMaterial) !== hard) {
+          ;(mesh.material as THREE.Material).dispose()
+          mesh.material = makeMaterial(hard ? 'hard' : 'soft')
+        }
         const material = mesh.material as THREE.MeshStandardMaterial
         mesh.visible = s.visible && s.opacity > 0
         material.color.setRGB(s.color[0] / 255, s.color[1] / 255, s.color[2] / 255, THREE.SRGBColorSpace)

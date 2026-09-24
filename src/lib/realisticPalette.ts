@@ -8,15 +8,24 @@
  *
  * Sources: Á. Guerra, "Functional Anatomy: Macroscopic Anatomy and
  * Post-Mortem Techniques", Figs 3.9, 3.12, 3.19 (fresh cephalopod
- * dissections), and a dark-field brain photograph (panel b of a supplied
- * figure). Each color is the median of glare/shadow-trimmed samples on the
+ * dissections), a dark-field brain photograph from M. Nixon & J. Z. Young,
+ * "The Brains and Lives of Cephalopods", a renal-tissue detail (Guerra Fig
+ * 3.19a) and an upper-beak photograph; cartilage is from a description. Each color is the median of glare/shadow-trimmed samples on the
  * labeled tissue. "measured" colors were corrected for white balance and
  * exposure against a white background in the photo; "uncorrected" ones had
  * no white reference. Every sample and the script that reproduces them are
  * in docs/real-to-life-palette/.
  */
 
-export type TissueConfidence = 'measured' | 'uncorrected'
+/** 'measured': white balance/exposure corrected against a white reference
+ *  in the photo, or calibrated against a tissue measured that way.
+ *  'uncorrected': as photographed. 'described': from a description, no
+ *  photo sampled. */
+export type TissueConfidence = 'measured' | 'uncorrected' | 'described'
+
+/** Surface finish for 3D shading: soft, wet tissue, or hard structures
+ *  (chitin, cartilage), which render glossier so they read as hard. */
+export type TissueFinish = 'soft' | 'hard'
 
 export interface Tissue {
   id: string
@@ -24,6 +33,7 @@ export interface Tissue {
   /** sRGB 0-255. */
   color: [number, number, number]
   confidence: TissueConfidence
+  finish: TissueFinish
   /** Where the color was sampled. */
   source: string
 }
@@ -33,31 +43,45 @@ function hex(h: string): [number, number, number] {
 }
 
 export const TISSUES: Record<string, Tissue> = {
-  nervous: { id: 'nervous', label: 'Nervous tissue', color: hex('#d2cdc7'), confidence: 'uncorrected', source: 'brain and optic lobes (dark-field brain photo)' },
-  muscle: { id: 'muscle', label: 'Muscle', color: hex('#a68d76'), confidence: 'uncorrected', source: 'buccal mass (Guerra Fig 3.12)' },
-  heart: { id: 'heart', label: 'Heart', color: hex('#e3bea0'), confidence: 'measured', source: 'systemic heart (Guerra Fig 3.9)' },
-  branchialHeart: { id: 'branchialHeart', label: 'Branchial heart', color: hex('#6a6a73'), confidence: 'measured', source: 'branchial hearts (Guerra Fig 3.9)' },
-  vessel: { id: 'vessel', label: 'Blood vessel', color: hex('#d2b799'), confidence: 'measured', source: 'dorsal aorta, gill vessels (Guerra Fig 3.9)' },
-  gill: { id: 'gill', label: 'Gill', color: hex('#9e8778'), confidence: 'measured', source: 'gills (Guerra Fig 3.9)' },
-  gutWall: { id: 'gutWall', label: 'Gut wall', color: hex('#ae8e6a'), confidence: 'uncorrected', source: 'crop, caecum, intestine (Guerra Fig 3.12)' },
-  stomach: { id: 'stomach', label: 'Stomach', color: hex('#906c50'), confidence: 'uncorrected', source: 'stomach (Guerra Fig 3.12)' },
-  digestiveGland: { id: 'digestiveGland', label: 'Liver / digestive gland', color: hex('#644d39'), confidence: 'uncorrected', source: 'digestive gland (Guerra Fig 3.12)' },
-  exocrineGland: { id: 'exocrineGland', label: 'Exocrine gland', color: hex('#caa677'), confidence: 'uncorrected', source: 'salivary glands (Guerra Fig 3.12)' },
-  pigmented: { id: 'pigmented', label: 'Pigmented sac', color: hex('#2d3d4b'), confidence: 'uncorrected', source: 'ink sac (Guerra Fig 3.12)' },
-  gonad: { id: 'gonad', label: 'Gonad', color: hex('#dcb295'), confidence: 'measured', source: 'testis (Guerra Fig 3.19b)' },
+  nervous: { id: 'nervous', label: 'Nervous tissue', color: hex('#d2cdc7'), confidence: 'uncorrected', finish: 'soft', source: 'brain and optic lobes (Nixon & Young, The Brains and Lives of Cephalopods)' },
+  muscle: { id: 'muscle', label: 'Muscle', color: hex('#a68d76'), confidence: 'uncorrected', finish: 'soft', source: 'buccal mass (Guerra Fig 3.12)' },
+  heart: { id: 'heart', label: 'Heart', color: hex('#e3bea0'), confidence: 'measured', finish: 'soft', source: 'systemic heart (Guerra Fig 3.9)' },
+  branchialHeart: { id: 'branchialHeart', label: 'Branchial heart', color: hex('#6a6a73'), confidence: 'measured', finish: 'soft', source: 'branchial hearts (Guerra Fig 3.9)' },
+  vessel: { id: 'vessel', label: 'Blood vessel', color: hex('#d2b799'), confidence: 'measured', finish: 'soft', source: 'dorsal aorta, gill vessels (Guerra Fig 3.9)' },
+  gill: { id: 'gill', label: 'Gill', color: hex('#9e8778'), confidence: 'measured', finish: 'soft', source: 'gills (Guerra Fig 3.9)' },
+  gutWall: { id: 'gutWall', label: 'Gut wall', color: hex('#ae8e6a'), confidence: 'uncorrected', finish: 'soft', source: 'crop, caecum, intestine (Guerra Fig 3.12)' },
+  stomach: { id: 'stomach', label: 'Stomach', color: hex('#906c50'), confidence: 'uncorrected', finish: 'soft', source: 'stomach (Guerra Fig 3.12)' },
+  digestiveGland: { id: 'digestiveGland', label: 'Liver / digestive gland', color: hex('#644d39'), confidence: 'uncorrected', finish: 'soft', source: 'digestive gland (Guerra Fig 3.12)' },
+  exocrineGland: { id: 'exocrineGland', label: 'Exocrine gland', color: hex('#caa677'), confidence: 'uncorrected', finish: 'soft', source: 'salivary glands (Guerra Fig 3.12)' },
+  pigmented: { id: 'pigmented', label: 'Pigmented sac', color: hex('#2d3d4b'), confidence: 'uncorrected', finish: 'soft', source: 'ink sac (Guerra Fig 3.12)' },
+  gonad: { id: 'gonad', label: 'Gonad', color: hex('#dcb295'), confidence: 'measured', finish: 'soft', source: 'testis (Guerra Fig 3.19b)' },
   reproductiveTract: {
     id: 'reproductiveTract',
     label: 'Reproductive tract / accessory gland',
     color: hex('#e0bb9c'),
     confidence: 'measured',
+    finish: 'soft',
     source: 'spermatophoric gland and sac, sac gland, terminal organ (Guerra Fig 3.19b)'
-  }
+  },
+  renal: {
+    id: 'renal',
+    label: 'Renal tissue',
+    color: hex('#805f57'),
+    confidence: 'measured',
+    finish: 'soft',
+    source: 'renal appendages (Guerra Fig 3.19a), calibrated against the gills measured in Fig 3.9'
+  },
+  beak: { id: 'beak', label: 'Beak / chitin', color: hex('#231c1a'), confidence: 'uncorrected', finish: 'hard', source: 'upper beak (O. vulgaris beak figure)' },
+  cartilage: { id: 'cartilage', label: 'Cartilage', color: hex('#d8d7d1'), confidence: 'described', finish: 'hard', source: 'described as whitish-grey; no photo sampled' }
 }
 
 /** Name keywords -> tissue class, most specific first (e.g. "branchial
  *  heart" before "heart", reproductive glands before the generic "gland").
  *  Matched against "<system> <segment name>". */
 const KEYWORDS: Array<[RegExp, string]> = [
+  [/beak|mandib|chitin|radula|stylet/i, 'beak'],
+  [/cartilag|cranium|cranial|skelet/i, 'cartilage'],
+  [/renal|kidney|nephrid|excretor/i, 'renal'],
   [/\bink\b|melan|pigment/i, 'pigmented'],
   [/digestive gland|midgut gland|hepat|\bliver\b/i, 'digestiveGland'],
   [/stomach|gizzard|proventric/i, 'stomach'],
@@ -69,7 +93,7 @@ const KEYWORDS: Array<[RegExp, string]> = [
   [/test(is|es)|ovar|gonad/i, 'gonad'],
   [/spermatophor|needham|terminal organ|penis|vas deferens|seminal|oviduct|uter|nidamental|prostat|accessory gland|sac gland/i, 'reproductiveTract'],
   [/salivary|pancrea|\bgland/i, 'exocrineGland'],
-  [/muscle|mantle|\barms?\b|tentacle|funnel|siphon|buccal|beak|radula|\bjaw|pharyn|tongue|\bfoot\b/i, 'muscle'],
+  [/muscle|mantle|\barms?\b|tentacle|funnel|siphon|buccal|\bjaw|pharyn|tongue|\bfoot\b/i, 'muscle'],
   [/brain|ganglion|ganglia|nerve|lobe|cerebr|spinal|\bcord\b|neur|optic|commissur/i, 'nervous']
 ]
 
@@ -105,9 +129,8 @@ export interface RealisticMatch {
   via: 'name' | 'file'
 }
 
-/** The real-to-life color for a segment, or null if neither its name nor
- *  its file identifies a tissue. */
-export function realisticColor(segmentName: string, system: string, fileName: string): RealisticMatch | null {
+/** The tissue class for a segment, from its name or its file. */
+function matchTissue(segmentName: string, system: string, fileName: string): { tissue: Tissue; via: 'name' | 'file' } | null {
   const domain = domainFor(fileName)
   const text = `${system} ${segmentName}`
   let tissueId: string | null = null
@@ -125,6 +148,19 @@ export function realisticColor(segmentName: string, system: string, fileName: st
     }
   }
   if (!tissueId) return null
-  const tissue = TISSUES[tissueId]
-  return { tissue, color: nudge(tissue.color, text), via }
+  return { tissue: TISSUES[tissueId], via }
+}
+
+/** The real-to-life color for a segment, or null if neither its name nor
+ *  its file identifies a tissue. */
+export function realisticColor(segmentName: string, system: string, fileName: string): RealisticMatch | null {
+  const match = matchTissue(segmentName, system, fileName)
+  if (!match) return null
+  return { ...match, color: nudge(match.tissue.color, `${system} ${segmentName}`) }
+}
+
+/** The segment's surface finish (whatever the color scheme): hard for
+ *  chitin and cartilage, soft otherwise. */
+export function tissueFinish(segmentName: string, system: string, fileName: string): TissueFinish {
+  return matchTissue(segmentName, system, fileName)?.tissue.finish ?? 'soft'
 }
