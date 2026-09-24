@@ -49,6 +49,7 @@ interface VtkColorTransferFunction {
   addRGBPointLong: (x: number, r: number, g: number, b: number, midpoint: number, sharpness: number) => void
   setMappingRange: (min: number, max: number) => void
   onModified: (callback: () => void) => { unsubscribe: () => void }
+  modified: () => void
 }
 interface VtkVolume {
   getProperty: () => { getRGBTransferFunction: (component: number) => VtkColorTransferFunction | null }
@@ -230,6 +231,7 @@ export function useItkVtkViewer() {
           console.warn('Could not apply itk-vtk-viewer defaults:', e)
         }
         volumeViewerRef.current = volumeViewer
+        if (import.meta.env.DEV) (window as unknown as { __itkViewer?: ItkVtkViewerInstance }).__itkViewer = volumeViewer
         setLoadedName(name)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load volume into itk-vtk-viewer')
@@ -389,6 +391,11 @@ export function useItkVtkViewer() {
           ctf.addRGBPointLong(value, r, g, b, 0.5, 1.0)
         }
         ctf.setMappingRange(0, values[values.length - 1])
+        // vtk.js rebuilds the volume's color texture (all components) only
+        // when component 0's function changes -- its cache key is that
+        // function's modified time alone -- so without this a recolor after
+        // the first render never reaches the screen.
+        volume.getProperty().getRGBTransferFunction(0)?.modified()
       } finally {
         applyingColors.current = false
       }
