@@ -426,7 +426,19 @@ export function useItkVtkViewer() {
     [applyLabelColors]
   )
 
-  const setLabelWeights = useCallback((weights: Map<number, number>) => scheduleLabelUpdate({ weights }), [scheduleLabelUpdate])
+  // Background (label 0) must come first, at 0: itk-vtk-viewer builds the
+  // label opacity function from the map in order and only anchors 0 -> 0 when
+  // the map's first key is 0. Otherwise background inherits the first
+  // segment's opacity, so every unlabeled voxel counts as partly labeled and
+  // the blend slider no longer fades unlabeled tissue out.
+  const setLabelWeights = useCallback(
+    (weights: Map<number, number>) => {
+      const ordered = new Map<number, number>([[0, 0]])
+      for (const [label, weight] of weights) if (label !== 0) ordered.set(label, weight)
+      scheduleLabelUpdate({ weights: ordered })
+    },
+    [scheduleLabelUpdate]
+  )
   const setLabelNames = useCallback((names: Map<number, string>) => scheduleLabelUpdate({ names }), [scheduleLabelUpdate])
 
   return {
