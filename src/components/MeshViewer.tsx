@@ -11,6 +11,8 @@ interface MeshViewerProps {
   records: SegmentationRecord[]
   /** Whether this tab is showing. Hidden, it skips rendering entirely. */
   active: boolean
+  /** The segment under the pointer (null when none), as the 2D panes report it. */
+  onHoverLabel?: (info: { name: string; clientX: number; clientY: number } | null) => void
 }
 
 interface LoadedMeshes {
@@ -34,6 +36,20 @@ function makeMaterial(finish: TissueFinish): THREE.MeshStandardMaterial {
 // JS memory kept for nothing, since nothing re-reads them after upload.
 function releaseAfterUpload(this: THREE.BufferAttribute) {
   ;(this as unknown as { array: unknown }).array = null
+}
+
+/** The flat, unlit material a mesh is drawn with for hover picking, kept
+ *  on the mesh so picking doesn't create (and recompile) one per move. */
+function pickMaterial(mesh: THREE.Mesh): THREE.MeshBasicMaterial {
+  const data = mesh.userData as { pickMaterial?: THREE.MeshBasicMaterial }
+  data.pickMaterial ??= new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, toneMapped: false })
+  return data.pickMaterial
+}
+
+function disposeMesh(mesh: THREE.Mesh): void {
+  mesh.geometry.dispose()
+  ;(mesh.material as THREE.Material).dispose()
+  ;(mesh.userData as { pickMaterial?: THREE.Material }).pickMaterial?.dispose()
 }
 
 function parseMeshFile(buffer: ArrayBuffer): THREE.BufferGeometry {
@@ -60,7 +76,7 @@ function parseMeshFile(buffer: ArrayBuffer): THREE.BufferGeometry {
  * Coordinates are physical mm in the scans' LPS space, so +z (superior) is
  * up and the default camera looks from anterior.
  */
-export function MeshViewer({ segmentations, records, active }: MeshViewerProps) {
+export function MeshViewer({ segmentations, records, active, onHoverLabel }: MeshViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const threeRef = useRef<{
     renderer: THREE.WebGLRenderer
@@ -73,6 +89,10 @@ export function MeshViewer({ segmentations, records, active }: MeshViewerProps) 
   const loadingRef = useRef(new Set<string>())
   const fittedKeyRef = useRef('')
   const activeRef = useRef(active)
+  const hoverRef = useRef({ segmentations, onHoverLabel })
+  useEffect(() => {
+    hoverRef.current = { segmentations, onHoverLabel }
+  }, [segmentations, onHoverLabel])
   const [version, setVersion] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
@@ -105,6 +125,77 @@ export function MeshViewer({ segmentations, records, active }: MeshViewerProps) 
     controls.addEventListener('change', render)
     threeRef.current = { renderer, scene, camera, controls, render }
 
+    // Hover identification by GPU picking: render the one pixel under the
+    // pointer with every mesh in a flat color encoding its index, and read it
+    // back. The meshes' CPU-side geometry is released after upload (see
+    // releaseAfterUpload), so ray casting against it isn't possible; this is
+    // exact (the frontmost visible surface) and costs one 1x1 render.
+    const pickTarget = new THREE.WebGLRenderTarget(1, 1)
+    const pickPixel = new Uint8Array(4)
+    const pick = (clientX: number, clientY: number): string | null => {
+      const rect = renderer.domElement.getBoundingClientRect()
+      const x = clientX - rect.left
+      const y = clientY - rect.top
+      if (x < 0 || y < 0 || x >= rect.width || y >= rect.height) return null
+      const entries: Array<{ recordId: string; key: string }> = []
+      const swapped: Array<[THREE.Mesh, THREE.Material | THREE.Material[]]> = []
+      for (const [recordId, { meshes }] of loadedRef.current) {
+        for (const [key, mesh] of meshes) {
+          if (!mesh.visible) continue
+          entries.push({ recordId, key })
+          const id = entries.length
+          // Linear, so the bytes read back are exactly the id.
+          const material = pickMaterial(mesh)
+          material.color.setRGB((id & 255) / 255, ((id >> 8) & 255) / 255, ((id >> 16) & 255) / 255, THREE.LinearSRGBColorSpace)
+          swapped.push([mesh, mesh.material])
+          mesh.material = material
+        }
+      }
+      if (entries.length === 0) return null
+      const clearColor = renderer.getClearColor(new THREE.Color())
+      const clearAlpha = renderer.getClearAlpha()
+      try {
+        camera.setViewOffset(rect.width, rect.height, x, y, 1, 1)
+        renderer.setClearColor(0x000000, 1)
+        renderer.setRenderTarget(pickTarget)
+        renderer.render(scene, camera)
+        renderer.readRenderTargetPixels(pickTarget, 0, 0, 1, 1, pickPixel)
+      } finally {
+        renderer.setRenderTarget(null)
+        renderer.setClearColor(clearColor, clearAlpha)
+        camera.clearViewOffset()
+        for (const [mesh, material] of swapped) mesh.material = material
+      }
+      const hit = entries[pickPixel[0] + (pickPixel[1] << 8) + (pickPixel[2] << 16) - 1]
+      if (!hit) return null
+      const segment = hoverRef.current.segmentations.find((l) => l.recordId === hit.recordId)?.segments.find((seg) => seg.key === hit.key)
+      return segment?.name ?? null
+    }
+    let hoverFrame = 0
+    let lastPointer: PointerEvent | null = null
+    const onPointerMove = (e: PointerEvent) => {
+      lastPointer = e
+      if (e.buttons !== 0) {
+        // Rotating/panning: no picking mid-drag.
+        hoverRef.current.onHoverLabel?.(null)
+        return
+      }
+      if (hoverFrame || !hoverRef.current.onHoverLabel) return
+      hoverFrame = requestAnimationFrame(() => {
+        hoverFrame = 0
+        const p = lastPointer
+        if (!p || !activeRef.current) return
+        const name = pick(p.clientX, p.clientY)
+        hoverRef.current.onHoverLabel?.(name ? { name, clientX: p.clientX, clientY: p.clientY } : null)
+      })
+    }
+    const onPointerLeave = () => {
+      lastPointer = null
+      hoverRef.current.onHoverLabel?.(null)
+    }
+    renderer.domElement.addEventListener('pointermove', onPointerMove)
+    renderer.domElement.addEventListener('pointerleave', onPointerLeave)
+
     const observer = new ResizeObserver(() => {
       const w = container.clientWidth
       const h = container.clientHeight
@@ -120,12 +211,13 @@ export function MeshViewer({ segmentations, records, active }: MeshViewerProps) 
     return () => {
       observer.disconnect()
       cancelAnimationFrame(frame)
+      cancelAnimationFrame(hoverFrame)
+      renderer.domElement.removeEventListener('pointermove', onPointerMove)
+      renderer.domElement.removeEventListener('pointerleave', onPointerLeave)
+      pickTarget.dispose()
       controls.dispose()
       for (const entry of loaded.values()) {
-        for (const mesh of entry.meshes.values()) {
-          mesh.geometry.dispose()
-          ;(mesh.material as THREE.Material).dispose()
-        }
+        for (const mesh of entry.meshes.values()) disposeMesh(mesh)
       }
       loaded.clear()
       renderer.dispose()
@@ -152,8 +244,7 @@ export function MeshViewer({ segmentations, records, active }: MeshViewerProps) 
       if (wanted.has(id)) continue
       for (const mesh of entry.meshes.values()) {
         three.scene.remove(mesh)
-        mesh.geometry.dispose()
-        ;(mesh.material as THREE.Material).dispose()
+        disposeMesh(mesh)
       }
       loadedRef.current.delete(id)
     }

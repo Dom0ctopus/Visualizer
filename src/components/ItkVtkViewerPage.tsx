@@ -293,8 +293,49 @@ export function ItkVtkViewerPage() {
     loadLabelImageUrl,
     setLabelWeights,
     setLabelNames,
-    setLabelColors
+    setLabelColors,
+    pickLabelName
   } = useItkVtkViewer()
+
+  // Hover in the voxel render names the segment under the pointer, as in
+  // the 2D panes (lib/volumePick.ts casts the ray). Throttled to one pick
+  // per frame; nothing while dragging (rotating) or on other tabs.
+  const voxelHoverRef = useRef({ active: false, pick: pickLabelName })
+  useEffect(() => {
+    voxelHoverRef.current = { active: renderTab === 'voxel', pick: pickLabelName }
+  }, [renderTab, pickLabelName])
+  useEffect(() => {
+    const container = volumeContainerRef.current
+    if (!container) return
+    let frame = 0
+    let last: PointerEvent | null = null
+    const onMove = (e: PointerEvent) => {
+      last = e
+      if (e.buttons !== 0) {
+        setHoveredSegment(null)
+        return
+      }
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        const p = last
+        if (!p || !voxelHoverRef.current.active) return
+        const name = voxelHoverRef.current.pick(p.clientX, p.clientY)
+        setHoveredSegment(name ? { name, clientX: p.clientX, clientY: p.clientY } : null)
+      })
+    }
+    const onLeave = () => {
+      last = null
+      setHoveredSegment(null)
+    }
+    container.addEventListener('pointermove', onMove)
+    container.addEventListener('pointerleave', onLeave)
+    return () => {
+      cancelAnimationFrame(frame)
+      container.removeEventListener('pointermove', onMove)
+      container.removeEventListener('pointerleave', onLeave)
+    }
+  }, [volumeContainerRef])
   const {
     levels,
     levelIndex,
@@ -730,7 +771,12 @@ export function ItkVtkViewerPage() {
                   {/* The three.js viewer: the "Basic" choice, the fallback without
                       Luxar, and what shows while the Luxar scene builds. */}
                   {!showLuxarMeshes && (
-                    <MeshViewer segmentations={zarrSeg.segmentations} records={segmentationRecords} active={renderTab === 'mesh'} />
+                    <MeshViewer
+                      segmentations={zarrSeg.segmentations}
+                      records={segmentationRecords}
+                      active={renderTab === 'mesh'}
+                      onHoverLabel={setHoveredSegment}
+                    />
                   )}
                   <div className="render-toolbar">
                     {zarrSeg.segmentations.length > 0 && colorToggle(false)}

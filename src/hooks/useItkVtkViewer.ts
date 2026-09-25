@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { pickVolumeLabel, type PickableViewProxy } from '../lib/volumePick'
 import { fetchPyramidLevels, type PyramidLevel } from '../lib/zarrClient'
 
 // itk-vtk-viewer ships as a legacy global-script webpack bundle, not an
@@ -439,7 +440,27 @@ export function useItkVtkViewer() {
     },
     [scheduleLabelUpdate]
   )
-  const setLabelNames = useCallback((names: Map<number, string>) => scheduleLabelUpdate({ names }), [scheduleLabelUpdate])
+  const labelNamesRef = useRef(new Map<number, string>())
+  const setLabelNames = useCallback(
+    (names: Map<number, string>) => {
+      labelNamesRef.current = names
+      scheduleLabelUpdate({ names })
+    },
+    [scheduleLabelUpdate]
+  )
+
+  /** The segment name the voxel render shows at a screen point, or null
+   *  (see lib/volumePick.ts). */
+  const pickLabelName = useCallback((clientX: number, clientY: number): string | null => {
+    const viewer = volumeViewerRef.current
+    if (!viewer) return null
+    try {
+      const label = pickVolumeLabel(viewer.getViewProxy() as unknown as PickableViewProxy, clientX, clientY)
+      return label === null ? null : (labelNamesRef.current.get(label) ?? null)
+    } catch {
+      return null // viewer mid-update
+    }
+  }, [])
 
   return {
     volumeContainerRef,
@@ -452,6 +473,7 @@ export function useItkVtkViewer() {
     loadLabelImageUrl,
     setLabelWeights,
     setLabelNames,
+    pickLabelName,
     setLabelColors,
     applyLabelColors
   }
