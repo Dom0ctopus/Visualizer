@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { enqueueJob, dequeueJob, getJobQueueState } from './jobQueue.js'
+import { enqueueJob, dequeueJob, getJobQueueState, hasJob } from './jobQueue.js'
 import { DATA_DIR, writeFileAtomic } from './store.js'
 
 /**
@@ -249,8 +249,13 @@ export function sceneStatus(key: string, kind: LuxarSceneKind): SceneStatus {
     if (running) {
       out.progress = running.progress
       out.startedAt = running.startedAt
-    } else {
+    } else if (hasJob('luxar', key)) {
       out.progress = 'queued'
+    } else {
+      // Its job is gone without recording an outcome; requesting the scene
+      // again (Retry) rebuilds it.
+      out.status = 'failed'
+      out.error = 'The build stopped without finishing (see the server log).'
     }
   }
   return out
@@ -259,8 +264,11 @@ export function sceneStatus(key: string, kind: LuxarSceneKind): SceneStatus {
 /** Removes every scene (of `kind`, if given) built from this library record
  *  -- on delete, or when its meshes are regenerated -- stopping its build if
  *  one is running. */
-/** A failed build from an older builder: worth retrying without being asked. */
-function staleFailure(status: StoredSceneStatus | undefined): boolean {
+/** Worth (re)building without being asked: a failed build from an older
+ *  builder, or a "pending" scene with no job queued or running for it
+ *  (a lost job would otherwise show as queued forever). */
+function needsRebuild(key: string, status: StoredSceneStatus | undefined): boolean {
+  if (status?.status === 'pending') return !hasJob('luxar', key)
   return status?.status === 'failed' && status.builderVersion !== BUILDER_VERSION
 }
 
@@ -289,15 +297,21 @@ export async function invalidateScenesFor(recordId: string, kind?: LuxarSceneKin
 
 function startBuild(key: string, kind: LuxarSceneKind, label: string, spec: object, inputIds: string[], quality?: AtlasQuality, layers?: SceneLayer[]): void {
   const builderVersion = BUILDER_VERSION
-  void persistStatus(key, { kind, status: 'pending', inputIds, quality, layers, builderVersion, format: SCENE_FORMAT })
+  const pendingWritten = persistStatus(key, { kind, status: 'pending', inputIds, quality, layers, builderVersion, format: SCENE_FORMAT })
   enqueueJob('luxar', key, label, async (ctx) => {
     if (!statuses.has(key)) return // invalidated while queued
     const dir = sceneDir(key)
     const specPath = path.join(dir, 'spec.json')
     const logPath = path.join(dir, 'build.log')
-    await writeFile(specPath, JSON.stringify({ ...spec, output: path.join(dir, SCENE_DIRNAME) }, null, 2))
     const t0 = Date.now()
+    // Everything that can fail is inside the try, so a failure is recorded
+    // rather than leaving the scene "pending" (shown as queued) forever.
     try {
+      // The job can start before the pending status (which creates the
+      // scene directory) has been written.
+      await pendingWritten.catch(() => {})
+      await mkdir(dir, { recursive: true })
+      await writeFile(specPath, JSON.stringify({ ...spec, output: path.join(dir, SCENE_DIRNAME) }, null, 2))
       await runBuilder(key, kind, specPath, logPath, (p) => ctx.setProgress(p))
       if (!statuses.has(key)) return
       await persistStatus(key, { kind, status: 'ready', inputIds, quality, layers, builderVersion, format: SCENE_FORMAT, builtAt: new Date().toISOString() })
@@ -389,7 +403,7 @@ export function requestMeshScene(req: MeshSceneRequest): SceneStatus {
   const key = sceneKey('meshes', req.colorsKey ? [...ids, `colors:${req.colorsKey}`] : ids)
   dropStaleQueuedBuilds('meshes', key)
   const existing = statuses.get(key)
-  if (existing && (!req.rebuild || existing.status === 'pending') && !staleFailure(existing)) return sceneStatus(key, 'meshes')
+  if (existing && (!req.rebuild || existing.status === 'pending') && !needsRebuild(key, existing)) return sceneStatus(key, 'meshes')
   const layers = req.segments.map((s) => ({ name: s.layerName, recordId: s.recordId, segmentKey: s.segmentKey }))
   startBuild(key, 'meshes', `build Luxar meshes for ${req.title}`, { title: req.title, segments: req.segments }, ids, undefined, layers)
   return sceneStatus(key, 'meshes')
@@ -426,7 +440,7 @@ export function requestAtlas(req: AtlasRequest): SceneStatus {
   const fitDir = fitDirFor(fitKey)
   const fitCache = path.join(fitDir, 'fit.npz')
   const recolorOnly = !existing && existsSync(fitCache)
-  const wantsBuild = (req.build && (!existing || (req.rebuild && existing.status !== 'pending'))) || recolorOnly || staleFailure(existing)
+  const wantsBuild = (req.build && (!existing || (req.rebuild && existing.status !== 'pending'))) || recolorOnly || needsRebuild(key, existing)
   if (!wantsBuild) return sceneStatus(key, 'atlas')
   if (recolorOnly) dropStaleQueuedBuilds('atlas', key)
   const inputIds = [req.volumeId, ...req.segmentationIds]
