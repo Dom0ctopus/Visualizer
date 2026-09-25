@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { fetchMeshManifest, meshFileUrl, regenerateMeshes, type MeshManifest } from '../lib/api'
+import { disposeOitMaterial, OitRenderer } from '../lib/oitRenderer'
 import { tissueFinish, type TissueFinish } from '../lib/realisticPalette'
 import type { SegmentationRecord, ZarrLoadedSegmentation } from '../types'
+import { CaptureBar, type CaptureTarget } from './CaptureBar'
 
 interface MeshViewerProps {
   segmentations: ZarrLoadedSegmentation[]
@@ -50,6 +52,7 @@ function disposeMesh(mesh: THREE.Mesh): void {
   mesh.geometry.dispose()
   ;(mesh.material as THREE.Material).dispose()
   ;(mesh.userData as { pickMaterial?: THREE.Material }).pickMaterial?.dispose()
+  disposeOitMaterial(mesh)
 }
 
 function parseMeshFile(buffer: ArrayBuffer): THREE.BufferGeometry {
@@ -84,7 +87,10 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
     camera: THREE.PerspectiveCamera
     controls: OrbitControls
     render: () => void
+    oit: OitRenderer
+    bounds: THREE.Sphere
   } | null>(null)
+  const [captureTarget, setCaptureTarget] = useState<CaptureTarget | null>(null)
   const loadedRef = useRef(new Map<string, LoadedMeshes>())
   const loadingRef = useRef(new Set<string>())
   const fittedKeyRef = useRef('')
@@ -114,16 +120,60 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
     camera.add(headlight)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = false
+    const oit = new OitRenderer(renderer)
+    const allMeshes = function* () {
+      for (const { meshes } of loadedRef.current.values()) yield* meshes.values()
+    }
+    // Clip planes hugging the scene's bounding sphere, refit every frame:
+    // depth precision depends on the far/near ratio, and fixed planes (sized
+    // for zooming anywhere) waste most of it, so nearly coincident surfaces
+    // (neighbouring segments) flicker as the view rotates.
+    const bounds = new THREE.Sphere(new THREE.Vector3(), 0)
+    const fitClipPlanes = () => {
+      if (bounds.radius <= 0) return
+      const distance = camera.position.distanceTo(bounds.center)
+      const margin = bounds.radius * 1.02
+      camera.near = Math.max(distance - margin, margin * 0.001)
+      camera.far = distance + margin
+      camera.updateProjectionMatrix()
+    }
+    const renderNow = () => {
+      fitClipPlanes()
+      oit.render(scene, camera, allMeshes())
+    }
     let frame = 0
     const render = () => {
       if (frame || !activeRef.current) return
       frame = requestAnimationFrame(() => {
         frame = 0
-        renderer.render(scene, camera)
+        renderNow()
       })
     }
     controls.addEventListener('change', render)
-    threeRef.current = { renderer, scene, camera, controls, render }
+    threeRef.current = { renderer, scene, camera, controls, render, oit, bounds }
+
+    // Turntable: OrbitControls' auto-rotation, stepped every frame.
+    let spinFrame = 0
+    const spin = () => {
+      spinFrame = requestAnimationFrame(spin)
+      if (activeRef.current) controls.update()
+    }
+    setCaptureTarget({
+      canvas: () => renderer.domElement,
+      snapshot: () =>
+        new Promise((resolve) => {
+          // Rendered and read in the same task, while the drawing buffer is
+          // still intact.
+          renderNow()
+          renderer.domElement.toBlob((blob) => resolve(blob), 'image/png')
+        }),
+      setTurntable: (on) => {
+        controls.autoRotate = on
+        cancelAnimationFrame(spinFrame)
+        spinFrame = 0
+        if (on) spin()
+      }
+    })
 
     // Hover identification by GPU picking: render the one pixel under the
     // pointer with every mesh in a flat color encoding its index, and read it
@@ -201,6 +251,7 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
       const h = container.clientHeight
       if (w === 0 || h === 0) return
       renderer.setSize(w, h)
+      oit.setSize()
       camera.aspect = w / h
       camera.updateProjectionMatrix()
       render()
@@ -212,9 +263,12 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
       observer.disconnect()
       cancelAnimationFrame(frame)
       cancelAnimationFrame(hoverFrame)
+      cancelAnimationFrame(spinFrame)
+      setCaptureTarget(null)
       renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerleave', onPointerLeave)
       pickTarget.dispose()
+      oit.dispose()
       controls.dispose()
       for (const entry of loaded.values()) {
         for (const mesh of entry.meshes.values()) disposeMesh(mesh)
@@ -315,8 +369,8 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
       const center = box.getCenter(new THREE.Vector3())
       const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1)
       const distance = radius / Math.sin(THREE.MathUtils.degToRad(three.camera.fov / 2))
-      three.camera.near = distance / 100
-      three.camera.far = distance * 10
+      three.oit.setDepthScale(distance)
+      three.bounds.set(center, radius)
       three.camera.position.set(center.x, center.y - distance, center.z)
       three.camera.updateProjectionMatrix()
       three.controls.target.copy(center)
@@ -336,6 +390,7 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
   return (
     <div className="mesh-viewer">
       <div ref={containerRef} className="mesh-viewer-canvas" />
+      {triangles > 0 && <CaptureBar target={captureTarget} name="surface-meshes" />}
       <div className="mesh-viewer-status">
         {segmentations.length === 0 && <span>Load a segmentation to see its surface meshes.</span>}
         {pending.length > 0 && <span>Generating surface meshes for {pending.map((s) => s.name).join(', ')}…</span>}

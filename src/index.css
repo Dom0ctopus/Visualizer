@@ -883,3 +883,78 @@ input[type='range'] {
   padding: 8px 10px;
   font-size: 12px;
 }
+
+/* Snapshot / record / turntable controls on the 3D views. */
+.capture-bar {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 6px;
+  background: rgba(11, 12, 16, 0.78);
+  pointer-events: auto;
+  font-size: 12px;
+}
+
+.capture-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.capture-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.capture-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.capture-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.capture-button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.capture-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e5484d;
+}
+
+.capture-recording .capture-dot {
+  animation: capture-pulse 1s ease-in-out infinite;
+}
+
+@keyframes capture-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.capture-error {
+  color: var(--danger);
+  padding: 0 4px;
+}

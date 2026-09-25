@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CaptureTarget } from '../components/CaptureBar'
+import { dataUrlToBlob } from '../lib/capture'
 import { pickVolumeLabel, type PickableViewProxy } from '../lib/volumePick'
 import { fetchPyramidLevels, type PyramidLevel } from '../lib/zarrClient'
 
@@ -34,6 +36,10 @@ interface ItkVtkViewerInstance {
   setImageColorMap: (colorMap: string) => void
   on: (event: string, callback: () => void) => void
   setLabelImageLookupTable: (lookupTable: string) => void
+  /** PNG data URL of the render (the vtk.js view's captureImage). */
+  captureImage: () => Promise<string>
+  /** itk-vtk-viewer's continuous-rotation toggle. */
+  setRotateEnabled: (enabled: boolean) => void
   getViewProxy: () => {
     getInteractorStyle3D: () => { setCenterOfRotation: (center: [number, number, number]) => void }
     getRepresentations: () => Array<{ getVolumes?: () => VtkVolume[] }>
@@ -449,6 +455,28 @@ export function useItkVtkViewer() {
     [scheduleLabelUpdate]
   )
 
+  /** Snapshot / recording / turntable access to the render (CaptureBar). */
+  const captureTarget = useMemo<CaptureTarget>(
+    () => ({
+      canvas: () => {
+        try {
+          return (volumeViewerRef.current?.getViewProxy() as unknown as PickableViewProxy | undefined)?.getOpenGLRenderWindow().getCanvas() ?? null
+        } catch {
+          return null
+        }
+      },
+      snapshot: async () => {
+        const viewer = volumeViewerRef.current
+        return viewer ? dataUrlToBlob(await viewer.captureImage()) : null
+      },
+      setTurntable: (on) => {
+        const viewer = volumeViewerRef.current
+        if (typeof viewer?.setRotateEnabled === 'function') viewer.setRotateEnabled(on)
+      }
+    }),
+    []
+  )
+
   /** The segment name the voxel render shows at a screen point, or null
    *  (see lib/volumePick.ts). */
   const pickLabelName = useCallback((clientX: number, clientY: number): string | null => {
@@ -474,6 +502,7 @@ export function useItkVtkViewer() {
     setLabelWeights,
     setLabelNames,
     pickLabelName,
+    captureTarget,
     setLabelColors,
     applyLabelColors
   }

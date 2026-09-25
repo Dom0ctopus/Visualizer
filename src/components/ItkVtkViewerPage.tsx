@@ -21,6 +21,7 @@ import { useSegmentationMerge3D } from '../hooks/useSegmentationMerge3D'
 import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
 import { useZarrSegmentations } from '../hooks/useZarrSegmentations'
 import { useZarrSliceViewer } from '../hooks/useZarrSliceViewer'
+import { CaptureBar } from './CaptureBar'
 import { LuxarView } from './LuxarView'
 import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
@@ -294,7 +295,8 @@ export function ItkVtkViewerPage() {
     setLabelWeights,
     setLabelNames,
     setLabelColors,
-    pickLabelName
+    pickLabelName,
+    captureTarget
   } = useItkVtkViewer()
 
   // Hover in the voxel render names the segment under the pointer, as in
@@ -754,6 +756,7 @@ export function ItkVtkViewerPage() {
                   so switching never reloads or re-lays-out either renderer. */}
               <div className={renderTab === 'voxel' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
                 <div ref={volumeContainerRef} className="itk-volume-container" />
+                {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} />}
                 {zarrSeg.segmentations.length > 0 && (
                   <div className="render-toolbar">
                     {colorToggle(true)}
