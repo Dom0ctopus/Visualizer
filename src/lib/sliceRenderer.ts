@@ -33,10 +33,13 @@ void main() {
 const STORAGE_PIXEL = `
 uniform ivec2 u_size;
 uniform bool u_flip;
-ivec2 storagePixel() {
-  int x = min(int(floor(v_uv.x * float(u_size.x))), u_size.x - 1);
-  int row = min(int(floor(v_uv.y * float(u_size.y))), u_size.y - 1);
+ivec2 storagePixelAt(vec2 uv) {
+  int x = clamp(int(floor(uv.x * float(u_size.x))), 0, u_size.x - 1);
+  int row = clamp(int(floor(uv.y * float(u_size.y))), 0, u_size.y - 1);
   return ivec2(x, u_flip ? u_size.y - 1 - row : row);
+}
+ivec2 storagePixel() {
+  return storagePixelAt(v_uv);
 }`
 
 const BASE_FRAG = `#version 300 es
@@ -66,14 +69,42 @@ uniform vec4 u_map;
 uniform ivec2 u_labelSize;
 uniform int u_lutWidth;
 uniform int u_lutCount;
+// Search focus: per-label flags (same layout as the LUT). Pass 0 draws the
+// colors; pass 1 draws the focus outline, over every overlay's colors.
+uniform sampler2D u_focus;
+uniform int u_pass;
+// One screen (CSS) pixel in v_uv units, for a fixed-width outline.
+uniform vec2 u_px;
 ${STORAGE_PIXEL}
-void main() {
-  ivec2 p = storagePixel();
+int labelAt(vec2 uv) {
+  ivec2 p = storagePixelAt(uv);
   // floor(v + 0.5) matches JS Math.round, which hover lookups use.
   int ox = int(floor(float(p.x) * u_map.x + u_map.z + 0.5));
   int oy = int(floor(float(p.y) * u_map.y + u_map.w + 0.5));
-  if (ox < 0 || oy < 0 || ox >= u_labelSize.x || oy >= u_labelSize.y) discard;
-  int label = int(texelFetch(u_labels, ivec2(ox, oy), 0).r + 0.5);
+  if (ox < 0 || oy < 0 || ox >= u_labelSize.x || oy >= u_labelSize.y) return 0;
+  return int(texelFetch(u_labels, ivec2(ox, oy), 0).r + 0.5);
+}
+bool isFocused(int label) {
+  if (label <= 0 || label >= u_lutCount) return false;
+  return texelFetch(u_focus, ivec2(label % u_lutWidth, label / u_lutWidth), 0).r > 0.5;
+}
+bool focusedWithin(float radius) {
+  for (int i = 0; i < 8; i++) {
+    float a = float(i) * 0.785398;
+    if (isFocused(labelAt(v_uv + vec2(cos(a), sin(a)) * u_px * radius))) return true;
+  }
+  return false;
+}
+void main() {
+  int label = labelAt(v_uv);
+  if (u_pass == 1) {
+    // Just outside focused regions: a white line, then a dark halo, so the
+    // outline reads on any color.
+    if (isFocused(label)) discard;
+    if (focusedWithin(1.0) || focusedWithin(2.0)) { outColor = vec4(1.0); return; }
+    if (focusedWithin(3.5)) { outColor = vec4(0.0, 0.0, 0.0, 0.85); return; }
+    discard;
+  }
   if (label <= 0 || label >= u_lutCount) discard;
   vec4 c = texelFetch(u_lut, ivec2(label % u_lutWidth, label / u_lutWidth), 0);
   if (c.a == 0.0) discard;
@@ -114,6 +145,8 @@ interface LutTexture {
   texture: WebGLTexture
   width: number
   count: number
+  /** Focus flags in the same layout, when a focus is active. */
+  focus: WebGLTexture | null
 }
 
 export interface DrawParams {
@@ -193,6 +226,7 @@ export class SliceRenderer {
     for (const [lut, entry] of this.lutTextures) {
       if (!liveLuts.has(lut)) {
         gl.deleteTexture(entry.texture)
+        if (entry.focus) gl.deleteTexture(entry.focus)
         this.lutTextures.delete(lut)
       }
     }
@@ -206,7 +240,13 @@ export class SliceRenderer {
         const height = Math.ceil(count / width)
         const padded = new Uint8Array(width * height * 4)
         padded.set(overlay.lut)
-        this.lutTextures.set(overlay.lut, { texture: this.createTexture(width, height, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, padded), width, count })
+        let focus: WebGLTexture | null = null
+        if (overlay.focus) {
+          const flags = new Uint8Array(width * height)
+          for (let i = 0; i < overlay.focus.length; i++) flags[i] = overlay.focus[i] ? 255 : 0
+          focus = this.createTexture(width, height, gl.R8, gl.RED, gl.UNSIGNED_BYTE, flags)
+        }
+        this.lutTextures.set(overlay.lut, { texture: this.createTexture(width, height, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, padded), width, count, focus })
       }
     }
   }
@@ -248,19 +288,27 @@ export class SliceRenderer {
     gl.uniform1i(gl.getUniformLocation(op, 'u_flip'), p.flipY ? 1 : 0)
     gl.uniform1i(gl.getUniformLocation(op, 'u_labels'), 0)
     gl.uniform1i(gl.getUniformLocation(op, 'u_lut'), 1)
-    for (const overlay of this.overlays) {
-      const labels = this.labelTextures.get(overlay.data)
-      const lut = this.lutTextures.get(overlay.lut)
-      if (!labels || !lut) continue
-      gl.uniform4f(gl.getUniformLocation(op, 'u_map'), overlay.scaleX, overlay.scaleY, overlay.offsetX, overlay.offsetY)
-      gl.uniform2i(gl.getUniformLocation(op, 'u_labelSize'), overlay.width, overlay.height)
-      gl.uniform1i(gl.getUniformLocation(op, 'u_lutWidth'), lut.width)
-      gl.uniform1i(gl.getUniformLocation(op, 'u_lutCount'), lut.count)
-      gl.activeTexture(gl.TEXTURE0)
-      gl.bindTexture(gl.TEXTURE_2D, labels)
-      gl.activeTexture(gl.TEXTURE1)
-      gl.bindTexture(gl.TEXTURE_2D, lut.texture)
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+    gl.uniform1i(gl.getUniformLocation(op, 'u_focus'), 2)
+    gl.uniform2f(gl.getUniformLocation(op, 'u_px'), 1 / p.rect.width, 1 / p.rect.height)
+    // Pass 0: colors; pass 1: focus outlines, on top of every overlay.
+    for (const pass of [0, 1]) {
+      gl.uniform1i(gl.getUniformLocation(op, 'u_pass'), pass)
+      for (const overlay of this.overlays) {
+        const labels = this.labelTextures.get(overlay.data)
+        const lut = this.lutTextures.get(overlay.lut)
+        if (!labels || !lut || (pass === 1 && !lut.focus)) continue
+        gl.uniform4f(gl.getUniformLocation(op, 'u_map'), overlay.scaleX, overlay.scaleY, overlay.offsetX, overlay.offsetY)
+        gl.uniform2i(gl.getUniformLocation(op, 'u_labelSize'), overlay.width, overlay.height)
+        gl.uniform1i(gl.getUniformLocation(op, 'u_lutWidth'), lut.width)
+        gl.uniform1i(gl.getUniformLocation(op, 'u_lutCount'), lut.count)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, labels)
+        gl.activeTexture(gl.TEXTURE1)
+        gl.bindTexture(gl.TEXTURE_2D, lut.texture)
+        gl.activeTexture(gl.TEXTURE2)
+        gl.bindTexture(gl.TEXTURE_2D, lut.focus ?? lut.texture)
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+      }
     }
   }
 
@@ -268,7 +316,10 @@ export class SliceRenderer {
     const gl = this.gl
     if (this.baseTexture) gl.deleteTexture(this.baseTexture)
     for (const t of this.labelTextures.values()) gl.deleteTexture(t)
-    for (const t of this.lutTextures.values()) gl.deleteTexture(t.texture)
+    for (const t of this.lutTextures.values()) {
+      gl.deleteTexture(t.texture)
+      if (t.focus) gl.deleteTexture(t.focus)
+    }
     this.labelTextures.clear()
     this.lutTextures.clear()
     gl.deleteProgram(this.baseProgram)

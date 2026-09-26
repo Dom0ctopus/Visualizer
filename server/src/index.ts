@@ -6,6 +6,7 @@ import path from 'node:path'
 import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
 import { enqueueJob, getJobQueueState, JobPreemptedError } from './jobQueue.js'
 import { readNrrdHeader } from './nrrdHeader.js'
+import { getSegmentationStats } from './segmentStats.js'
 import { convertSegmentationMergeToOmeZarr, MergeCancelledError, type MergedSegmentMapping, type MergeProgress } from './segmentationMergeConvert.js'
 import { convertSegmentationNrrdToOmeZarr } from './segmentationZarrConvert.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
@@ -365,6 +366,21 @@ app.post('/api/segmentations/:id/meshes', async (req, res) => {
   }
   generateMeshesInBackground(record.id)
   res.json({ meshStatus: 'pending' })
+})
+
+// Per-segment voxel counts, centroids and per-slice histograms (search
+// focus uses them to jump the 2D panes to a focused set); computed once.
+app.get('/api/segmentations/:id/segment-stats', async (req, res) => {
+  const record = getRecord(req.params.id)
+  if (!record || record.kind !== 'segmentation' || record.zarrStatus !== 'ready') {
+    res.status(404).json({ error: 'No converted segmentation with that id' })
+    return
+  }
+  try {
+    res.json(await getSegmentationStats(segZarrPathFor(record.id)))
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to compute segment statistics' })
+  }
 })
 
 app.get('/api/segmentation-merges', (_req, res) => {

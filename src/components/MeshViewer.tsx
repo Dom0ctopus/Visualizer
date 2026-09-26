@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { fetchMeshManifest, meshFileUrl, regenerateMeshes, type MeshManifest } from '../lib/api'
+import { focusKey } from '../lib/focus'
 import { disposeOitMaterial, OitRenderer } from '../lib/oitRenderer'
 import { scaleBarFor } from '../lib/scaleBar'
 import { tissueFinish, type TissueFinish } from '../lib/realisticPalette'
@@ -16,6 +17,9 @@ interface MeshViewerProps {
   active: boolean
   /** The segment under the pointer (null when none), as the 2D panes report it. */
   onHoverLabel?: (info: { name: string; clientX: number; clientY: number } | null) => void
+  /** Search focus: segments outside `keys` (lib/focus.ts's focusKey) have
+   *  their opacity multiplied by `fade`. */
+  focus?: { keys: ReadonlySet<string>; fade: number } | null
 }
 
 interface LoadedMeshes {
@@ -80,7 +84,7 @@ function parseMeshFile(buffer: ArrayBuffer): THREE.BufferGeometry {
  * Coordinates are physical mm in the scans' LPS space, so +z (superior) is
  * up and the default camera looks from anterior.
  */
-export function MeshViewer({ segmentations, records, active, onHoverLabel }: MeshViewerProps) {
+export function MeshViewer({ segmentations, records, active, onHoverLabel, focus = null }: MeshViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const threeRef = useRef<{
     renderer: THREE.WebGLRenderer
@@ -377,11 +381,12 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
           mesh.material = makeMaterial(hard ? 'hard' : 'soft')
         }
         const material = mesh.material as THREE.MeshStandardMaterial
-        mesh.visible = s.visible && s.opacity > 0
+        const opacity = s.opacity * (focus && !focus.keys.has(focusKey(seg.recordId, s.key)) ? focus.fade : 1)
+        mesh.visible = s.visible && opacity > 0.001
         material.color.setRGB(s.color[0] / 255, s.color[1] / 255, s.color[2] / 255, THREE.SRGBColorSpace)
-        material.opacity = s.opacity
-        material.transparent = s.opacity < 0.99
-        material.depthWrite = s.opacity >= 0.99
+        material.opacity = opacity
+        material.transparent = opacity < 0.99
+        material.depthWrite = opacity >= 0.99
       }
     }
 
@@ -404,7 +409,7 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
       three.controls.update()
     }
     three.render()
-  }, [segmentations, version])
+  }, [segmentations, version, focus])
 
   let triangles = 0
   for (const { manifest } of loadedRef.current.values()) triangles += manifest.segments.reduce((n, s) => n + s.triangleCount, 0)

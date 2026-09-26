@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   deleteLibraryFile,
   fetchJobs,
@@ -21,6 +21,7 @@ import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
 import { SegmentTree } from './SegmentTree'
 import { ZarrSliceCanvas, type CanvasPan, type OrientationLabels } from './ZarrSliceCanvas'
+import { focusKey, focusTarget, matchSegments } from '../lib/focus'
 import { realisticColor } from '../lib/realisticPalette'
 import type { LibraryRecord, SegmentationRecord, VolumeRecord, ZarrLoadedSegmentation } from '../types'
 
@@ -304,13 +305,27 @@ export function ItkVtkViewerPage() {
     dataRange,
     error: sliceError
   } = useZarrSliceViewer(activeZarrUrl)
+  const volumeInfoRef = useRef(volumeInfo)
+  useEffect(() => {
+    volumeInfoRef.current = volumeInfo
+  }, [volumeInfo])
 
   const zarrSeg = useZarrSegmentations()
+
+  // --- Search focus (lib/focus.ts) -------------------------------------------
+  // The focused segments (by focusKey) and how strongly everything else
+  // fades (0: not at all, 1: gone), shared by every view.
+  const [focusKeys, setFocusKeys] = useState<ReadonlySet<string> | null>(null)
+  const [focusStrength, setFocusStrength] = useState(0.85)
+  const focusSpec = useMemo(() => (focusKeys ? { keys: focusKeys, fade: 1 - focusStrength } : null), [focusKeys, focusStrength])
+  const [focusError, setFocusError] = useState<string | null>(null)
+
   const { overlays, error: overlayError } = useSegmentationOverlays(
     zarrSeg.segmentations,
     { z: zIndex, y: yIndex, x: xIndex },
     volumeInfo,
-    levelIndex
+    levelIndex,
+    focusSpec
   )
   const { status: mergeStatus, error: mergeError, progress: mergeProgress, pendingSince: mergePendingSince } = useSegmentationMerge3D(
     activeVolumeId,
@@ -319,7 +334,49 @@ export function ItkVtkViewerPage() {
     setLabelWeights,
     setLabelNames,
     setLabelColors,
-    voxelColors === 'segments'
+    voxelColors === 'segments',
+    focusSpec
+  )
+
+  /** Focuses the search's matches (replacing the focus set, or adding to it),
+   *  makes sure they're visible, and moves the 2D panes to them. */
+  const applyFocus = async (add: boolean) => {
+    const matches = matchSegments(zarrSeg.segmentations, searchText)
+    if (matches.length === 0) return
+    const keys = new Set(add && focusKeys ? focusKeys : [])
+    for (const m of matches) keys.add(focusKey(m.recordId, m.key))
+    setFocusKeys(keys)
+    setFocusError(null)
+    for (const m of matches) {
+      const seg = zarrSeg.segmentations.find((l) => l.recordId === m.recordId)?.segments.find((s) => s.key === m.key)
+      if (seg && !seg.visible) zarrSeg.setSegmentVisible(m.recordId, m.key, true)
+    }
+    const focused = zarrSeg.segmentations.flatMap((l) =>
+      l.segments.filter((s) => keys.has(focusKey(l.recordId, s.key))).map((s) => ({ recordId: l.recordId, layer: s.layer, labelValue: s.labelValue }))
+    )
+    try {
+      const target = await focusTarget(focused)
+      const info = volumeInfoRef.current
+      if (!target || !info) return
+      const index = (axis: number) => Math.max(0, Math.min(info.size[axis] - 1, Math.round((target[axis] - info.origin[axis]) / info.spacing[axis])))
+      setZIndex(index(0))
+      setYIndex(index(1))
+      setXIndex(index(2))
+    } catch (e) {
+      setFocusError(e instanceof Error ? e.message : 'Could not locate the focused segments')
+    }
+  }
+  const clearFocus = () => {
+    setFocusKeys(null)
+    setFocusError(null)
+  }
+  const focusCount = focusKeys ? zarrSeg.segmentations.reduce((n, l) => n + l.segments.filter((s) => focusKeys.has(focusKey(l.recordId, s.key))).length, 0) : 0
+  const focusSlider = (
+    <label className="focus-slider" title="How much everything outside the focus fades (0: not at all; 100%: hidden)">
+      <span className="render-toolbar-label">Focus</span>
+      <input type="range" min={0} max={1} step={0.01} value={focusStrength} onChange={(e) => setFocusStrength(Number(e.target.value))} />
+      <b>{Math.round(focusStrength * 100)}%</b>
+    </label>
   )
 
   const refreshLibrary = useCallback(async () => {
@@ -644,6 +701,7 @@ export function ItkVtkViewerPage() {
                 {zarrSeg.segmentations.length > 0 && (
                   <div className="render-toolbar">
                     {colorToggle(true)}
+                    {focusKeys && focusSlider}
                     {mergeStatus === 'pending' && <span className="render-toolbar-hint">Colors apply once the combined label map is built</span>}
                   </div>
                 )}
@@ -655,8 +713,14 @@ export function ItkVtkViewerPage() {
                     records={segmentationRecords}
                     active={renderTab === 'mesh'}
                     onHoverLabel={setHoveredSegment}
+                    focus={focusSpec}
                   />
-                  {zarrSeg.segmentations.length > 0 && <div className="render-toolbar">{colorToggle(false)}</div>}
+                  {zarrSeg.segmentations.length > 0 && (
+                    <div className="render-toolbar">
+                      {colorToggle(false)}
+                      {focusKeys && focusSlider}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -808,7 +872,24 @@ export function ItkVtkViewerPage() {
               onChange={setSearchText}
               segmentations={zarrSeg.segmentations}
               onSegmentVisible={zarrSeg.setSegmentVisible}
+              onFocus={(add) => void applyFocus(add)}
+              onClearFocus={clearFocus}
+              focusActive={focusKeys !== null}
             />
+            {focusKeys && (
+              <div className="focus-summary">
+                <div className="focus-summary-row">
+                  <span>
+                    Focused on <b>{focusCount}</b> segment{focusCount === 1 ? '' : 's'}
+                  </span>
+                  <button className="icon-btn" onClick={clearFocus} title="Clear the focus (Esc in the search box)">
+                    Clear
+                  </button>
+                </div>
+                {focusSlider}
+                {focusError && <p className="render-toolbar-hint">{focusError}</p>}
+              </div>
+            )}
             <SegmentTree
               segmentations={zarrSeg.segmentations}
               filterText={searchText}

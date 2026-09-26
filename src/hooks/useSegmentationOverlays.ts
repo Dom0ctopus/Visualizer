@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLatestAsync } from './useLatestAsync'
 import { segZarrUrl } from '../lib/api'
 import { buildLabelLut } from '../lib/segmentationOverlay'
+import { focusKey } from '../lib/focus'
 import {
   fetchVolumeInfo,
   readCoronalSlice,
@@ -21,6 +22,9 @@ export interface SliceOverlay {
    *  ZarrSliceCanvas's onHoverLabel). Parallel to `lut` -- see
    *  segmentationOverlay.ts's own comment on LabelLut.names. */
   names: string[]
+  /** Indexed by labelValue -> 1 for segments in the search focus set,
+   *  which the renderer outlines; null when no focus is active. */
+  focus: Uint8Array | null
   /** Maps a base-slice pixel (x, y) to this overlay's own nearest voxel via
    *  `round(x * scaleX + offsetX)`, `round(y * scaleY + offsetY)` -- an
    *  affine transform derived from each grid's own physical origin/spacing
@@ -54,6 +58,13 @@ export interface OrthogonalOverlays {
 
 type Plane = 'axial' | 'coronal' | 'sagittal'
 
+/** Search focus for the 2D panes: the focused segments' keys (see
+ *  lib/focus.ts's focusKey) and the opacity multiplier for the rest. */
+export interface SliceFocus {
+  keys: ReadonlySet<string>
+  fade: number
+}
+
 // Assembled overlay slices, keyed by source array + plane + position. An
 // opacity/visibility edit only changes the color table, so handing the
 // renderer the *same* slice object lets it keep its uploaded label texture
@@ -84,7 +95,8 @@ async function loadPlaneOverlays(
   segmentations: ZarrLoadedSegmentation[],
   base: VolumeInfo,
   levelIndex: number,
-  infoCache: Map<string, Promise<VolumeInfo>>
+  infoCache: Map<string, Promise<VolumeInfo>>,
+  focus: SliceFocus | null
 ): Promise<{ overlays: SliceOverlay[]; error: string | null }> {
   const jobs = segmentations.flatMap((seg) =>
     [...groupByLayer(seg.segments)]
@@ -119,13 +131,17 @@ async function loadPlaneOverlays(
           if (segIndex < 0 || segIndex >= info.size[fixed]) return null
           const read = plane === 'axial' ? readZSlice : plane === 'coronal' ? readCoronalSlice : readSagittalSlice
           const slice = await cachedSlice(`${plane}|${layerUrl}|${info.levelPath}|${segIndex}`, () => read(layerUrl, info.levelPath, segIndex))
-          const { lut, names } = buildLabelLut(segsInLayer)
+          const { lut, names, focus: focusFlags } = buildLabelLut(
+            segsInLayer,
+            focus ? { isFocused: (s) => focus.keys.has(focusKey(seg.recordId, s.key)), fade: focus.fade } : null
+          )
           return {
             width: slice.width,
             height: slice.height,
             data: slice.data,
             lut,
             names,
+            focus: focusFlags,
             scaleX: scale[colAxis],
             scaleY: scale[rowAxis],
             offsetX: offset[colAxis],
@@ -151,13 +167,14 @@ function usePlaneOverlays(
   segmentations: ZarrLoadedSegmentation[],
   base: VolumeInfo | null,
   levelIndex: number,
-  infoCache: Map<string, Promise<VolumeInfo>>
+  infoCache: Map<string, Promise<VolumeInfo>>,
+  focus: SliceFocus | null
 ): { overlays: SliceOverlay[]; error: string | null } {
   const [state, setState] = useState<{ overlays: SliceOverlay[]; error: string | null }>({ overlays: [], error: null })
   const active = segmentations.length > 0 && base !== null
   useLatestAsync(
-    active ? () => loadPlaneOverlays(plane, index, segmentations, base, levelIndex, infoCache) : null,
-    [segmentations, index, base, levelIndex],
+    active ? () => loadPlaneOverlays(plane, index, segmentations, base, levelIndex, infoCache, focus) : null,
+    [segmentations, index, base, levelIndex, focus],
     base ? `${levelIndex}|${base.size.join(',')}|${base.origin.join(',')}|${base.spacing.join(',')}` : '',
     setState,
     (e) => setState((prev) => ({ ...prev, error: e instanceof Error ? e.message : 'Failed to load segmentation overlays' }))
@@ -217,12 +234,13 @@ export function useSegmentationOverlays(
   segmentations: ZarrLoadedSegmentation[],
   positions: OrthogonalPositions,
   baseVolumeInfo: VolumeInfo | null,
-  levelIndex: number
+  levelIndex: number,
+  focus: SliceFocus | null = null
 ) {
   const infoCache = useRef(new Map<string, Promise<VolumeInfo>>()).current
-  const axial = usePlaneOverlays('axial', positions.z, segmentations, baseVolumeInfo, levelIndex, infoCache)
-  const coronal = usePlaneOverlays('coronal', positions.y, segmentations, baseVolumeInfo, levelIndex, infoCache)
-  const sagittal = usePlaneOverlays('sagittal', positions.x, segmentations, baseVolumeInfo, levelIndex, infoCache)
+  const axial = usePlaneOverlays('axial', positions.z, segmentations, baseVolumeInfo, levelIndex, infoCache, focus)
+  const coronal = usePlaneOverlays('coronal', positions.y, segmentations, baseVolumeInfo, levelIndex, infoCache, focus)
+  const sagittal = usePlaneOverlays('sagittal', positions.x, segmentations, baseVolumeInfo, levelIndex, infoCache, focus)
   const overlays = useMemo<OrthogonalOverlays>(
     () => ({ axial: axial.overlays, coronal: coronal.overlays, sagittal: sagittal.overlays }),
     [axial.overlays, coronal.overlays, sagittal.overlays]

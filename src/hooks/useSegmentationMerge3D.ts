@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { focusKey } from '../lib/focus'
 import { fetchSegmentationMergeStatus, mergeZarrUrl, requestSegmentationMerge, type MergedSegmentMapping, type MergeProgress } from '../lib/api'
 import { groupByLayer, type ZarrLoadedSegmentation } from '../types'
 
@@ -32,7 +33,10 @@ export function useSegmentationMerge3D(
   /** Segment colors (RGB 0-1) per merged label value, or null to keep
    *  itk-vtk-viewer's own palette. */
   setLabelColors: (colors: Map<number, [number, number, number]> | null) => void,
-  useSegmentColors: boolean
+  useSegmentColors: boolean,
+  /** Search focus: segments outside `keys` (lib/focus.ts's focusKey) have
+   *  their weight multiplied by `fade`. */
+  focus: { keys: ReadonlySet<string>; fade: number } | null = null
 ) {
   const [status, setStatus] = useState<'idle' | 'pending' | 'ready' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -141,7 +145,8 @@ export function useSegmentationMerge3D(
       const seg = segmentations.find((s) => s.recordId === key.recordId)
       const segment = seg?.segments.find((s) => s.layer === key.layer && s.labelValue === originalLabelValue)
       if (!segment) continue
-      weights.set(globalLabelValue, segment.visible ? segment.opacity : 0)
+      const faded = focus && !focus.keys.has(focusKey(key.recordId, segment.key)) ? focus.fade : 1
+      weights.set(globalLabelValue, segment.visible ? segment.opacity * faded : 0)
       names.set(globalLabelValue, segment.name)
       colors.set(globalLabelValue, [segment.color[0] / 255, segment.color[1] / 255, segment.color[2] / 255])
     }
@@ -149,7 +154,7 @@ export function useSegmentationMerge3D(
     setLabelNames(names)
     setLabelColors(useSegmentColors ? colors : null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, segmentations, setLabelWeights, setLabelNames, setLabelColors, useSegmentColors])
+  }, [status, segmentations, setLabelWeights, setLabelNames, setLabelColors, useSegmentColors, focus])
 
   return { status, error, progress, pendingSince }
 }

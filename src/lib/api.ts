@@ -159,3 +159,41 @@ export function meshFileUrl(segmentationId: string, file: string): string {
 export async function regenerateMeshes(segmentationId: string): Promise<void> {
   await handleJson(await fetch(`/api/segmentations/${segmentationId}/meshes`, { method: 'POST' }))
 }
+
+/** Per-segment statistics (server/src/segmentStats.ts), [z, y, x] order. */
+export interface AxisHistogram {
+  start: number
+  counts: number[]
+}
+
+export interface LabelStats {
+  voxels: number
+  centroid: [number, number, number]
+  histograms: { z: AxisHistogram; y: AxisHistogram; x: AxisHistogram }
+}
+
+export interface LayerStats {
+  origin: [number, number, number]
+  spacing: [number, number, number]
+  size: [number, number, number]
+  labels: Record<string, LabelStats>
+}
+
+export interface SegmentationStats {
+  version: number
+  layers: Record<string, LayerStats>
+}
+
+const statsCache = new Map<string, Promise<SegmentationStats>>()
+
+/** A segmentation's segment statistics (computed once on the server, cached
+ *  here for the session). */
+export function fetchSegmentStats(segmentationId: string): Promise<SegmentationStats> {
+  let pending = statsCache.get(segmentationId)
+  if (!pending) {
+    pending = fetch(`/api/segmentations/${segmentationId}/segment-stats`).then((res) => handleJson<SegmentationStats>(res))
+    pending.catch(() => statsCache.delete(segmentationId))
+    statsCache.set(segmentationId, pending)
+  }
+  return pending
+}
