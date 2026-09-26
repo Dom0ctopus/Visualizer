@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { captureFilename, downloadBlob, recordingSupported, startCanvasRecording, type CanvasRecording } from '../lib/capture'
+import { captureFilename, composeSnapshot, downloadBlob, recordingSupported, startCompositeRecording, type CanvasRecording } from '../lib/capture'
+import { drawScaleBar } from '../lib/scaleBar'
 
 export interface CaptureTarget {
   /** The WebGL canvas to record. */
@@ -8,6 +9,14 @@ export interface CaptureTarget {
   snapshot: () => Promise<Blob | null>
   /** Turns continuous auto-rotation on or off. */
   setTurntable: (on: boolean) => void
+  /** Physical height (mm) the view shows at the camera's focal plane, for
+   *  the scale bar drawn into captures; null when unknown. */
+  viewHeightMm: () => number | null
+  /** Calls `draw` with the canvas right after every render (while its
+   *  pixels are readable); returns an unsubscribe function. */
+  onFrame: (draw: (canvas: HTMLCanvasElement) => void) => () => void
+  /** Renders a frame soon. */
+  requestRender: () => void
 }
 
 function formatDuration(ms: number): string {
@@ -16,8 +25,9 @@ function formatDuration(ms: number): string {
 }
 
 /**
- * Snapshot / record / turntable controls for a 3D view. Files download
- * straight away, named after the view and the time.
+ * Snapshot / record / turntable controls for a 3D view. Captures carry a
+ * scale bar (recordings: one that follows the zoom). Files download straight
+ * away, named after the view and the time.
  */
 export function CaptureBar({ target, name }: { target: CaptureTarget | null; name: string }) {
   const [recording, setRecording] = useState<{ rec: CanvasRecording; since: number } | null>(null)
@@ -58,7 +68,9 @@ export function CaptureBar({ target, name }: { target: CaptureTarget | null; nam
     setBusy(true)
     setError(null)
     try {
-      const blob = await target.snapshot()
+      const render = await target.snapshot()
+      const viewHeight = target.viewHeightMm()
+      const blob = render && (await composeSnapshot(render, (ctx, w, h) => drawScaleBar(ctx, w, h, viewHeight)))
       if (blob) downloadBlob(blob, captureFilename(name, 'png'))
       else setError('Nothing to capture yet')
     } catch (e) {
@@ -82,7 +94,9 @@ export function CaptureBar({ target, name }: { target: CaptureTarget | null; nam
       return
     }
     try {
-      setRecording({ rec: startCanvasRecording(canvas), since: Date.now() })
+      const view = target!
+      const rec = startCompositeRecording(canvas, view.onFrame, view.requestRender, (ctx, w, h) => drawScaleBar(ctx, w, h, view.viewHeightMm()))
+      setRecording({ rec, since: Date.now() })
       setNow(Date.now())
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Recording failed')

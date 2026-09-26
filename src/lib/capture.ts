@@ -22,8 +22,13 @@ export interface CanvasRecording {
 }
 
 export function startCanvasRecording(canvas: HTMLCanvasElement, fps = 60): CanvasRecording {
+  return recordStream(canvas.captureStream(fps))
+}
+
+/** Records a canvas stream; stopping ends its tracks too. `beforeStop`
+ *  runs just before the recorder stops (e.g. to emit a last frame). */
+function recordStream(stream: MediaStream, onStop?: () => void, beforeStop?: () => void): CanvasRecording {
   const mimeType = recordingMimeType()
-  const stream = canvas.captureStream(fps)
   // A high bitrate: renders are full of fine detail that compression smears.
   const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 25_000_000 })
   const chunks: Blob[] = []
@@ -36,10 +41,17 @@ export function startCanvasRecording(canvas: HTMLCanvasElement, fps = 60): Canva
     stop: () =>
       new Promise<Blob>((resolve) => {
         recorder.onstop = () => {
+          onStop?.()
           for (const track of stream.getTracks()) track.stop()
           resolve(new Blob(chunks, { type: recorder.mimeType || mimeType || 'video/webm' }))
         }
-        recorder.stop()
+        if (beforeStop) {
+          // Let the encoder take the last frame before stopping.
+          beforeStop()
+          setTimeout(() => recorder.stop(), 200)
+        } else {
+          recorder.stop()
+        }
       })
   }
 }
@@ -70,4 +82,87 @@ export function captureFilename(prefix: string, extension: string): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}-${pad(d.getSeconds())}`
   return `${prefix.replace(/[^\w.-]+/g, '-')}-${stamp}.${extension}`
+}
+
+/** Draws a render (PNG blob) onto a canvas, adds `overlay` on top, and
+ *  returns the result as a PNG. */
+export async function composeSnapshot(render: Blob, overlay: (ctx: CanvasRenderingContext2D, width: number, height: number) => void): Promise<Blob> {
+  const image = await createImageBitmap(render)
+  const canvas = document.createElement('canvas')
+  canvas.width = image.width
+  canvas.height = image.height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return render
+  ctx.drawImage(image, 0, 0)
+  image.close()
+  overlay(ctx, canvas.width, canvas.height)
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob ?? render), 'image/png'))
+}
+
+/**
+ * Records a WebGL view with `overlay` drawn on every frame (e.g. a scale bar
+ * that follows the zoom).
+ *
+ * A WebGL canvas's pixels can only be read in the task that drew them, so
+ * `onFrame` must call back right after each render; the frame is copied then
+ * into a staging canvas. The recorded canvas is redrawn from it, with the
+ * overlay, once per animation frame, and each of those is explicitly
+ * requested as a video frame: canvas streams otherwise only pick up draws the
+ * page's paint loop notices, which misses views rendered from timers (vtk.js)
+ * -- and this gives the video a steady frame rate while the view is still.
+ * `requestRender` draws the first frame.
+ */
+export function startCompositeRecording(
+  source: HTMLCanvasElement,
+  onFrame: (draw: (canvas: HTMLCanvasElement) => void) => () => void,
+  requestRender: () => void,
+  overlay: (ctx: CanvasRenderingContext2D, width: number, height: number) => void
+): CanvasRecording {
+  // Fixed for the whole recording (encoders don't take size changes); even
+  // dimensions, which H.264 needs.
+  const width = Math.max(2, source.width & ~1)
+  const height = Math.max(2, source.height & ~1)
+  const makeCanvas = () => {
+    const c = document.createElement('canvas')
+    c.width = width
+    c.height = height
+    const ctx = c.getContext('2d')
+    if (!ctx) throw new Error('Canvas 2D unavailable')
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, width, height)
+    return { canvas: c, ctx }
+  }
+  const staging = makeCanvas()
+  const output = makeCanvas()
+  const stream = output.canvas.captureStream(0)
+  const track = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void }
+  const emit = () => {
+    output.ctx.drawImage(staging.canvas, 0, 0)
+    overlay(output.ctx, width, height)
+    track.requestFrame?.()
+  }
+  let loop = 0
+  let unsubscribe = () => {}
+  const recording = recordStream(
+    stream,
+    () => {
+      cancelAnimationFrame(loop)
+      unsubscribe()
+    },
+    emit // the last frame, so even a view that never re-rendered records one
+  )
+  // Every rendered frame is emitted as it's drawn; the animation-frame loop
+  // adds frames while the view is still (and keeps the overlay current).
+  unsubscribe = onFrame((frame) => {
+    staging.ctx.fillRect(0, 0, width, height)
+    staging.ctx.drawImage(frame, 0, 0, width, height)
+    emit()
+  })
+  const tick = () => {
+    loop = requestAnimationFrame(tick)
+    emit()
+  }
+  tick()
+  requestRender()
+  return recording
 }

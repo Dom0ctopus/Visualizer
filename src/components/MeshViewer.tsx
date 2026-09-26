@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { fetchMeshManifest, meshFileUrl, regenerateMeshes, type MeshManifest } from '../lib/api'
 import { disposeOitMaterial, OitRenderer } from '../lib/oitRenderer'
+import { scaleBarFor } from '../lib/scaleBar'
 import { tissueFinish, type TissueFinish } from '../lib/realisticPalette'
 import type { SegmentationRecord, ZarrLoadedSegmentation } from '../types'
 import { CaptureBar, type CaptureTarget } from './CaptureBar'
@@ -91,6 +92,7 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
     bounds: THREE.Sphere
   } | null>(null)
   const [captureTarget, setCaptureTarget] = useState<CaptureTarget | null>(null)
+  const scaleBarRef = useRef<HTMLDivElement | null>(null)
   const loadedRef = useRef(new Map<string, LoadedMeshes>())
   const loadingRef = useRef(new Set<string>())
   const fittedKeyRef = useRef('')
@@ -137,9 +139,25 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
       camera.far = distance + margin
       camera.updateProjectionMatrix()
     }
+    // Physical height (mm) shown at the orbit target's distance.
+    const viewHeightMm = () => 2 * camera.position.distanceTo(controls.target) * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))
+    const updateScaleBar = () => {
+      const el = scaleBarRef.current
+      if (!el) return
+      const bar = scaleBarFor(bounds.radius > 0 ? viewHeightMm() : null, container.clientWidth, container.clientHeight, 0.18)
+      el.style.display = bar ? '' : 'none'
+      if (!bar) return
+      ;(el.firstElementChild as HTMLElement).textContent = bar.label
+      ;(el.lastElementChild as HTMLElement).style.width = `${bar.pixels}px`
+    }
+    // Frame listeners (recordings): called right after each render, while
+    // the canvas's pixels are still readable.
+    const frameListeners = new Set<(canvas: HTMLCanvasElement) => void>()
     const renderNow = () => {
       fitClipPlanes()
       oit.render(scene, camera, allMeshes())
+      for (const listener of frameListeners) listener(renderer.domElement)
+      updateScaleBar()
     }
     let frame = 0
     const render = () => {
@@ -167,8 +185,17 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
           renderNow()
           renderer.domElement.toBlob((blob) => resolve(blob), 'image/png')
         }),
+      viewHeightMm: () => (bounds.radius > 0 ? viewHeightMm() : null),
+      onFrame: (draw) => {
+        frameListeners.add(draw)
+        return () => frameListeners.delete(draw)
+      },
+      requestRender: () => render(),
+      // OrbitControls' auto-rotation: about the up axis through the orbit
+      // target, like a horizontal drag. Same speed as the voxel render's.
       setTurntable: (on) => {
         controls.autoRotate = on
+        controls.autoRotateSpeed = 60 / 24
         cancelAnimationFrame(spinFrame)
         spinFrame = 0
         if (on) spin()
@@ -390,6 +417,10 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel }: Mes
   return (
     <div className="mesh-viewer">
       <div ref={containerRef} className="mesh-viewer-canvas" />
+      <div ref={scaleBarRef} className="scale-bar" style={{ display: 'none' }} aria-label="Scale bar">
+        <span className="scale-bar-label" />
+        <span className="scale-bar-line" />
+      </div>
       {triangles > 0 && <CaptureBar target={captureTarget} name="surface-meshes" />}
       <div className="mesh-viewer-status">
         {segmentations.length === 0 && <span>Load a segmentation to see its surface meshes.</span>}

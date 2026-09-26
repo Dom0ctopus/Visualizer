@@ -63,6 +63,40 @@ interface VtkVolume {
   getMapper: () => { getInputData: () => { getPointData: () => { getScalars: () => { getNumberOfComponents: () => number } | null } } | null } | null
 }
 
+// The slice of the vtk.js camera used for the turntable and scale bar.
+interface VtkCamera {
+  getPosition: () => number[]
+  getFocalPoint: () => number[]
+  getViewUp: () => number[]
+  setPosition: (x: number, y: number, z: number) => void
+  setFocalPoint: (x: number, y: number, z: number) => void
+  getDistance: () => number
+  getViewAngle: () => number
+  getParallelProjection: () => boolean
+  getParallelScale: () => number
+}
+interface VtkCameraView {
+  getCamera: () => VtkCamera
+  getRenderer: () => { resetCameraClippingRange: () => void }
+  renderLater: () => void
+  /** Its interactor fires a render event right after each frame is drawn. */
+  getInteractor: () => { onRenderEvent: (callback: () => void) => { unsubscribe: () => void } }
+}
+
+/** Turntable speed: one full turn per this many seconds. */
+const TURNTABLE_SECONDS_PER_TURN = 24
+
+/** `point` rotated by `angle` (radians) about the axis through `center`
+ *  along unit vector `axis` (Rodrigues' formula). */
+function rotateAbout(point: number[], center: number[], axis: number[], angle: number): [number, number, number] {
+  const v = [point[0] - center[0], point[1] - center[1], point[2] - center[2]]
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  const dot = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2]
+  const cross = [axis[1] * v[2] - axis[2] * v[1], axis[2] * v[0] - axis[0] * v[2], axis[0] * v[1] - axis[1] * v[0]]
+  return [0, 1, 2].map((i) => center[i] + v[i] * cos + cross[i] * sin + axis[i] * dot * (1 - cos)) as [number, number, number]
+}
+
 // The name of itk-vtk-viewer's default categorical palette.
 const DEFAULT_LABEL_PALETTE = 'glasbey'
 
@@ -140,6 +174,10 @@ export function useItkVtkViewer() {
   const volumeViewerRef = useRef<ItkVtkViewerInstance | null>(null)
   // applyLabelColors (defined below) for the loaders above it.
   const applyLabelColorsRef = useRef<() => void>(() => {})
+  /** The mouse-rotation center (the whole volume's center); the turntable
+   *  spins about it too. */
+  const rotationCenterRef = useRef<[number, number, number] | null>(null)
+  const turntableFrameRef = useRef(0)
 
   const [scriptReady, setScriptReady] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -165,6 +203,9 @@ export function useItkVtkViewer() {
   // alive for the rest of the session. Losing its WebGL contexts releases
   // that memory; its canvases are then detached with the rest of its DOM.
   const clearViewer = useCallback(() => {
+    cancelAnimationFrame(turntableFrameRef.current)
+    turntableFrameRef.current = 0
+    rotationCenterRef.current = null
     volumeViewerRef.current = null
     const container = volumeContainerRef.current
     if (container) {
@@ -217,6 +258,7 @@ export function useItkVtkViewer() {
           // after every progressive update.
           const { origin, size, spacing } = levels[0]
           const center: [number, number, number] = [2, 1, 0].map((a) => origin[a] + ((size[a] - 1) * spacing[a]) / 2) as [number, number, number]
+          rotationCenterRef.current = center
           let colorMapApplied = false
           const onImageUpdate = () => {
             // Catches the first label render, before the transfer function
@@ -469,9 +511,60 @@ export function useItkVtkViewer() {
         const viewer = volumeViewerRef.current
         return viewer ? dataUrlToBlob(await viewer.captureImage()) : null
       },
+      // Not itk-vtk-viewer's own rotate animation, which spins about the
+      // camera's focal point: this orbits the camera about the screen's
+      // vertical axis through the mouse-rotation center, i.e. exactly a
+      // continuous horizontal drag.
       setTurntable: (on) => {
+        cancelAnimationFrame(turntableFrameRef.current)
+        turntableFrameRef.current = 0
+        if (!on) return
+        let last = performance.now()
+        const step = (time: number) => {
+          turntableFrameRef.current = requestAnimationFrame(step)
+          const dt = Math.min(0.25, (time - last) / 1000)
+          last = time
+          const viewer = volumeViewerRef.current
+          if (!viewer || dt <= 0) return
+          try {
+            const view = viewer.getViewProxy() as unknown as VtkCameraView
+            const camera = view.getCamera()
+            const up = camera.getViewUp()
+            const length = Math.hypot(up[0], up[1], up[2]) || 1
+            const axis = up.map((c) => c / length)
+            const center = rotationCenterRef.current ?? camera.getFocalPoint()
+            const angle = (-2 * Math.PI * dt) / TURNTABLE_SECONDS_PER_TURN
+            camera.setPosition(...rotateAbout(camera.getPosition(), center, axis, angle))
+            camera.setFocalPoint(...rotateAbout(camera.getFocalPoint(), center, axis, angle))
+            view.getRenderer().resetCameraClippingRange()
+            view.renderLater()
+          } catch {
+            // viewer mid-update; try again next frame
+          }
+        }
+        turntableFrameRef.current = requestAnimationFrame(step)
+      },
+      onFrame: (draw) => {
         const viewer = volumeViewerRef.current
-        if (typeof viewer?.setRotateEnabled === 'function') viewer.setRotateEnabled(on)
+        if (!viewer) return () => {}
+        const view = viewer.getViewProxy() as unknown as VtkCameraView & PickableViewProxy
+        const canvas = view.getOpenGLRenderWindow().getCanvas()
+        const subscription = view.getInteractor().onRenderEvent(() => {
+          if (canvas) draw(canvas)
+        })
+        return () => subscription.unsubscribe()
+      },
+      requestRender: () => volumeViewerRef.current?.getViewProxy().renderLater(),
+      viewHeightMm: () => {
+        try {
+          const view = volumeViewerRef.current?.getViewProxy() as unknown as VtkCameraView | undefined
+          const camera = view?.getCamera()
+          if (!camera) return null
+          if (camera.getParallelProjection()) return 2 * camera.getParallelScale()
+          return 2 * camera.getDistance() * Math.tan((camera.getViewAngle() * Math.PI) / 360)
+        } catch {
+          return null
+        }
       }
     }),
     []

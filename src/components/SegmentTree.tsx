@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { groupBySystem } from '../types'
 import type { SegmentState, SystemGroup } from '../types'
 import { TreeRow } from './TreeRow'
@@ -55,14 +56,40 @@ export function SegmentTree({
   onFileOpacity,
   onRemoveFile
 }: SegmentTreeProps) {
+  // Collapsed files/systems, by key (see fileKey/systemKey); all start expanded.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+
   if (segmentations.length === 0) {
     return <p className="empty-hint">No segmentations loaded yet.</p>
   }
 
   const filter = filterText.trim().toLowerCase()
+  const fileKey = (recordId: string) => `f:${recordId}`
+  const systemKey = (recordId: string, system: string) => `s:${recordId}:${system}`
+  // While searching, matches always show, whatever is collapsed.
+  const isExpanded = (key: string) => filter.length > 0 || !collapsed.has(key)
+  const toggle = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  const allGroupKeys = segmentations.flatMap((l) => [fileKey(l.recordId), ...groupBySystem(l.segments).map((sys) => systemKey(l.recordId, sys.name))])
+  const anyExpanded = allGroupKeys.some((k) => !collapsed.has(k))
 
   return (
     <div className="segment-tree">
+      <div className="segment-tree-actions">
+        <button
+          className="icon-btn"
+          disabled={filter.length > 0}
+          title={filter ? 'Clear the search to collapse or expand' : undefined}
+          onClick={() => setCollapsed(anyExpanded ? new Set(allGroupKeys) : new Set())}
+        >
+          {anyExpanded ? 'Collapse all' : 'Expand all'}
+        </button>
+      </div>
       {segmentations.map((loaded) => {
         const fileMatches = filter.length === 0 || loaded.name.toLowerCase().includes(filter)
         const systems = filterSystems(groupBySystem(loaded.segments), fileMatches, filter)
@@ -83,8 +110,12 @@ export function SegmentTree({
               onOpacityChange={(o) => onFileOpacity(loaded.recordId, o)}
               onRemove={() => onRemoveFile(loaded.recordId)}
               badge={String(loaded.segments.length)}
+              expanded={isExpanded(fileKey(loaded.recordId))}
+              onExpandToggle={() => toggle(fileKey(loaded.recordId))}
             />
-            {systems.length === 1 && systems[0].name === 'Ungrouped'
+            {!isExpanded(fileKey(loaded.recordId))
+              ? null
+              : systems.length === 1 && systems[0].name === 'Ungrouped'
               ? // No real grouping was detected for this file — skip the redundant
                 // "Ungrouped" wrapper and list segments directly under the file.
                 systems[0].segments.map((seg) => (
@@ -113,8 +144,11 @@ export function SegmentTree({
                         onToggle={(checked) => onSystemVisible(loaded.recordId, system.name, checked)}
                         onOpacityChange={(o) => onSystemOpacity(loaded.recordId, system.name, o)}
                         badge={String(system.segments.length)}
+                        expanded={isExpanded(systemKey(loaded.recordId, system.name))}
+                        onExpandToggle={() => toggle(systemKey(loaded.recordId, system.name))}
                       />
-                      {system.segments.map((seg) => (
+                      {isExpanded(systemKey(loaded.recordId, system.name)) &&
+                        system.segments.map((seg) => (
                         <TreeRow
                           key={seg.key}
                           depth={2}

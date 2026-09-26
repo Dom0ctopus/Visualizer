@@ -605,6 +605,67 @@ input[type='checkbox'] {
   text-overflow: ellipsis;
 }
 
+.tree-chevron,
+.tree-chevron-spacer {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.tree-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin-right: -4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background-color 0.15s var(--ease);
+}
+
+.tree-chevron:hover {
+  color: var(--text-h);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.tree-chevron svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s var(--ease);
+}
+
+.tree-chevron.expanded svg {
+  transform: rotate(90deg);
+}
+
+.tree-chevron-spacer {
+  margin-right: -4px;
+}
+
+.tree-label-group {
+  cursor: pointer;
+  color: var(--text-h);
+}
+
+.segment-tree-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: -4px 0 4px;
+}
+
+.segment-tree-actions .icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .tree-badge {
   font-size: 10px;
   color: var(--text-dim);
@@ -841,6 +902,14 @@ input[type='checkbox'] {
      rows are z-index 100 and span the view) inside this box, so they can't
      cover the render toolbar and swallow its clicks. */
   isolation: isolate;
+}
+
+/* itk-vtk-viewer's own scale bar (a 100x30px canvas it pins to the top
+   right) is inaccurate: it measures at the near clip plane rather than the
+   focal plane, and its length formula drops the depth component. The app
+   shows its own (LiveScaleBar), matching the one drawn into captures. */
+.itk-volume-container canvas[style*='width: 100px'][style*='height: 30px'] {
+  display: none !important; /* it sets display inline */
 }
 
 /* itk-vtk-viewer's menu toggle (three dark lines) disappears against a black
@@ -1214,4 +1283,36 @@ input[type='checkbox'] {
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* Live scale bar on the surface mesh view (the voxel render has
+   itk-vtk-viewer's own); captures draw theirs into the image. */
+.scale-bar {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  pointer-events: none;
+  filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.9));
+}
+
+/* In the voxel render, clear of the vtk.js logo in the corner. */
+.itk-volume-container ~ .scale-bar {
+  right: 46px;
+}
+
+.scale-bar-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-h);
+  font-variant-numeric: tabular-nums;
+}
+
+.scale-bar-line {
+  height: 5px;
+  border: 1.5px solid var(--text-h);
+  border-top: 0;
 }

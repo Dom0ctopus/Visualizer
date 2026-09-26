@@ -16,6 +16,7 @@ import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
 import { useZarrSegmentations } from '../hooks/useZarrSegmentations'
 import { useZarrSliceViewer } from '../hooks/useZarrSliceViewer'
 import { CaptureBar } from './CaptureBar'
+import { LiveScaleBar } from './LiveScaleBar'
 import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
 import { SegmentTree } from './SegmentTree'
@@ -638,6 +639,7 @@ export function ItkVtkViewerPage() {
                   so switching never reloads or re-lays-out either renderer. */}
               <div className={renderTab === 'voxel' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
                 <div ref={volumeContainerRef} className="itk-volume-container" />
+                {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
                 {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} />}
                 {zarrSeg.segmentations.length > 0 && (
                   <div className="render-toolbar">

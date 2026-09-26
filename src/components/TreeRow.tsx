@@ -12,6 +12,10 @@ interface TreeRowProps {
   onOpacityChange: (opacity: number) => void
   onRemove?: () => void
   badge?: string
+  /** Group rows (files, systems): whether their children show. Leaf rows
+   *  leave it undefined and get a spacer so labels stay aligned. */
+  expanded?: boolean
+  onExpandToggle?: () => void
 }
 
 export function TreeRow({
@@ -24,7 +28,9 @@ export function TreeRow({
   onToggle,
   onOpacityChange,
   onRemove,
-  badge
+  badge,
+  expanded,
+  onExpandToggle
 }: TreeRowProps) {
   const [hovered, setHovered] = useState(false)
   const [popoverPos, setPopoverPos] = useState({ top: 0, left: 0 })
@@ -75,9 +81,27 @@ export function TreeRow({
 
   return (
     <div ref={rowRef} className="tree-row" style={{ paddingLeft: depth * 16 }} onMouseEnter={show} onMouseLeave={scheduleHide}>
+      {onExpandToggle ? (
+        <button
+          className={expanded ? 'tree-chevron expanded' : 'tree-chevron'}
+          aria-expanded={expanded}
+          aria-label={expanded ? `Collapse ${label}` : `Expand ${label}`}
+          onClick={onExpandToggle}
+        >
+          <svg viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M4.5 2.5 8 6l-3.5 3.5" />
+          </svg>
+        </button>
+      ) : (
+        <span className="tree-chevron-spacer" />
+      )}
       <input ref={checkboxRef} type="checkbox" checked={checked} onChange={(e) => onToggle(e.target.checked)} />
       {color && <span className="color-swatch" style={{ background: color }} />}
-      <span className="tree-label" title={label}>
+      <span
+        className={onExpandToggle ? 'tree-label tree-label-group' : 'tree-label'}
+        title={label}
+        onClick={onExpandToggle}
+      >
         {label}
       </span>
       {badge && <span className="tree-badge">{badge}</span>}
