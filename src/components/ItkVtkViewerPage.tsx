@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { LayerPatch } from '@luxar/viewer'
 import {
   deleteLibraryFile,
@@ -583,7 +583,7 @@ export function ItkVtkViewerPage() {
                 <span className="itk-viewer-hover-bar-label">Segment:</span> {hoveredSegment.name}
               </>
             ) : (
-              'Hover a segment in any 2D pane to see its name · click a pane to move the linked cursor'
+              'Hover a segment in any view to see its name · click a 2D pane to move the linked cursor'
             )}
           </span>
           <label className="crosshair-toggle">
@@ -594,7 +594,7 @@ export function ItkVtkViewerPage() {
         <div className="itk-viewer-columns">
           <div className="itk-viewer-left-column">
             <div className="itk-viewer-pane">
-              <div className="itk-viewer-pane-label" style={{ borderLeftColor: AXIAL_COLOR }}>
+              <div className="itk-viewer-pane-label" style={{ '--pane-color': AXIAL_COLOR } as CSSProperties}>
                 Axial
               </div>
               <div className="itk-viewer-container">
@@ -651,7 +651,7 @@ export function ItkVtkViewerPage() {
             </div>
 
             <div className="itk-viewer-pane">
-              <div className="itk-viewer-pane-label" style={{ borderLeftColor: CORONAL_COLOR }}>
+              <div className="itk-viewer-pane-label" style={{ '--pane-color': CORONAL_COLOR } as CSSProperties}>
                 Coronal
               </div>
               <div className="itk-viewer-container">
@@ -695,7 +695,7 @@ export function ItkVtkViewerPage() {
             </div>
 
             <div className="itk-viewer-pane">
-              <div className="itk-viewer-pane-label" style={{ borderLeftColor: SAGITTAL_COLOR }}>
+              <div className="itk-viewer-pane-label" style={{ '--pane-color': SAGITTAL_COLOR } as CSSProperties}>
                 Sagittal
               </div>
               <div className="itk-viewer-container">
