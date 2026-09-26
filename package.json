@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "sync:itk-vtk-viewer": "node scripts/sync-itk-vtk-viewer.mjs",
-    "setup:luxar": "node scripts/setup-luxar.mjs",
     "predev": "npm run sync:itk-vtk-viewer",
     "dev": "vite",
     "dev:server": "npm run start --prefix server",
@@ -17,7 +16,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@luxar/viewer": "2026.9.22",
     "itk-vtk-viewer": "^14.51.0",
     "numcodecs": "^0.3.2",
     "react": "^19.2.8",

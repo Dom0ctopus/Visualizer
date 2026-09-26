@@ -1,28 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import type { LayerPatch } from '@luxar/viewer'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
   deleteLibraryFile,
   fetchJobs,
   fetchLibrary,
-  requestLuxarAtlas,
-  requestLuxarMeshes,
   uploadSegmentation,
   uploadVolume,
   zarrUrl,
-  type AtlasQuality,
   type JobKind,
   type JobQueueState,
-  type LuxarSceneStatus,
   type MergeProgress
 } from '../lib/api'
 import { useItkVtkViewer } from '../hooks/useItkVtkViewer'
-import { useLuxarScene, useLuxarStatus } from '../hooks/useLuxarScene'
 import { useSegmentationMerge3D } from '../hooks/useSegmentationMerge3D'
 import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
 import { useZarrSegmentations } from '../hooks/useZarrSegmentations'
 import { useZarrSliceViewer } from '../hooks/useZarrSliceViewer'
 import { CaptureBar } from './CaptureBar'
-import { LuxarView } from './LuxarView'
 import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
 import { SegmentTree } from './SegmentTree'
@@ -50,19 +43,8 @@ const AXIAL_LABELS: OrientationLabels = { left: 'R', right: 'L', top: 'A', botto
 const CORONAL_LABELS: OrientationLabels = { left: 'R', right: 'L', top: 'S', bottom: 'I' }
 const SAGITTAL_LABELS: OrientationLabels = { left: 'A', right: 'P', top: 'S', bottom: 'I' }
 
-type RenderTab = 'voxel' | 'mesh' | 'atlas'
+type RenderTab = 'voxel' | 'mesh'
 
-/** `value`, once it has stayed unchanged for `delayMs`. */
-function useSettledValue<T>(value: T, delayMs: number): T {
-  const [settled, setSettled] = useState(value)
-  useEffect(() => {
-    const timer = window.setTimeout(() => setSettled(value), delayMs)
-    return () => window.clearTimeout(timer)
-  }, [value, delayMs])
-  return settled
-}
-
-const ATLAS_QUALITY_LABELS: Record<AtlasQuality, string> = { draft: 'Draft', standard: 'Standard', high: 'High' }
 
 function formatElapsed(ms: number): string {
   // Clamped: `now` ticks once a second, so it can trail a fresh start time.
@@ -79,12 +61,9 @@ function jobPhrase(jobs: JobQueueState | null, recordId: string, kind: JobKind, 
   if (mine) {
     return `running · ${formatElapsed(now - mine.startedAt)}${mine.progress ? ` · ${mine.progress}` : ''}`
   }
-  // Ahead in the same lane only: Luxar builds run on their own.
-  const sameLane = (k: JobKind) => (k === 'luxar') === (kind === 'luxar')
-  const laneQueue = queued.filter((j) => sameLane(j.kind))
-  const position = laneQueue.findIndex((j) => j.recordId === recordId && j.kind === kind)
+  const position = queued.findIndex((j) => j.recordId === recordId && j.kind === kind)
   if (position < 0) return null
-  const ahead = position + (running.some((r) => sameLane(r.kind)) ? 1 : 0)
+  const ahead = position + (running.length > 0 ? 1 : 0)
   return ahead === 0 ? 'queued, starting' : `queued, ${ahead} job${ahead === 1 ? '' : 's'} ahead`
 }
 
@@ -148,44 +127,6 @@ function MergeStatusLine({ progress, since }: { progress: MergeProgress | null; 
       {since !== null && ` · ${formatElapsed(now - since)}`}
     </p>
   )
-}
-
-/** A Luxar scene build's state, for the 3D tab toolbars. */
-function LuxarSceneLine({
-  scene,
-  error,
-  now,
-  onRetry
-}: {
-  scene: LuxarSceneStatus | null
-  error: string | null
-  now: number
-  onRetry: () => void
-}) {
-  if (error) return <span className="render-toolbar-error">{error}</span>
-  if (!scene) return <span>Checking…</span>
-  switch (scene.status) {
-    case 'none':
-      return <span>Not built yet.</span>
-    case 'pending':
-      return (
-        <span>
-          Building Luxar scene… {scene.progress ?? ''}
-          {scene.startedAt ? ` · ${formatElapsed(now - scene.startedAt)}` : ''}
-        </span>
-      )
-    case 'failed':
-      return (
-        <span className="render-toolbar-error">
-          Build failed: {scene.error ?? 'unknown error'}{' '}
-          <button className="btn btn-secondary btn-small" onClick={onRetry}>
-            Retry
-          </button>
-        </span>
-      )
-    case 'ready':
-      return null
-  }
 }
 
 /** How the "Real to life" scheme covers the loaded segments. */
@@ -273,9 +214,6 @@ export function ItkVtkViewerPage() {
   const [renderTab, setRenderTab] = useState<RenderTab>('voxel')
   // Mounted on first use (its own WebGL context), then kept mounted.
   const [meshTabOpened, setMeshTabOpened] = useState(false)
-  const [atlasTabOpened, setAtlasTabOpened] = useState(false)
-  const [meshRenderer, setMeshRenderer] = useState<'luxar' | 'basic'>('luxar')
-  const [atlasQualityChoice, setAtlasQualityChoice] = useState<AtlasQuality | null>(null)
   // Voxel render label colors: the segments' own (matching the 2D panes,
   // meshes and segment tree) or itk-vtk-viewer's categorical palette.
   const [voxelColors, setVoxelColors] = useState<'segments' | 'palette'>('segments')
@@ -414,39 +352,6 @@ export function ItkVtkViewerPage() {
   const volumes = library.filter((r): r is VolumeRecord => r.kind === 'volume')
   const segmentationRecords = library.filter((r): r is SegmentationRecord => r.kind === 'segmentation')
 
-  // --- Luxar-backed 3D tabs -------------------------------------------------
-  const luxar = useLuxarStatus()
-  const loadedSegIds = zarrSeg.segmentations.map((s) => s.recordId)
-  const loadedSegKey = [...loadedSegIds].sort().join(',')
-  const meshesReady =
-    loadedSegIds.length > 0 && loadedSegIds.every((id) => segmentationRecords.find((r) => r.id === id)?.meshStatus === 'ready')
-  const luxarMeshes = luxar?.available === true && meshRenderer === 'luxar'
-  // Waits for the loaded set to settle, so loading several segmentations in
-  // a row asks for one scene rather than one per intermediate set.
-  const settledSegKey = useSettledValue(loadedSegKey, 2000)
-  // Luxar bakes colors into a scene, so a color scheme other than the
-  // files' own is a separate (cached) scene, built with these colors (the
-  // splat atlas too; its server reuses the fit, so switching only recolors).
-  const sceneColors = useMemo(() => {
-    if (zarrSeg.colorScheme === 'slicer') return undefined
-    const colors: Record<string, Record<string, [number, number, number]>> = {}
-    for (const l of zarrSeg.segmentations) colors[l.recordId] = Object.fromEntries(l.segments.map((seg) => [seg.key, seg.color]))
-    return colors
-  }, [zarrSeg.colorScheme, zarrSeg.segmentations])
-  const meshSceneKey = meshTabOpened && luxarMeshes && meshesReady && settledSegKey === loadedSegKey ? `${loadedSegKey}|${zarrSeg.colorScheme}` : null
-  const meshScene = useLuxarScene(meshSceneKey, () => requestLuxarMeshes(loadedSegIds, false, sceneColors))
-
-  const atlasQuality: AtlasQuality = atlasQualityChoice ?? (luxar?.device && luxar.device !== 'cpu' ? 'standard' : 'draft')
-  const atlasReady = luxar?.available === true && luxar.gsplats && activeVolumeId !== null && loadedSegIds.length > 0
-  const atlasScene = useLuxarScene(
-    atlasTabOpened && atlasReady ? `${activeVolumeId}|${loadedSegKey}|${atlasQuality}|${zarrSeg.colorScheme}` : null,
-    () => requestLuxarAtlas(activeVolumeId!, loadedSegIds, atlasQuality, { colors: sceneColors })
-  )
-  const buildAtlas = () => {
-    const rebuild = atlasScene.scene?.status === 'ready' || atlasScene.scene?.status === 'failed'
-    void atlasScene.run(() => requestLuxarAtlas(activeVolumeId!, loadedSegIds, atlasQuality, { build: true, rebuild, colors: sceneColors }))
-  }
-
   // The same color choice in every 3D tab's toolbar as in the Segments
   // panel; the voxel render adds itk-vtk-viewer's own palette.
   const colorToggle = (withPalette: boolean) => (
@@ -485,25 +390,6 @@ export function ItkVtkViewerPage() {
       </div>
     </>
   )
-
-  const showLuxarMeshes = renderTab === 'mesh' && luxarMeshes && meshScene.scene?.status === 'ready'
-  const showLuxarAtlas = renderTab === 'atlas' && atlasScene.scene?.status === 'ready'
-  const luxarSrc = showLuxarAtlas ? atlasScene.scene!.url! : showLuxarMeshes ? meshScene.scene!.url! : null
-
-  // The segment tree drives the Luxar mesh layers' visibility and opacity,
-  // as it does the other views'.
-  const meshLayers = meshScene.scene?.layers
-  const meshLayerPatches = useMemo(() => {
-    if (!meshLayers) return undefined
-    const patches = new Map<string, LayerPatch>()
-    for (const layer of meshLayers) {
-      const seg = zarrSeg.segmentations.find((s) => s.recordId === layer.recordId)?.segments.find((s) => s.key === layer.segmentKey)
-      if (!seg) continue
-      const opaque = seg.opacity >= 0.99
-      patches.set(layer.name, { visible: seg.visible && seg.opacity > 0, opacity: seg.opacity, blendingMode: opaque ? 'opaque' : 'normal' })
-    }
-    return patches
-  }, [meshLayers, zarrSeg.segmentations])
 
   const resetSliceView = () => {
     setAxialZoom(1)
@@ -558,7 +444,6 @@ export function ItkVtkViewerPage() {
   const openTab = (tab: RenderTab) => {
     setRenderTab(tab)
     if (tab === 'mesh') setMeshTabOpened(true)
-    if (tab === 'atlas') setAtlasTabOpened(true)
   }
 
   const zoomAll = (factor: number) => {
@@ -747,9 +632,6 @@ export function ItkVtkViewerPage() {
               <button className={renderTab === 'mesh' ? 'render-tab active' : 'render-tab'} onClick={() => openTab('mesh')}>
                 Surface meshes
               </button>
-              <button className={renderTab === 'atlas' ? 'render-tab active' : 'render-tab'} onClick={() => openTab('atlas')}>
-                Splat atlas
-              </button>
             </div>
             <div className="itk-viewer-container">
               {/* Both tabs stay mounted and sized (visibility, not display:none),
@@ -764,107 +646,15 @@ export function ItkVtkViewerPage() {
                   </div>
                 )}
               </div>
-              {luxar?.available && (
-                <div className={luxarSrc ? 'render-tab-panel' : 'render-tab-panel inactive'}>
-                  <LuxarView src={luxarSrc} visible={luxarSrc !== null} layerPatches={showLuxarMeshes ? meshLayerPatches : undefined} />
-                </div>
-              )}
               {meshTabOpened && (
-                <div className={renderTab === 'mesh' ? 'render-tab-panel render-tab-overlay' : 'render-tab-panel inactive'}>
-                  {/* The three.js viewer: the "Basic" choice, the fallback without
-                      Luxar, and what shows while the Luxar scene builds. */}
-                  {!showLuxarMeshes && (
-                    <MeshViewer
-                      segmentations={zarrSeg.segmentations}
-                      records={segmentationRecords}
-                      active={renderTab === 'mesh'}
-                      onHoverLabel={setHoveredSegment}
-                    />
-                  )}
-                  <div className="render-toolbar">
-                    {zarrSeg.segmentations.length > 0 && colorToggle(false)}
-                    {luxar?.available ? (
-                      <>
-                        <span className="render-toolbar-label">Viewer</span>
-                        <div className="segmented">
-                          <button className={meshRenderer === 'luxar' ? 'active' : ''} onClick={() => setMeshRenderer('luxar')}>
-                            Luxar
-                          </button>
-                          <button className={meshRenderer === 'basic' ? 'active' : ''} onClick={() => setMeshRenderer('basic')}>
-                            Basic
-                          </button>
-                        </div>
-                        {luxarMeshes && loadedSegIds.length > 0 && !meshesReady && <span>Luxar scene builds once surface meshes are ready…</span>}
-
-                        {luxarMeshes && meshesReady && (
-                          <LuxarSceneLine
-                            scene={meshScene.scene}
-                            error={meshScene.error}
-                            now={now}
-                            onRetry={() => void meshScene.run(() => requestLuxarMeshes(loadedSegIds, true, sceneColors))}
-                          />
-                        )}
-                      </>
-                    ) : (
-                      luxar && (
-                        <span className="render-toolbar-hint">
-                          Streamed Luxar meshes (with layers and hover names) need Luxar's Python environment: run{' '}
-                          <code>{luxar.setupCommand}</code>
-                        </span>
-                      )
-                    )}
-                  </div>
-                </div>
-              )}
-              {atlasTabOpened && (
-                <div className={renderTab === 'atlas' ? 'render-tab-panel render-tab-overlay' : 'render-tab-panel inactive'}>
-                  <div className="render-toolbar">
-                    {!luxar ? (
-                      <span>Checking for Luxar…</span>
-                    ) : !luxar.available || !luxar.gsplats ? (
-                      <span className="render-toolbar-hint">
-                        The splat atlas is built with Luxar's Gaussian-splat fitting, which needs its Python environment: run{' '}
-                        <code>{luxar.setupCommand}</code>
-                        {luxar.reason ? ` (${luxar.reason})` : ''}
-                      </span>
-                    ) : !atlasReady ? (
-                      <span>Load a volume and at least one segmentation to build a splat atlas.</span>
-                    ) : (
-                      <>
-                        {colorToggle(false)}
-                        <span className="render-toolbar-label">Quality</span>
-                        <select value={atlasQuality} onChange={(e) => setAtlasQualityChoice(e.target.value as AtlasQuality)}>
-                          {(Object.keys(ATLAS_QUALITY_LABELS) as AtlasQuality[]).map((q) => (
-                            <option key={q} value={q}>
-                              {ATLAS_QUALITY_LABELS[q]}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          className="btn btn-secondary btn-small"
-                          disabled={atlasScene.scene?.status === 'pending'}
-                          onClick={buildAtlas}
-                        >
-                          {atlasScene.scene?.status === 'ready' ? 'Rebuild' : 'Build atlas'}
-                        </button>
-                        <LuxarSceneLine scene={atlasScene.scene} error={atlasScene.error} now={now} onRetry={buildAtlas} />
-                      </>
-                    )}
-                  </div>
-                  {!showLuxarAtlas && (
-                    <div className="render-tab-message">
-                      <p>
-                        A Gaussian-splat rendering of the CT, colored by segment, in the style of Luxar's TotalSegmentator atlas:
-                        one toggleable layer per segment system (press <kbd>L</kbd> in the viewer), segment names on hover.
-                      </p>
-                      <p>
-                        It's an artistic, lossy fit for presentation, not the voxel data. Fitting runs on the server
-                        {luxar?.device ? ` (${luxar.device === 'cpu' ? 'CPU' : luxar.device.toUpperCase()})` : ''}:
-                        Draft takes several minutes on a CPU; Standard and High are meant for a GPU (hours on a CPU).
-                        Builds are cached, so each only has to happen once.
-                      </p>
-                    </div>
-                  )}
+                <div className={renderTab === 'mesh' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
+                  <MeshViewer
+                    segmentations={zarrSeg.segmentations}
+                    records={segmentationRecords}
+                    active={renderTab === 'mesh'}
+                    onHoverLabel={setHoveredSegment}
+                  />
+                  {zarrSeg.segmentations.length > 0 && <div className="render-toolbar">{colorToggle(false)}</div>}
                 </div>
               )}
             </div>

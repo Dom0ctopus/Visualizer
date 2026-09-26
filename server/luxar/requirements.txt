@@ -1,4 +1,0 @@
-# Luxar scene compiler + its splat-fitting extra (torch, scipy), pinned to the
-# release this app was built against. Installed into server/.luxar-venv by
-# `npm run setup:luxar` (scripts/setup-luxar.mjs).
-luxar[gsplats]==2026.9.22

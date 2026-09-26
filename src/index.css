@@ -849,17 +849,6 @@ input[type='checkbox'] {
   filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff);
 }
 
-/* Mesh/atlas panels sit over the shared Luxar viewer: transparent to the
-   pointer except for their own content, so the viewer underneath stays
-   interactive. */
-.render-tab-overlay {
-  pointer-events: none;
-}
-
-.render-tab-overlay > * {
-  pointer-events: auto;
-}
-
 /* Floating glass toolbars over the renders. */
 .render-toolbar,
 .capture-bar {
@@ -916,8 +905,7 @@ input[type='checkbox'] {
   padding: 3px 6px;
 }
 
-.render-toolbar code,
-.render-tab-message kbd {
+.render-toolbar code {
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
   font-size: 11px;
   background: rgba(255, 255, 255, 0.06);
@@ -935,10 +923,6 @@ input[type='checkbox'] {
 
 .render-toolbar-hint {
   color: var(--text-dim);
-}
-
-.render-toolbar-error {
-  color: var(--danger);
 }
 
 /* Segmented control: a recessed track with a raised chip for the choice. */
@@ -972,50 +956,6 @@ input[type='checkbox'] {
   background: var(--chip);
   color: var(--text-h);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 1px 3px rgba(0, 0, 0, 0.35);
-}
-
-.render-tab-message {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: min(460px, calc(100% - 32px));
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-dim);
-  text-align: center;
-}
-
-.luxar-view {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-}
-
-.luxar-view-canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-.luxar-view-retry {
-  margin-left: 8px;
-}
-
-.luxar-view-status {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 4px 12px;
-  border-radius: 999px;
-  background: var(--glass);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border);
-  font-size: 12px;
 }
 
 .mesh-viewer {

@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 
 /**
- * Order-independent transparency for the Basic mesh viewer (weighted
+ * Order-independent transparency for the surface mesh viewer (weighted
  * blended OIT, McGuire & Bavoil 2013).
  *
  * three.js draws transparent meshes back to front, sorted by each mesh's

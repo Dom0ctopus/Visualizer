@@ -1,33 +1,17 @@
 import cors from 'cors'
-import { createHash } from 'node:crypto'
 import express from 'express'
 import multer from 'multer'
-import { readFile, rename, rm } from 'node:fs/promises'
+import { rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
 import { enqueueJob, getJobQueueState, JobPreemptedError } from './jobQueue.js'
-import {
-  LUXAR_DIR,
-  atlasKey,
-  getLuxarStatus,
-  initLuxarScenes,
-  invalidateScenesFor,
-  ladderDirFor,
-  requestAtlas,
-  requestMeshScene,
-  sceneStatus,
-  type AtlasQuality,
-  type AtlasSegmentation,
-  type LuxarSceneKind,
-  type MeshSceneSegment
-} from './luxarScenes.js'
 import { readNrrdHeader } from './nrrdHeader.js'
 import { convertSegmentationMergeToOmeZarr, MergeCancelledError, type MergedSegmentMapping, type MergeProgress } from './segmentationMergeConvert.js'
 import { convertSegmentationNrrdToOmeZarr } from './segmentationZarrConvert.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
 import { generateSegmentationMeshes } from './surfaceMesh.js'
 import { FILES_DIR, MESH_DIR, ZARR_DIR, addRecord, getRecord, initStore, listRecords, newId, removeRecord, updateRecord } from './store.js'
-import type { LibraryRecord, SegmentationRecord, SegmentInfo, StoredRecord, StoredSegmentationRecord, VolumeRecord } from './types.js'
+import type { LibraryRecord, SegmentationRecord, StoredRecord, StoredSegmentationRecord, VolumeRecord } from './types.js'
 import { convertNrrdToOmeZarr } from './zarrConvert.js'
 
 async function enrichSegmentationRecord(stored: StoredSegmentationRecord): Promise<SegmentationRecord> {
@@ -44,7 +28,6 @@ async function toLibraryRecord(stored: StoredRecord): Promise<LibraryRecord> {
 }
 
 await initStore()
-await initLuxarScenes()
 
 function zarrPathFor(id: string): string {
   return path.join(ZARR_DIR, `${id}.ome.zarr`)
@@ -380,196 +363,8 @@ app.post('/api/segmentations/:id/meshes', async (req, res) => {
     res.json({ meshStatus: 'pending' })
     return
   }
-  await invalidateScenesFor(record.id, 'meshes')
   generateMeshesInBackground(record.id)
   res.json({ meshStatus: 'pending' })
-})
-
-// ---------------------------------------------------------------------------
-// Luxar scenes (luxarScenes.ts): streamed surface meshes and the splat atlas.
-// ---------------------------------------------------------------------------
-
-app.use('/api/luxar/files', express.static(LUXAR_DIR))
-
-app.get('/api/luxar', async (_req, res) => {
-  res.json(await getLuxarStatus())
-})
-
-app.get('/api/luxar/scenes/:key', (req, res) => {
-  const kind: LuxarSceneKind = req.params.key.startsWith('atlas-') ? 'atlas' : 'meshes'
-  res.json(sceneStatus(req.params.key, kind))
-})
-
-interface ReadySegmentation {
-  record: SegmentationRecord
-  /** Flattened with each segment's system name. */
-  segments: Array<SegmentInfo & { system: string }>
-}
-
-/** Looks up and enriches the given segmentation records, or returns an error
- *  message if any is missing or unconverted. */
-async function readySegmentations(ids: unknown): Promise<ReadySegmentation[] | string> {
-  if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string')) return 'segmentationIds must be a non-empty array of ids'
-  const out: ReadySegmentation[] = []
-  for (const id of ids as string[]) {
-    const stored = getRecord(id)
-    if (!stored || stored.kind !== 'segmentation') return `No segmentation with id ${id}`
-    if (stored.zarrStatus !== 'ready') return `${stored.name} hasn't finished converting`
-    const record = await enrichSegmentationRecord(stored)
-    out.push({ record, segments: record.systems.flatMap((sys) => sys.segments.map((seg) => ({ ...seg, system: sys.name }))) })
-  }
-  return out
-}
-
-/**
- * A segment or system name made safe as a node name in a Luxar scene. Nodes
- * are directories that the viewer fetches by URL without encoding their
- * names, so '#', '?', '%' and '\' would cut or alter the URL ("Not found:
- * v2 group"), and '/' would nest a node. Those, characters file systems
- * reject and leading/trailing dots and spaces become '-' or are dropped;
- * hover labels keep the full name.
- */
-function sceneNodeName(name: string): string {
-  // eslint-disable-next-line no-control-regex
-  const safe = name.replace(/[/\\#?%:*"<>|\u0000-\u001f]/g, '-').replace(/^[\s.]+|[\s.]+$/g, '')
-  return safe || 'segment'
-}
-
-function segmentDisplayName(seg: { name: string; system: string }): string {
-  return seg.system === 'Ungrouped' ? seg.name : `${seg.system} · ${seg.name}`
-}
-
-function rgb01(color: [number, number, number]): [number, number, number] {
-  return [color[0] / 255, color[1] / 255, color[2] / 255]
-}
-
-function setTitle(segs: ReadySegmentation[]): string {
-  return segs.map((s) => s.record.name).join(', ')
-}
-
-type ColorOverrides = Record<string, Record<string, [number, number, number]>>
-const COLORS_ERROR = 'colors must map record id -> segment key -> [r, g, b] (0-255)'
-
-/** Optional per-segment colors (0-255) by record id and segment key
- *  ("layer:labelValue"), e.g. from a color scheme; absent means the files'
- *  own colors. */
-function parseColorOverrides(raw: unknown): ColorOverrides | undefined | 'invalid' {
-  if (raw === undefined) return undefined
-  const valid =
-    typeof raw === 'object' &&
-    raw !== null &&
-    Object.values(raw).every(
-      (m) => typeof m === 'object' && m !== null && Object.values(m as object).every((c) => Array.isArray(c) && c.length === 3 && c.every((v) => typeof v === 'number' && v >= 0 && v <= 255))
-    )
-  return valid ? (raw as ColorOverrides) : 'invalid'
-}
-
-function colorsKeyOf(colors: ColorOverrides | undefined): string | undefined {
-  return colors ? createHash('sha1').update(JSON.stringify(colors)).digest('hex').slice(0, 16) : undefined
-}
-
-app.post('/api/luxar/meshes', express.json(), async (req, res) => {
-  const segs = await readySegmentations(req.body?.segmentationIds)
-  if (typeof segs === 'string') {
-    res.status(400).json({ error: segs })
-    return
-  }
-  const colorOverrides = parseColorOverrides(req.body?.colors)
-  if (colorOverrides === 'invalid') {
-    res.status(400).json({ error: COLORS_ERROR })
-    return
-  }
-  const notReady = segs.find((s) => s.record.meshStatus !== 'ready')
-  if (notReady) {
-    res.status(409).json({ error: `Surface meshes for ${notReady.record.name} aren't ready yet` })
-    return
-  }
-  const segments: MeshSceneSegment[] = []
-  const usedNames = new Set<string>()
-  for (const { record, segments: infos } of segs) {
-    const manifest = JSON.parse(await readFile(path.join(meshDirFor(record.id), 'manifest.json'), 'utf8')) as {
-      segments: Array<{ layer: number; labelValue: number; file: string }>
-    }
-    for (const entry of manifest.segments) {
-      const info = infos.find((i) => i.layer === entry.layer && i.labelValue === entry.labelValue)
-      const name = info ? segmentDisplayName(info) : `Layer ${entry.layer} label ${entry.labelValue}`
-      // Layer names are node names in the archive (see sceneNodeName),
-      // unique even on a case-insensitive file system.
-      const base = sceneNodeName(name)
-      let layerName = base
-      if (usedNames.has(layerName.toLowerCase())) layerName = `${base} (${sceneNodeName(record.name)})`
-      for (let n = 2; usedNames.has(layerName.toLowerCase()); n++) layerName = `${base} (${n})`
-      usedNames.add(layerName.toLowerCase())
-      const segmentKey = `${entry.layer}:${entry.labelValue}`
-      const override = colorOverrides?.[record.id]?.[segmentKey]
-      segments.push({
-        file: path.join(meshDirFor(record.id), entry.file),
-        ladderDir: ladderDirFor(record.id),
-        name,
-        layerName,
-        recordId: record.id,
-        segmentKey,
-        color: override ? rgb01(override) : info ? rgb01(info.color) : [0.8, 0.8, 0.8]
-      })
-    }
-  }
-  res.json(
-    requestMeshScene({
-      segmentationIds: segs.map((s) => s.record.id),
-      segments,
-      title: setTitle(segs),
-      rebuild: req.body?.rebuild === true,
-      colorsKey: colorsKeyOf(colorOverrides)
-    })
-  )
-})
-
-const ATLAS_QUALITIES: AtlasQuality[] = ['draft', 'standard', 'high']
-
-app.post('/api/luxar/atlas', express.json(), async (req, res) => {
-  const volumeId = req.body?.volumeId
-  const volume = typeof volumeId === 'string' ? getRecord(volumeId) : undefined
-  if (!volume || volume.kind !== 'volume' || volume.zarrStatus !== 'ready') {
-    res.status(400).json({ error: 'volumeId must name a converted volume' })
-    return
-  }
-  const quality = req.body?.quality as AtlasQuality
-  if (!ATLAS_QUALITIES.includes(quality)) {
-    res.status(400).json({ error: `quality must be one of ${ATLAS_QUALITIES.join(', ')}` })
-    return
-  }
-  const segs = await readySegmentations(req.body?.segmentationIds)
-  if (typeof segs === 'string') {
-    res.status(400).json({ error: segs })
-    return
-  }
-  const colorOverrides = parseColorOverrides(req.body?.colors)
-  if (colorOverrides === 'invalid') {
-    res.status(400).json({ error: COLORS_ERROR })
-    return
-  }
-  const segmentations: AtlasSegmentation[] = segs.map(({ record, segments }) => {
-    const layers = new Map<number, AtlasSegmentation['layers'][number]>()
-    for (const seg of segments) {
-      const layer = layers.get(seg.layer) ?? { layer: seg.layer, segments: [] }
-      const color = colorOverrides?.[record.id]?.[`${seg.layer}:${seg.labelValue}`] ?? seg.color
-      layer.segments.push({ labelValue: seg.labelValue, name: segmentDisplayName(seg), system: seg.system === 'Ungrouped' ? record.name : seg.system, color: rgb01(color) })
-      layers.set(seg.layer, layer)
-    }
-    return { name: record.name, store: segZarrPathFor(record.id), layers: [...layers.values()] }
-  })
-  const status = requestAtlas({
-    volumeId: volume.id,
-    volumeStore: zarrPathFor(volume.id),
-    segmentationIds: segs.map((s) => s.record.id),
-    segmentations,
-    quality,
-    colorsKey: colorsKeyOf(colorOverrides),
-    title: `${volume.name} + ${setTitle(segs)}`,
-    build: req.body?.build === true,
-    rebuild: req.body?.rebuild === true
-  })
-  res.json({ ...status, key: atlasKey(volume.id, segs.map((s) => s.record.id), quality, colorsKeyOf(colorOverrides)) })
 })
 
 app.get('/api/segmentation-merges', (_req, res) => {
@@ -583,7 +378,6 @@ app.delete('/api/files/:id', async (req, res) => {
     return
   }
   await rm(path.join(FILES_DIR, removed.storedFilename), { force: true })
-  await invalidateScenesFor(removed.id)
   // Removing a record whose background conversion is still writing chunk
   // files into this same directory (convertInBackground/
   // convertSegmentationInBackground) is a real race: fs.rm's recursive

@@ -33,4 +33,4 @@ To add a reference: add the image and its rectangle(s) to `sample_reference_colo
 
 ## Surface finish
 
-Each class also has a finish used for 3D shading in the Basic mesh viewer: hard structures (beak/chitin, cartilage) get a clear-coated material with crisp highlights so they read as hard; soft tissue keeps a satin finish. The finish follows the tissue type in either color scheme.
+Each class also has a finish used for 3D shading in the surface mesh viewer: hard structures (beak/chitin, cartilage) get a clear-coated material with crisp highlights so they read as hard; soft tissue keeps a satin finish. The finish follows the tissue type in either color scheme.

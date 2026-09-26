@@ -16,9 +16,9 @@ dist-ssr
 server/data/files
 server/data/zarr
 server/data/meshes
-server/data/luxar
 
-# Optional Python environment for Luxar scene builds (npm run setup:luxar)
+# Left over from the removed Luxar integration (safe to delete locally)
+server/data/luxar
 server/.luxar-venv
 __pycache__
 server/data/index.json
