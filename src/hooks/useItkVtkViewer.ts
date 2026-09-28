@@ -281,7 +281,10 @@ export function useItkVtkViewer() {
           const onImageUpdate = () => {
             // Catches the first label render, before the transfer function
             // is hooked (see applyLabelColors).
-            window.setTimeout(() => applyLabelColorsRef.current(), 0)
+            window.setTimeout(() => {
+              applyLabelColorsRef.current()
+              hookLabelOpacityRef.current()
+            }, 0)
             try {
               volumeViewer.getViewProxy().getInteractorStyle3D().setCenterOfRotation(center)
               if (!colorMapApplied) {
@@ -381,6 +384,7 @@ export function useItkVtkViewer() {
     applyLabelColorsRef.current()
     // Label weights and names that arrived while loading.
     labelImageReadyRef.current = true
+    hookLabelOpacityRef.current()
     flushLabelUpdateRef.current()
     applyFocusBlendRef.current()
   }, [])
@@ -454,6 +458,46 @@ export function useItkVtkViewer() {
   // on the function writes the segment colors back once that rewrite is done
   // (vtk.js objects are frozen, so its methods can't be wrapped instead).
   // itk's own slice views share the same function, so they match too.
+  // Label opacities (segment weights, search focus) have the same problem as
+  // colors: vtk.js rebuilds the volume's opacity texture only when component
+  // 0's opacity function changes. So a listener on the label component's
+  // opacity function marks component 0's modified whenever the label one
+  // really changes -- whenever itk-vtk-viewer gets round to applying new
+  // weights, which can be after any fixed point we'd pick.
+  const hookedOpacities = useRef(new WeakSet<object>())
+  const hookLabelOpacity = useCallback(() => {
+    const viewer = volumeViewerRef.current
+    if (!viewer) return
+    try {
+      const viewProxy = viewer.getViewProxy()
+      for (const representation of viewProxy.getRepresentations?.() ?? []) {
+        const volume = representation.getVolumes?.()?.[0]
+        const components = volume?.getMapper()?.getInputData()?.getPointData()?.getScalars()?.getNumberOfComponents() ?? 0
+        if (!volume || components < 2) continue
+        const property = volume.getProperty()
+        const labelOpacity = property.getScalarOpacity(components - 1) as ({ onModified: (cb: () => void) => unknown } & object) | null
+        if (!labelOpacity || hookedOpacities.current.has(labelOpacity)) continue
+        hookedOpacities.current.add(labelOpacity)
+        let scheduled = false
+        labelOpacity.onModified(() => {
+          if (scheduled) return
+          scheduled = true
+          queueMicrotask(() => {
+            scheduled = false
+            property.getScalarOpacity(0)?.modified()
+            viewProxy.renderLater()
+          })
+        })
+      }
+    } catch {
+      // viewer mid-update; hooked on the next image update
+    }
+  }, [])
+  const hookLabelOpacityRef = useRef(hookLabelOpacity)
+  useEffect(() => {
+    hookLabelOpacityRef.current = hookLabelOpacity
+  }, [hookLabelOpacity])
+
   const labelColorsRef = useRef<Map<number, [number, number, number]> | null>(null)
   const hookedFunctions = useRef(new WeakSet<VtkColorTransferFunction>())
   const applyingColors = useRef(false)
