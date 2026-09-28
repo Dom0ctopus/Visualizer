@@ -177,6 +177,16 @@ export function useItkVtkViewer() {
   /** The mouse-rotation center (the whole volume's center); the turntable
    *  spins about it too. */
   const rotationCenterRef = useRef<[number, number, number] | null>(null)
+  /** Whether itk-vtk-viewer has a label image fully set up. Label weights
+   *  or names sent before that make its applyLabelImageWeights throw inside
+   *  its state machine ("reading 'has'"), which can leave the 3D view stuck,
+   *  so updates wait for this (see scheduleLabelUpdate). */
+  const labelImageReadyRef = useRef(false)
+  /** A label image requested before the viewer existed (the merge can
+   *  finish before a large volume has loaded); loaded once it does. */
+  const pendingLabelImageUrlRef = useRef<string | null>(null)
+  const loadLabelImageUrlRef = useRef<(url: string) => Promise<void>>(async () => {})
+  const flushLabelUpdateRef = useRef<() => void>(() => {})
   const turntableFrameRef = useRef(0)
 
   const [scriptReady, setScriptReady] = useState(false)
@@ -203,6 +213,7 @@ export function useItkVtkViewer() {
   // alive for the rest of the session. Losing its WebGL contexts releases
   // that memory; its canvases are then detached with the rest of its DOM.
   const clearViewer = useCallback(() => {
+    labelImageReadyRef.current = false
     cancelAnimationFrame(turntableFrameRef.current)
     turntableFrameRef.current = 0
     rotationCenterRef.current = null
@@ -280,6 +291,8 @@ export function useItkVtkViewer() {
           console.warn('Could not apply itk-vtk-viewer defaults:', e)
         }
         volumeViewerRef.current = volumeViewer
+        const pendingLabelImage = pendingLabelImageUrlRef.current
+        if (pendingLabelImage) void loadLabelImageUrlRef.current(pendingLabelImage)
         if (import.meta.env.DEV) (window as unknown as { __itkViewer?: ItkVtkViewerInstance }).__itkViewer = volumeViewer
         setLoadedName(name)
       } catch (e) {
@@ -304,9 +317,15 @@ export function useItkVtkViewer() {
   // by rank); setLabelColors below sets them another way.
   const loadLabelImageUrl = useCallback(async (url: string) => {
     const viewer = volumeViewerRef.current
-    if (!viewer) return
+    if (!viewer) {
+      pendingLabelImageUrlRef.current = url
+      return
+    }
+    pendingLabelImageUrlRef.current = null
     const absoluteUrl = new URL(url, window.location.href)
+    labelImageReadyRef.current = false
     await viewer.setLabelImage(absoluteUrl)
+    if (viewer !== volumeViewerRef.current) return // replaced meanwhile
     // setLabelImage reveals its own dedicated UI groups (label weight
     // sliders, a second colormap editor, etc) regardless of the earlier
     // setUICollapsed(true) call in loadZarrUrl -- confirmed directly: the
@@ -353,7 +372,13 @@ export function useItkVtkViewer() {
       viewer.setLabelImageBlend(blend)
     }
     applyLabelColorsRef.current()
+    // Label weights and names that arrived while loading.
+    labelImageReadyRef.current = true
+    flushLabelUpdateRef.current()
   }, [])
+  useEffect(() => {
+    loadLabelImageUrlRef.current = loadLabelImageUrl
+  }, [loadLabelImageUrl])
 
   // Opacity sliders fire continuously; forwarding every tick made
   // itk-vtk-viewer re-render the full labeled volume dozens of times a
@@ -366,14 +391,23 @@ export function useItkVtkViewer() {
     if (labelUpdateTimer.current !== null) return
     labelUpdateTimer.current = window.setTimeout(() => {
       labelUpdateTimer.current = null
-      const { weights, names } = pendingLabelUpdate.current
-      pendingLabelUpdate.current = {}
-      const viewer = volumeViewerRef.current
-      if (!viewer) return
-      if (names) viewer.setLabelImageLabelNames(names)
-      if (weights) viewer.setLabelImageWeights(weights)
+      flushLabelUpdateRef.current()
     }, LABEL_UPDATE_THROTTLE_MS)
   }, [])
+  // Sends the pending weights/names -- only once the label image is set up
+  // (they stay pending until then; loadLabelImageUrl flushes them).
+  flushLabelUpdateRef.current = () => {
+    const viewer = volumeViewerRef.current
+    if (!viewer || !labelImageReadyRef.current) return
+    const { weights, names } = pendingLabelUpdate.current
+    pendingLabelUpdate.current = {}
+    try {
+      if (names) viewer.setLabelImageLabelNames(names)
+      if (weights) viewer.setLabelImageWeights(weights)
+    } catch (e) {
+      console.warn('Could not update label weights yet:', e)
+    }
+  }
   useEffect(
     () => () => {
       if (labelUpdateTimer.current !== null) window.clearTimeout(labelUpdateTimer.current)
