@@ -59,7 +59,10 @@ interface VtkColorTransferFunction {
   modified: () => void
 }
 interface VtkVolume {
-  getProperty: () => { getRGBTransferFunction: (component: number) => VtkColorTransferFunction | null }
+  getProperty: () => {
+    getRGBTransferFunction: (component: number) => VtkColorTransferFunction | null
+    getScalarOpacity: (component: number) => { modified: () => void } | null
+  }
   getMapper: () => { getInputData: () => { getPointData: () => { getScalars: () => { getNumberOfComponents: () => number } | null } } | null } | null
 }
 
@@ -182,6 +185,10 @@ export function useItkVtkViewer() {
    *  its state machine ("reading 'has'"), which can leave the 3D view stuck,
    *  so updates wait for this (see scheduleLabelUpdate). */
   const labelImageReadyRef = useRef(false)
+  /** Search focus's share of the label blend (see setFocusBlend): the
+   *  strength, and the user's own blend from before focusing. */
+  const focusBlendRef = useRef<{ strength: number; base: number } | null>(null)
+  const applyFocusBlendRef = useRef<() => void>(() => {})
   /** A label image requested before the viewer existed (the merge can
    *  finish before a large volume has loaded); loaded once it does. */
   const pendingLabelImageUrlRef = useRef<string | null>(null)
@@ -375,6 +382,7 @@ export function useItkVtkViewer() {
     // Label weights and names that arrived while loading.
     labelImageReadyRef.current = true
     flushLabelUpdateRef.current()
+    applyFocusBlendRef.current()
   }, [])
   useEffect(() => {
     loadLabelImageUrlRef.current = loadLabelImageUrl
@@ -403,7 +411,27 @@ export function useItkVtkViewer() {
     pendingLabelUpdate.current = {}
     try {
       if (names) viewer.setLabelImageLabelNames(names)
-      if (weights) viewer.setLabelImageWeights(weights)
+      if (weights) {
+        viewer.setLabelImageWeights(weights)
+        // vtk.js rebuilds the volume's opacity texture (all components) only
+        // when component 0's opacity function changes -- the same cache-key
+        // quirk as colors (see applyLabelColors) -- so without this, new label
+        // weights (hiding a segment, an opacity change, search focus) never
+        // reach the voxel render after its first frame. Also once more after
+        // itk-vtk-viewer has finished applying them.
+        const bump = () => {
+          try {
+            for (const representation of viewer.getViewProxy().getRepresentations?.() ?? []) {
+              representation.getVolumes?.()?.[0]?.getProperty().getScalarOpacity(0)?.modified()
+            }
+            viewer.getViewProxy().renderLater()
+          } catch {
+            // viewer mid-update
+          }
+        }
+        bump()
+        window.setTimeout(bump, 0)
+      }
     } catch (e) {
       console.warn('Could not update label weights yet:', e)
     }
@@ -508,6 +536,46 @@ export function useItkVtkViewer() {
     },
     [applyLabelColors]
   )
+
+  // Search focus in the voxel render. Fading the other segments' label
+  // weights alone isn't enough: in itk-vtk-viewer's proportional opacity
+  // mode a label weight only scales tissue opacity between (1 - blend) and
+  // 1, so at the default blend everything outside the focus -- other
+  // segments and unlabeled tissue -- stays clearly visible. So the focus
+  // strength also raises the label blend, intersecting with the user's own:
+  // effective = 1 - (1 - blend) * (1 - strength)^2. 0 leaves the blend as
+  // it was; 1 leaves only the focused segments. Steeper than the 2D fade: a
+  // volume render accumulates opacity along each ray, so tissue has to fade
+  // much further before it stops reading as solid. The user's blend is
+  // restored when the focus ends.
+  applyFocusBlendRef.current = () => {
+    const viewer = volumeViewerRef.current
+    const focus = focusBlendRef.current
+    if (!viewer || !focus || !labelImageReadyRef.current) return
+    try {
+      viewer.setLabelImageBlend(1 - (1 - focus.base) * (1 - focus.strength) ** 2)
+    } catch (e) {
+      console.warn('Could not apply the focus blend yet:', e)
+    }
+  }
+  const setFocusBlend = useCallback((strength: number | null) => {
+    const viewer = volumeViewerRef.current
+    const current = focusBlendRef.current
+    if (strength === null) {
+      focusBlendRef.current = null
+      if (current && viewer && labelImageReadyRef.current) {
+        try {
+          viewer.setLabelImageBlend(current.base)
+        } catch {
+          // viewer mid-update
+        }
+      }
+      return
+    }
+    const base = current?.base ?? (viewer && labelImageReadyRef.current ? viewer.getLabelImageBlend() : 0.5)
+    focusBlendRef.current = { strength, base: typeof base === 'number' ? base : 0.5 }
+    applyFocusBlendRef.current()
+  }, [])
 
   // Background (label 0) must come first, at 0: itk-vtk-viewer builds the
   // label opacity function from the map in order and only anchors 0 -> 0 when
@@ -629,6 +697,7 @@ export function useItkVtkViewer() {
     setLabelWeights,
     setLabelNames,
     pickLabelName,
+    setFocusBlend,
     captureTarget,
     setLabelColors,
     applyLabelColors

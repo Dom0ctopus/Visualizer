@@ -12,7 +12,8 @@ export interface LabelLut {
    *  indexed read, same cost as the color lookup it happens alongside. */
   names: string[]
   /** Indexed by labelValue -> 1 if the segment is in the search focus set
-   *  (outlined in the 2D panes); null when no focus is active. */
+   *  (outlined in the 2D panes); null when no focus is active or none of
+   *  this layer's segments is focused. */
   focus: Uint8Array | null
 }
 
@@ -47,5 +48,7 @@ export function buildLabelLut(segmentsInLayer: SegmentState[], focus: OverlayFoc
     // there's nothing actually drawn there to be hovering over.
     names[seg.labelValue] = seg.name
   }
-  return { lut, names, focus: focusFlags }
+  // Flags only when this layer has a focused segment: the renderer draws an
+  // outline pass per flagged layer, which is costly with many layers.
+  return { lut, names, focus: focusFlags?.includes(1) ? focusFlags : null }
 }

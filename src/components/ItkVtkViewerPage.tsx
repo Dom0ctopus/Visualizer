@@ -236,7 +236,8 @@ export function ItkVtkViewerPage() {
     setLabelNames,
     setLabelColors,
     pickLabelName,
-    captureTarget
+    captureTarget,
+    setFocusBlend
   } = useItkVtkViewer()
 
   // Hover in the voxel render names the segment under the pointer, as in
@@ -318,7 +319,15 @@ export function ItkVtkViewerPage() {
   const [focusKeys, setFocusKeys] = useState<ReadonlySet<string> | null>(null)
   const [focusStrength, setFocusStrength] = useState(0.85)
   const focusSpec = useMemo(() => (focusKeys ? { keys: focusKeys, fade: 1 - focusStrength } : null), [focusKeys, focusStrength])
+  // The voxel render fades on a steeper curve: it accumulates opacity along
+  // each ray, so a segment at 15% opacity still looks solid through its
+  // thickness (see useItkVtkViewer's setFocusBlend for the blend's share).
+  const voxelFocusSpec = useMemo(() => (focusKeys ? { keys: focusKeys, fade: (1 - focusStrength) ** 3 } : null), [focusKeys, focusStrength])
   const [focusError, setFocusError] = useState<string | null>(null)
+  // The voxel render's share: focus also raises its label blend.
+  useEffect(() => {
+    setFocusBlend(focusKeys ? focusStrength : null)
+  }, [focusKeys, focusStrength, setFocusBlend])
 
   const { overlays, error: overlayError } = useSegmentationOverlays(
     zarrSeg.segmentations,
@@ -335,7 +344,7 @@ export function ItkVtkViewerPage() {
     setLabelNames,
     setLabelColors,
     voxelColors === 'segments',
-    focusSpec
+    voxelFocusSpec
   )
 
   /** Focuses the search's matches (replacing the focus set, or adding to it),
