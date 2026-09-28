@@ -24,37 +24,91 @@ mkdirSync(dest, { recursive: true })
 cpSync(src, dest, { recursive: true })
 console.log(`Synced itk-vtk-viewer assets to ${dest}`)
 
-// Nearest-voxel label sampling in the voxel render. vtk.js packs the CT and
-// the label image into one 3D texture and samples it trilinearly, so at a
-// boundary between label 0 and label 4 the label reads 1, 2 and 3 on the way
-// -- and a hidden or unfocused segment keeps a shell in whatever opacity and
-// color those other labels have. Re-reading the label (proportional)
-// component at the nearest texel center keeps labels exact while the CT stays
-// smooth. vtk.js freezes its objects, so the shader can't be amended at
-// runtime; this edits the volume fragment shader template (a string in the
-// bundle) instead.
-const TEXTURE_READ = 'vec4 tmp = texture(texture1, pos);\\n'
-const NEAREST_LABEL = [
-  '#if defined(vtkIndependentComponentsOn)',
-  '  #if vtkNumComponents == 2 && defined(vtkComponent1Proportional)',
-  '    tmp.g = texture(texture1, (floor(pos * vec3(textureSize(texture1, 0))) + 0.5) / vec3(textureSize(texture1, 0))).g;',
-  '  #elif vtkNumComponents == 3 && defined(vtkComponent2Proportional)',
-  '    tmp.b = texture(texture1, (floor(pos * vec3(textureSize(texture1, 0))) + 0.5) / vec3(textureSize(texture1, 0))).b;',
-  '  #elif vtkNumComponents == 4 && defined(vtkComponent3Proportional)',
-  '    tmp.a = texture(texture1, (floor(pos * vec3(textureSize(texture1, 0))) + 0.5) / vec3(textureSize(texture1, 0))).a;',
-  '  #endif',
-  '#endif',
-  ''
-].join('\\n')
+// Patches to vtk.js's volume renderer inside the bundle. vtk.js freezes its
+// objects, so its shaders can't be amended at runtime; these edit the
+// bundle's source instead. Each must match exactly as often as expected --
+// if an itk-vtk-viewer upgrade changes the code, the sync warns and skips it.
+const patches = [
+  {
+    // Nearest-voxel label sampling. vtk.js packs the CT and the label image
+    // into one 3D texture and samples it trilinearly, so at a boundary
+    // between label 0 and label 4 the label reads 1, 2 and 3 on the way --
+    // and a hidden or unfocused segment keeps a shell in whatever opacity and
+    // color those other labels have. So the ray march's samples re-read the
+    // label (proportional) component at the nearest texel center, keeping
+    // labels exact while the CT stays smooth. Only those samples: the
+    // lighting gradients' neighbor reads don't use the label, and doubling
+    // them made every sample twice as expensive -- which counts in search
+    // focus, where transparent tissue lets rays run the whole volume.
+    name: 'nearest-voxel label sampling (function)',
+    skipped: 'hidden/unfocused segments will leave faint shells in the voxel render',
+    find: '// End of Webgl1 specific code\\n//=======================================================================\\n#endif\\n',
+    replace: (match) =>
+      match +
+      [
+        '',
+        'vec4 getLabeledTextureValue(vec3 pos)',
+        '{',
+        '  vec4 tmp = getTextureValue(pos);',
+        '#if __VERSION__ == 300 && defined(vtkIndependentComponentsOn)',
+        '  vec3 labelTexel = (floor(pos * vec3(textureSize(texture1, 0))) + 0.5) / vec3(textureSize(texture1, 0));',
+        '  #if vtkNumComponents == 2 && defined(vtkComponent1Proportional)',
+        '    tmp.g = texture(texture1, labelTexel).g;',
+        '    tmp.a = tmp.g;',
+        '  #elif vtkNumComponents == 3 && defined(vtkComponent2Proportional)',
+        '    tmp.b = texture(texture1, labelTexel).b;',
+        '  #elif vtkNumComponents == 4 && defined(vtkComponent3Proportional)',
+        '    tmp.a = texture(texture1, labelTexel).a;',
+        '  #endif',
+        '#endif',
+        '  return tmp;',
+        '}',
+        ''
+      ].join('\\n')
+  },
+  {
+    name: 'nearest-voxel label sampling (ray march)',
+    skipped: 'hidden/unfocused segments will leave faint shells in the voxel render',
+    find: 'tValue = getTextureValue(posIS);',
+    expected: 9,
+    // Calls the function above, which must be there.
+    requires: 'nearest-voxel label sampling (function)',
+    replace: () => 'tValue = getLabeledTextureValue(posIS);'
+  },
+  {
+    // A stable shader. vtk.js writes the ray-march loop's iteration cap --
+    // volume diagonal / sample distance -- into the fragment shader source,
+    // so every change of resolution level (itk-vtk-viewer streams finer
+    // ones in), label-image extent or interactive sample distance makes a
+    // new shader, and each new one is compiled from scratch while the page
+    // waits: seconds apiece on a real GPU, and they came in bursts --
+    // "page unresponsive". The loop exits at the ray's end anyway, so the
+    // cap only needs to be big enough: a power of two of at least 16384
+    // gives one shader for practically every volume.
+    name: 'fixed ray-march loop cap',
+    skipped: 'the voxel render will recompile its shader (freezing the page) whenever the resolution changes',
+    find: /"\/\/VTK::MaximumSamplesValue","".concat\(Math\.ceil\((\w+)\)\)/g,
+    replace: (_match, samples) =>
+      `"//VTK::MaximumSamplesValue","".concat(Math.max(16384,Math.pow(2,Math.ceil(Math.log2(Math.max(1,${samples}))))))`
+  }
+]
+
 const bundle = path.join(dest, 'itkVtkViewer.js')
-const code = readFileSync(bundle, 'utf8')
-const reads = code.split(TEXTURE_READ).length - 1
-if (reads === 1) {
-  writeFileSync(bundle, code.replace(TEXTURE_READ, TEXTURE_READ + NEAREST_LABEL))
-  console.log('Patched the volume shader for nearest-voxel label sampling')
-} else {
-  console.warn(
-    `WARNING: expected one volume-shader texture read in ${bundle}, found ${reads} -- ` +
-      'not patching; hidden/unfocused segments will leave faint shells in the voxel render.'
-  )
+let code = readFileSync(bundle, 'utf8')
+const applied = new Set()
+for (const patch of patches) {
+  if (patch.requires && !applied.has(patch.requires)) {
+    console.warn(`WARNING: itk-vtk-viewer patch "${patch.name}" skipped (needs "${patch.requires}"); ${patch.skipped}.`)
+    continue
+  }
+  const expected = patch.expected ?? 1
+  const matches = typeof patch.find === 'string' ? code.split(patch.find).length - 1 : [...code.matchAll(patch.find)].length
+  if (matches === expected) {
+    code = typeof patch.find === 'string' ? code.replaceAll(patch.find, patch.replace) : code.replace(patch.find, patch.replace)
+    applied.add(patch.name)
+    console.log(`Patched itk-vtk-viewer: ${patch.name}`)
+  } else {
+    console.warn(`WARNING: itk-vtk-viewer patch "${patch.name}" matched ${matches} times, expected ${expected} -- skipped; ${patch.skipped}.`)
+  }
 }
+writeFileSync(bundle, code)
