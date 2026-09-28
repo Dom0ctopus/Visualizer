@@ -31,9 +31,12 @@ export function writeFileAtomic(filePath: string, contents: string): Promise<voi
       await rename(tmp, filePath)
     })
   writeChains.set(filePath, next)
-  void next.finally(() => {
+  const forget = () => {
     if (writeChains.get(filePath) === next) writeChains.delete(filePath)
-  })
+  }
+  // then(f, f), not finally(f): finally's promise would reject unhandled
+  // (killing the process) whenever the write fails.
+  next.then(forget, forget)
   return next
 }
 

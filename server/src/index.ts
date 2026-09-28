@@ -6,7 +6,7 @@ import path from 'node:path'
 import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
 import { enqueueJob, getJobQueueState, JobPreemptedError } from './jobQueue.js'
 import { readNrrdHeader } from './nrrdHeader.js'
-import { getSegmentationStats } from './segmentStats.js'
+import { getLayerStats } from './segmentStats.js'
 import { convertSegmentationMergeToOmeZarr, MergeCancelledError, type MergedSegmentMapping, type MergeProgress } from './segmentationMergeConvert.js'
 import { convertSegmentationNrrdToOmeZarr } from './segmentationZarrConvert.js'
 import { extractSegments, groupIntoSystems } from './segmentTree.js'
@@ -368,16 +368,22 @@ app.post('/api/segmentations/:id/meshes', async (req, res) => {
   res.json({ meshStatus: 'pending' })
 })
 
-// Per-segment voxel counts, centroids and per-slice histograms (search
-// focus uses them to jump the 2D panes to a focused set); computed once.
-app.get('/api/segmentations/:id/segment-stats', async (req, res) => {
+// Per-segment voxel counts, centroids and per-slice histograms for one layer
+// (search focus uses them to jump the 2D panes to a segment); computed the
+// first time a segment of that layer is focused, then cached.
+app.get('/api/segmentations/:id/segment-stats/:layer', async (req, res) => {
   const record = getRecord(req.params.id)
+  const layer = Number(req.params.layer)
   if (!record || record.kind !== 'segmentation' || record.zarrStatus !== 'ready') {
     res.status(404).json({ error: 'No converted segmentation with that id' })
     return
   }
+  if (!Number.isInteger(layer) || layer < 0) {
+    res.status(400).json({ error: 'layer must be a non-negative integer' })
+    return
+  }
   try {
-    res.json(await getSegmentationStats(segZarrPathFor(record.id)))
+    res.json(await getLayerStats(segZarrPathFor(record.id), layer))
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to compute segment statistics' })
   }

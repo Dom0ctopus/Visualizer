@@ -21,7 +21,7 @@ import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
 import { SegmentTree } from './SegmentTree'
 import { ZarrSliceCanvas, type CanvasPan, type OrientationLabels } from './ZarrSliceCanvas'
-import { focusKey, focusTarget, matchSegments } from '../lib/focus'
+import { focusKey, matchSegments, segmentTarget } from '../lib/focus'
 import { realisticColor } from '../lib/realisticPalette'
 import type { LibraryRecord, SegmentationRecord, VolumeRecord, ZarrLoadedSegmentation } from '../types'
 
@@ -347,24 +347,18 @@ export function ItkVtkViewerPage() {
     voxelFocusSpec
   )
 
-  /** Focuses the search's matches (replacing the focus set, or adding to it),
-   *  makes sure they're visible, and moves the 2D panes to them. */
-  const applyFocus = async (add: boolean) => {
-    const matches = matchSegments(zarrSeg.segmentations, searchText)
-    if (matches.length === 0) return
-    const keys = new Set(add && focusKeys ? focusKeys : [])
-    for (const m of matches) keys.add(focusKey(m.recordId, m.key))
-    setFocusKeys(keys)
+  const findSegment = (recordId: string, key: string) =>
+    zarrSeg.segmentations.find((l) => l.recordId === recordId)?.segments.find((s) => s.key === key)
+
+  /** Moves the 2D panes to one segment (its center; see segmentTarget). */
+  const [centeredKey, setCenteredKey] = useState<string | null>(null)
+  const centerOn = async (recordId: string, key: string) => {
+    const segment = findSegment(recordId, key)
+    if (!segment) return
+    setCenteredKey(focusKey(recordId, key))
     setFocusError(null)
-    for (const m of matches) {
-      const seg = zarrSeg.segmentations.find((l) => l.recordId === m.recordId)?.segments.find((s) => s.key === m.key)
-      if (seg && !seg.visible) zarrSeg.setSegmentVisible(m.recordId, m.key, true)
-    }
-    const focused = zarrSeg.segmentations.flatMap((l) =>
-      l.segments.filter((s) => keys.has(focusKey(l.recordId, s.key))).map((s) => ({ recordId: l.recordId, layer: s.layer, labelValue: s.labelValue }))
-    )
     try {
-      const target = await focusTarget(focused)
+      const target = await segmentTarget({ recordId, layer: segment.layer, labelValue: segment.labelValue })
       const info = volumeInfoRef.current
       if (!target || !info) return
       const index = (axis: number) => Math.max(0, Math.min(info.size[axis] - 1, Math.round((target[axis] - info.origin[axis]) / info.spacing[axis])))
@@ -372,14 +366,49 @@ export function ItkVtkViewerPage() {
       setYIndex(index(1))
       setXIndex(index(2))
     } catch (e) {
-      setFocusError(e instanceof Error ? e.message : 'Could not locate the focused segments')
+      setFocusError(e instanceof Error ? e.message : `Could not locate ${segment.name}`)
     }
+  }
+
+  /** Focuses the search's matches (replacing the focus set, or adding to it),
+   *  makes sure they're visible, and centers the 2D panes on the first of
+   *  them (when adding, the first newly added one). */
+  const applyFocus = (add: boolean) => {
+    const matches = matchSegments(zarrSeg.segmentations, searchText)
+    if (matches.length === 0) return
+    const previous = add && focusKeys ? focusKeys : new Set<string>()
+    const keys = new Set(previous)
+    for (const m of matches) keys.add(focusKey(m.recordId, m.key))
+    setFocusKeys(keys)
+    for (const m of matches) {
+      const seg = findSegment(m.recordId, m.key)
+      if (seg && !seg.visible) zarrSeg.setSegmentVisible(m.recordId, m.key, true)
+    }
+    const first = matches.find((m) => !previous.has(focusKey(m.recordId, m.key))) ?? matches[0]
+    void centerOn(first.recordId, first.key)
   }
   const clearFocus = () => {
     setFocusKeys(null)
     setFocusError(null)
+    setCenteredKey(null)
   }
-  const focusCount = focusKeys ? zarrSeg.segmentations.reduce((n, l) => n + l.segments.filter((s) => focusKeys.has(focusKey(l.recordId, s.key))).length, 0) : 0
+  const removeFromFocus = (key: string) => {
+    if (!focusKeys) return
+    const next = new Set(focusKeys)
+    next.delete(key)
+    if (next.size === 0) clearFocus()
+    else setFocusKeys(next)
+  }
+  // The focused segments, in the order they were focused.
+  const focusList = focusKeys
+    ? [...focusKeys].flatMap((key) => {
+        const [recordId, segmentKey] = [key.slice(0, key.indexOf('|')), key.slice(key.indexOf('|') + 1)]
+        const loaded = zarrSeg.segmentations.find((l) => l.recordId === recordId)
+        const segment = loaded?.segments.find((s) => s.key === segmentKey)
+        return segment && loaded ? [{ key, recordId, segment, file: loaded.name }] : []
+      })
+    : []
+  const focusCount = focusList.length
   const focusSlider = (
     <label className="focus-slider" title="How much everything outside the focus fades (0: not at all; 100%: hidden)">
       <span className="render-toolbar-label">Focus</span>
@@ -881,7 +910,7 @@ export function ItkVtkViewerPage() {
               onChange={setSearchText}
               segmentations={zarrSeg.segmentations}
               onSegmentVisible={zarrSeg.setSegmentVisible}
-              onFocus={(add) => void applyFocus(add)}
+              onFocus={applyFocus}
               onClearFocus={clearFocus}
               focusActive={focusKeys !== null}
             />
@@ -896,6 +925,23 @@ export function ItkVtkViewerPage() {
                   </button>
                 </div>
                 {focusSlider}
+                <ul className="focus-list" aria-label="Focused segments">
+                  {focusList.map(({ key, recordId, segment, file }) => (
+                    <li key={key} className={key === centeredKey ? 'focus-item centered' : 'focus-item'}>
+                      <button
+                        className="focus-item-name"
+                        title={`${file} · ${segment.system} · ${segment.name}\nClick to center the 2D panes on it`}
+                        onClick={() => void centerOn(recordId, segment.key)}
+                      >
+                        <span className="color-swatch" style={{ background: `rgb(${segment.color.join(',')})` }} />
+                        <span className="focus-item-label">{segment.name}</span>
+                      </button>
+                      <button className="focus-item-remove" aria-label={`Remove ${segment.name} from the focus`} onClick={() => removeFromFocus(key)}>
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
                 {focusError && <p className="render-toolbar-hint">{focusError}</p>}
               </div>
             )}

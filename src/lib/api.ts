@@ -179,21 +179,17 @@ export interface LayerStats {
   labels: Record<string, LabelStats>
 }
 
-export interface SegmentationStats {
-  version: number
-  layers: Record<string, LayerStats>
-}
+const statsCache = new Map<string, Promise<LayerStats>>()
 
-const statsCache = new Map<string, Promise<SegmentationStats>>()
-
-/** A segmentation's segment statistics (computed once on the server, cached
- *  here for the session). */
-export function fetchSegmentStats(segmentationId: string): Promise<SegmentationStats> {
-  let pending = statsCache.get(segmentationId)
+/** One segmentation layer's segment statistics (computed on the server the
+ *  first time, cached here for the session). */
+export function fetchLayerStats(segmentationId: string, layer: number): Promise<LayerStats> {
+  const key = `${segmentationId}#${layer}`
+  let pending = statsCache.get(key)
   if (!pending) {
-    pending = fetch(`/api/segmentations/${segmentationId}/segment-stats`).then((res) => handleJson<SegmentationStats>(res))
-    pending.catch(() => statsCache.delete(segmentationId))
-    statsCache.set(segmentationId, pending)
+    pending = fetch(`/api/segmentations/${segmentationId}/segment-stats/${layer}`).then((res) => handleJson<LayerStats>(res))
+    pending.catch(() => statsCache.delete(key))
+    statsCache.set(key, pending)
   }
   return pending
 }

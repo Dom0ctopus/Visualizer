@@ -1,21 +1,21 @@
 import { existsSync } from 'node:fs'
-import { readdir, readFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { writeFileAtomic } from './store.js'
 import { readZarrLevels, readZRange } from './zarrReader.js'
 
 /**
  * Per-segment statistics for search focus (the 2D panes jump to a focused
- * set's center): for every label of every layer, its voxel count, physical
+ * segment's center): for every label of a layer, its voxel count, physical
  * centroid and how many voxels each slice along z, y and x holds. Computed
- * once per segmentation from a coarse pyramid level (the finest one within
- * STATS_VOXEL_BUDGET -- plenty for picking a slice) and cached next to its
- * store; a segmentation's labels never change after conversion.
+ * per layer, only when a segment of that layer is first focused, from a
+ * coarse pyramid level (the finest one within STATS_VOXEL_BUDGET -- plenty
+ * for picking a slice), and cached next to the store; a segmentation's
+ * labels never change after conversion.
  */
 
 const STATS_VOXEL_BUDGET = 32 * 1024 * 1024
 const BAND_SLICES = 16
-const STATS_FILE = 'segment-stats.json'
 const STATS_VERSION = 1
 
 export interface LabelStats {
@@ -41,12 +41,6 @@ export interface LayerStats {
   size: [number, number, number]
   /** By label value. */
   labels: Record<string, LabelStats>
-}
-
-export interface SegmentationStats {
-  version: number
-  /** By layer index. */
-  layers: Record<string, LayerStats>
 }
 
 function trimmed(counts: Float64Array | number[]): AxisHistogram {
@@ -111,33 +105,32 @@ async function computeLayerStats(layerGroupPath: string): Promise<LayerStats> {
   return { origin: level.origin, spacing: level.spacing, size: level.size, labels }
 }
 
-const inFlight = new Map<string, Promise<SegmentationStats>>()
+const inFlight = new Map<string, Promise<LayerStats>>()
 
-/** The stats for a converted segmentation store (one `layerN` group per
- *  layer), computing and caching them on first request. */
-export function getSegmentationStats(segZarrPath: string): Promise<SegmentationStats> {
-  let pending = inFlight.get(segZarrPath)
+/** The stats for one layer (`layerN` group) of a converted segmentation
+ *  store, computing and caching them on first request. */
+export function getLayerStats(segZarrPath: string, layer: number): Promise<LayerStats> {
+  const key = `${segZarrPath}#${layer}`
+  let pending = inFlight.get(key)
   if (pending) return pending
   pending = (async () => {
-    const cachePath = path.join(segZarrPath, STATS_FILE)
+    const layerPath = path.join(segZarrPath, `layer${layer}`)
+    if (!existsSync(layerPath)) throw new Error(`No layer ${layer} in this segmentation`)
+    const cachePath = path.join(segZarrPath, `segment-stats-layer${layer}.json`)
     if (existsSync(cachePath)) {
       try {
-        const cached = JSON.parse(await readFile(cachePath, 'utf8')) as SegmentationStats
+        const cached = JSON.parse(await readFile(cachePath, 'utf8')) as LayerStats & { version?: number }
         if (cached.version === STATS_VERSION) return cached
       } catch {
         // recompute below
       }
     }
-    const layers: Record<string, LayerStats> = {}
-    for (const entry of (await readdir(segZarrPath)).sort()) {
-      const match = /^layer(\d+)$/.exec(entry)
-      if (match) layers[match[1]] = await computeLayerStats(path.join(segZarrPath, entry))
-    }
-    const stats: SegmentationStats = { version: STATS_VERSION, layers }
-    await writeFileAtomic(cachePath, JSON.stringify(stats))
+    const stats = await computeLayerStats(layerPath)
+    await writeFileAtomic(cachePath, JSON.stringify({ ...stats, version: STATS_VERSION }))
     return stats
   })()
-  inFlight.set(segZarrPath, pending)
-  void pending.finally(() => inFlight.delete(segZarrPath))
+  inFlight.set(key, pending)
+  const forget = () => inFlight.delete(key)
+  pending.then(forget, forget)
   return pending
 }
