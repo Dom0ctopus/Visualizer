@@ -28,6 +28,12 @@ console.log(`Synced itk-vtk-viewer assets to ${dest}`)
 // objects, so its shaders can't be amended at runtime; these edit the
 // bundle's source instead. Each must match exactly as often as expected --
 // if an itk-vtk-viewer upgrade changes the code, the sync warns and skips it.
+//
+// To rule them in or out when chasing a rendering problem, turn some off by
+// id and restart the dev server (the sync runs before it starts):
+//   ITK_VIEWER_PATCHES_OFF=all npm run dev:all
+//   ITK_VIEWER_PATCHES_OFF=loop-cap,pixel-ratio npm run dev:all
+const patchesOff = new Set((process.env.ITK_VIEWER_PATCHES_OFF ?? '').split(',').map((id) => id.trim()).filter(Boolean))
 const patches = [
   {
     // Nearest-voxel label sampling. vtk.js packs the CT and the label image
@@ -40,6 +46,7 @@ const patches = [
     // lighting gradients' neighbor reads don't use the label, and doubling
     // them made every sample twice as expensive -- which counts in search
     // focus, where transparent tissue lets rays run the whole volume.
+    id: 'label-function',
     name: 'nearest-voxel label sampling (function)',
     skipped: 'hidden/unfocused segments will leave faint shells in the voxel render',
     find: '// End of Webgl1 specific code\\n//=======================================================================\\n#endif\\n',
@@ -67,12 +74,13 @@ const patches = [
       ].join('\\n')
   },
   {
+    id: 'label-march',
     name: 'nearest-voxel label sampling (ray march)',
     skipped: 'hidden/unfocused segments will leave faint shells in the voxel render',
     find: 'tValue = getTextureValue(posIS);',
     expected: 9,
     // Calls the function above, which must be there.
-    requires: 'nearest-voxel label sampling (function)',
+    requires: 'label-function',
     replace: () => 'tValue = getLabeledTextureValue(posIS);'
   },
   {
@@ -85,6 +93,7 @@ const patches = [
     // "page unresponsive". The loop exits at the ray's end anyway, so the
     // cap only needs to be big enough: a power of two of at least 16384
     // gives one shader for practically every volume.
+    id: 'loop-cap',
     name: 'fixed ray-march loop cap',
     skipped: 'the voxel render will recompile its shader (freezing the page) whenever the resolution changes',
     find: /"\/\/VTK::MaximumSamplesValue","".concat\(Math\.ceil\((\w+)\)\)/g,
@@ -93,17 +102,22 @@ const patches = [
   },
   {
     // Skip invisible samples. For every sample along a ray the shader first
-    // computes the lighting gradient -- three more reads of the volume plus
-    // the shading math -- and only then its opacity. With a label image,
-    // that opacity is at most
-    //   gradientOpacityMax * mix0 * ctOpacity(CT) * mix(labelOpacity, 1, 1 - blend)
-    // (the gradient factor is clamped to at most gomax0), which costs two
-    // small table lookups. When that bound is 0 the sample adds exactly
-    // nothing (the ray march adds rgb * alpha and alpha), so it returns
-    // before the gradient: air around the specimen, hidden segments, and
-    // everything outside a search focus at full strength. Samples that are
-    // merely faint (a partial focus's faded tissue) are kept -- together
-    // they make the visible ghost, so skipping them would change the image.
+    // computes the lighting gradient -- more reads of the volume plus the
+    // shading math -- and only then its opacity. That opacity has a cheap
+    // upper bound (the gradient factor is clamped to at most gomax0):
+    //  - with a label image,
+    //      gomax0 * mix0 * ctOpacity(CT) * mix(labelOpacity, 1, 1 - blend);
+    //    when that is 0 the sample adds exactly nothing (the ray march adds
+    //    rgb * alpha and alpha): air around the specimen, hidden segments,
+    //    and everything outside a search focus at full strength. Merely
+    //    faint samples (a partial focus's faded tissue) are kept -- together
+    //    they make the visible ghost.
+    //  - with the volume alone, gomax0 * ctOpacity(CT); vtk.js itself
+    //    discards a sample whose opacity is below EPSILON (after computing
+    //    its gradient), so a bound below EPSILON returns the same result
+    //    before the gradient. With volume scattering on, that also skips the
+    //    gradient those samples' shadow rays would have been cast from.
+    id: 'skip-invisible',
     name: 'skip invisible samples',
     skipped: 'invisible samples will still pay for lighting (slower voxel frames)',
     find: '#else\\n  // compute the normal and gradient magnitude if needed\\n  // We compute it as a vec4 if possible otherwise a mat4\\n  //\\n  vec4 goFactor = vec4(1.0,1.0,1.0,1.0);\\n',
@@ -120,6 +134,15 @@ const patches = [
         '    opacityBound *= mix(texture2D(otexture, vec2(tValue.g * oscale1 + oshift1, height1)).r, 1.0, 1.0 - mix1);',
         '    if (opacityBound <= 0.0) return vec4(0.0);',
         '  #endif',
+        '  #if vtkNumComponents == 1',
+        '    #if defined(vtkGradientOpacityOn)',
+        '      float opacityBound1 = gomax0;',
+        '    #else',
+        '      float opacityBound1 = 1.0;',
+        '    #endif',
+        '    opacityBound1 *= texture2D(otexture, vec2(tValue.r * oscale0 + oshift0, 0.5)).r;',
+        '    if (opacityBound1 < EPSILON) return vec4(0.0);',
+        '  #endif',
         ''
       ].join('\\n')
   },
@@ -130,6 +153,7 @@ const patches = [
     // for it -- and with search focus making tissue transparent, every ray
     // crosses the whole volume: frames took so long that macOS reset the
     // GPU, and after a few resets Chrome disabled WebGL for the page.
+    id: 'pixel-ratio',
     name: 'voxel render pixel ratio capped at 1',
     skipped: 'the voxel render will cast a ray per device pixel (4x the GPU work on Retina displays)',
     find: 'var r=window.devicePixelRatio||1,o=Math.max(10,Math.floor(r*n.width)),i=Math.max(10,Math.floor(r*n.height));t._openGLRenderWindow.setSize(o,i)',
@@ -143,6 +167,10 @@ const bundle = path.join(dest, 'itkVtkViewer.js')
 let code = readFileSync(bundle, 'utf8')
 const applied = new Set()
 for (const patch of patches) {
+  if (patchesOff.has('all') || patchesOff.has(patch.id)) {
+    console.warn(`itk-vtk-viewer patch "${patch.id}" turned off (ITK_VIEWER_PATCHES_OFF); ${patch.skipped}.`)
+    continue
+  }
   if (patch.requires && !applied.has(patch.requires)) {
     console.warn(`WARNING: itk-vtk-viewer patch "${patch.name}" skipped (needs "${patch.requires}"); ${patch.skipped}.`)
     continue
@@ -151,8 +179,8 @@ for (const patch of patches) {
   const matches = typeof patch.find === 'string' ? code.split(patch.find).length - 1 : [...code.matchAll(patch.find)].length
   if (matches === expected) {
     code = typeof patch.find === 'string' ? code.replaceAll(patch.find, patch.replace) : code.replace(patch.find, patch.replace)
-    applied.add(patch.name)
-    console.log(`Patched itk-vtk-viewer: ${patch.name}`)
+    applied.add(patch.id)
+    console.log(`Patched itk-vtk-viewer: ${patch.name} (${patch.id})`)
   } else {
     console.warn(`WARNING: itk-vtk-viewer patch "${patch.name}" matched ${matches} times, expected ${expected} -- skipped; ${patch.skipped}.`)
   }
