@@ -147,6 +147,58 @@ const patches = [
       ].join('\\n')
   },
   {
+    // Null voxels are empty space. In a masked scan everything outside the
+    // specimen is the volume's minimum value (0), and the opacity curve's
+    // leftmost point applies to it too: raise that point and the whole
+    // empty box turns into semi-opaque haze, every sample of it paying for
+    // lighting (and, with volume scattering, a shadow ray) -- the heaviest
+    // frame the renderer can draw. So a sample exactly at the volume's
+    // minimum is transparent whatever the curve says; everything above it
+    // follows the curve as before. Four parts: this hands the shader the
+    // minimum (of component 0, the volume) in texture units, the next one
+    // declares it, and the last two skip such samples along the ray and in
+    // scattering's shadow rays.
+    id: 'null-voxels',
+    name: 'null voxels transparent (minimum value)',
+    skipped: 'empty space at the minimum value follows the opacity curve (and pays for lighting) like tissue',
+    find: 'o.setUniformf("oshift".concat(u),m),o.setUniformf("oscale".concat(u),h);',
+    replace: (match) =>
+      match +
+      'try{var vtkNullRange=r.getMapper().getInputData().getPointData().getScalars().getRange(u);o.setUniformf("vtkNull".concat(u),(vtkNullRange[0]-i.offset[u])/(i.scale[u]||1))}catch(vtkNullError){}'
+  },
+  {
+    id: 'null-voxels-declare',
+    name: 'null voxels transparent (declaration)',
+    skipped: 'empty space at the minimum value follows the opacity curve like tissue',
+    requires: 'null-voxels',
+    find: '// End of Webgl1 specific code\\n//=======================================================================\\n#endif\\n',
+    replace: (match) => match + '\\n// The volume\'s minimum value in texture units (null voxels; see the sync script).\\nuniform float vtkNull0;\\n'
+  },
+  {
+    id: 'null-voxels-samples',
+    name: 'null voxels transparent (ray march)',
+    skipped: 'empty space at the minimum value follows the opacity curve like tissue',
+    requires: 'null-voxels-declare',
+    find: '#else\\n  // compute the normal and gradient magnitude if needed\\n  // We compute it as a vec4 if possible otherwise a mat4\\n  //\\n  vec4 goFactor = vec4(1.0,1.0,1.0,1.0);\\n',
+    replace: (match) =>
+      match +
+      [
+        '  #if vtkNumComponents == 1 || (vtkNumComponents == 2 && defined(vtkIndependentComponentsOn) && defined(vtkComponent1Proportional))',
+        '    if (tValue.r <= vtkNull0 + 1.0e-6) return vec4(0.0);',
+        '  #endif',
+        ''
+      ].join('\\n')
+  },
+  {
+    id: 'null-voxels-shadows',
+    name: 'null voxels transparent (scattering shadow rays)',
+    skipped: 'empty space at the minimum value still casts scattering shadows',
+    requires: 'null-voxels-declare',
+    find: '    scalar = getTextureValue(posIS);\\n    opacity = texture2D(otexture, vec2(scalar.r * oscale0 + oshift0, 0.5)).r;\\n',
+    replace: (match) =>
+      match + ['    #if vtkNumComponents == 1', '      if (scalar.r <= vtkNull0 + 1.0e-6) opacity = 0.0;', '    #endif', ''].join('\\n')
+  },
+  {
     // The voxel render at one ray per CSS pixel, not per device pixel. Its
     // canvas is sized devicePixelRatio times the pane, so a Retina display
     // cast 4x the rays for a soft volume image that doesn't look sharper

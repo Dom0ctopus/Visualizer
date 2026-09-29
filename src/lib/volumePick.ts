@@ -13,7 +13,9 @@
  * label blend: alpha = ctAlpha * (1 - blend + blend * labelAlpha). So at
  * full blend unlabeled tissue is transparent and the first visible segment
  * is reported; at lower blend CT in front of a segment hides it. Crop
- * planes are respected. Soft, semi-transparent edges can differ from the
+ * planes are respected, and so are null voxels (the volume's minimum
+ * value, empty space in a masked scan), which the render draws as
+ * transparent whatever the opacity curve says. Soft, semi-transparent edges can differ from the
  * render by a voxel or so; clearly visible segments match.
  */
 
@@ -29,7 +31,9 @@ interface VtkImageData {
   getSpacing: () => number[]
   worldToIndex: (world: number[], out: number[]) => number[]
   indexToWorld: (index: number[], out: number[]) => number[]
-  getPointData: () => { getScalars: () => { getNumberOfComponents: () => number; getData: () => ArrayLike<number> } | null }
+  getPointData: () => {
+    getScalars: () => { getNumberOfComponents: () => number; getData: () => ArrayLike<number>; getRange: (component: number) => number[] } | null
+  }
 }
 export interface PickableVolume {
   getProperty: () => {
@@ -119,6 +123,7 @@ export function pickVolumeLabel(viewProxy: PickableViewProxy, clientX: number, c
 
   const planes = (mapper.getClippingPlanes?.() ?? []).map((p) => ({ n: p.getNormal(), o: p.getOrigin() }))
   const data = scalars.getData()
+  const nullValue = scalars.getRange(0)[0]
   const [nx, ny] = dims
   const world = [0, 0, 0]
   let transparency = 1
@@ -133,6 +138,7 @@ export function pickVolumeLabel(viewProxy: PickableViewProxy, clientX: number, c
       if (planes.some(({ n, o }) => (world[0] - o[0]) * n[0] + (world[1] - o[1]) * n[1] + (world[2] - o[2]) * n[2] < 0)) continue
     }
     const offset = ((z * ny + y) * nx + x) * components
+    if (data[offset] === nullValue) continue
     const label = data[offset + components - 1]
     const alpha = ctOpacity.getValue(data[offset]) * (1 - blend + blend * labelOpacity.getValue(label))
     if (alpha <= 0) continue
