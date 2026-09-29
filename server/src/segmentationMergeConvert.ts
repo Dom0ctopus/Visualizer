@@ -65,7 +65,7 @@ export interface MergeOptions {
  * gaps in it).
  */
 function fillLine(
-  data: Uint16Array,
+  data: Uint8Array | Uint16Array,
   refX: number,
   refY: number,
   refZ: number,
@@ -279,10 +279,18 @@ export async function convertSegmentationMergeToOmeZarr(
     factor *= 2
   }
   const refSpacing: [number, number, number] = [nativeSpacing[0] * factor, nativeSpacing[1] * factor, nativeSpacing[2] * factor]
-  const refLevel: ZarrLevelInfo = { index: 0, levelPath: 'scale0', size: refSize, dtype: '<u2', origin: bboxMin, spacing: refSpacing }
+  // 8-bit labels whenever every segment fits (label 0 is background):
+  // itk-vtk-viewer fuses this image with the volume into one texture, and
+  // with an 8-bit volume (the usual micro-CT export) 8-bit labels keep the
+  // whole texture 8-bit -- vtk.js converts anything wider to 32-bit float
+  // (on GPUs without 16-bit textures), four times the memory. The label
+  // values themselves are the same either way.
+  const labelCount = includedLayers.reduce((sum, layer) => sum + layer.labelValues.length, 0)
+  const labelType = labelCount <= 255 ? { dtype: '|u1', ctor: Uint8Array } : { dtype: '<u2', ctor: Uint16Array }
+  const refLevel: ZarrLevelInfo = { index: 0, levelPath: 'scale0', size: refSize, dtype: labelType.dtype, origin: bboxMin, spacing: refSpacing }
   const [refZ, refY, refX] = refLevel.size
 
-  const combined = new Uint16Array(refX * refY * refZ)
+  const combined = new labelType.ctor(refX * refY * refZ)
   const mapping: MergedSegmentMapping[] = []
   let nextGlobalLabel = 1
 
@@ -379,7 +387,7 @@ export async function convertSegmentationMergeToOmeZarr(
   checkCancelled()
   report({ phase: 'writing', layer: includedLayers.length, layerCount: includedLayers.length, fraction: 0 })
   const kMin = Math.round(Math.log2(factor))
-  await writeAlignedLabelPyramid(outputZarrPath, { data: combined, size: [refX, refY, refZ] }, refLevel, kMin, Math.max(kMin, baseLevels.length - 1))
+  await writeAlignedLabelPyramid(outputZarrPath, { data: combined, size: [refX, refY, refZ] }, refLevel, labelType.ctor, kMin, Math.max(kMin, baseLevels.length - 1))
 
   return { mapping }
 }
@@ -404,6 +412,7 @@ async function writeAlignedLabelPyramid(
   outputPath: string,
   finest: Level,
   refLevel: ZarrLevelInfo,
+  ctor: typeof Uint8Array | typeof Uint16Array,
   kMin: number,
   coarsestIndex: number
 ): Promise<void> {
@@ -411,8 +420,8 @@ async function writeAlignedLabelPyramid(
   await writeFile(path.join(outputPath, '.zgroup'), JSON.stringify({ zarr_format: 2 }))
   let level = finest
   for (let k = kMin; k <= coarsestIndex; k++) {
-    if (k > kMin) level = downsample2xLabelMode(level, Uint16Array)
-    await writeZarrArrayV2(path.join(outputPath, `scale${k}`), level, '<u2', Uint16Array, false)
+    if (k > kMin) level = downsample2xLabelMode(level, ctor)
+    await writeZarrArrayV2(path.join(outputPath, `scale${k}`), level, refLevel.dtype, ctor, false)
   }
   const datasets = []
   for (let k = 0; k <= coarsestIndex; k++) {
