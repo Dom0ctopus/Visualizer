@@ -111,7 +111,15 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel, focus
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    // Chrome refuses new WebGL contexts for a while after its GPU process
+    // has crashed; say so here rather than take the whole page down.
+    let renderer: THREE.WebGLRenderer
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true })
+    } catch {
+      setError('WebGL is unavailable, so the surface meshes cannot be drawn. If the browser recently reset its GPU, restart the browser.')
+      return
+    }
     renderer.setPixelRatio(window.devicePixelRatio || 1)
     renderer.setClearColor(0x000000)
     container.appendChild(renderer.domElement)
