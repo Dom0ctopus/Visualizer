@@ -221,6 +221,17 @@ function reorderToCanonicalLayout(
  * resolution scan can trigger. Plain Node Buffer/TypedArray handling here
  * has no WASM linear-memory ceiling to hit.
  */
+/** A typed view of the voxel bytes. The data starts right after the text
+ *  header, whose length is arbitrary, so a multi-byte type's view can't
+ *  always be made in place (typed arrays must be aligned to their element
+ *  size) -- then the bytes are copied to an aligned buffer first. */
+function viewAs(ctor: TypedArrayConstructor, bytes: Uint8Array, length: number): TypedArray {
+  if (bytes.byteOffset % ctor.BYTES_PER_ELEMENT === 0) return new ctor(bytes.buffer, bytes.byteOffset, length) as TypedArray
+  const aligned = new Uint8Array(length * ctor.BYTES_PER_ELEMENT)
+  aligned.set(bytes.subarray(0, aligned.byteLength))
+  return new ctor(aligned.buffer, 0, length) as TypedArray
+}
+
 export async function readRawNrrdVolume(nrrdPath: string): Promise<ParsedNrrdVolume> {
   const { header, data: rawBytes } = await readNrrdHeaderAndData(nrrdPath)
   const { origSizes, listAxis, ...parsed } = parseNrrdGeometry(header, rawBytes.byteLength)
@@ -232,9 +243,9 @@ export async function readRawNrrdVolume(nrrdPath: string): Promise<ParsedNrrdVol
   // file actually put it somewhere else (see reorderToCanonicalLayout).
   let data: TypedArray
   if (listAxis === -1 || listAxis === origSizes.length - 1) {
-    data = new parsed.ctor(rawBytes.buffer, rawBytes.byteOffset, nVoxelsTotal) as TypedArray
+    data = viewAs(parsed.ctor, rawBytes, nVoxelsTotal)
   } else {
-    const raw = new parsed.ctor(rawBytes.buffer, rawBytes.byteOffset, nVoxelsTotal) as TypedArray
+    const raw = viewAs(parsed.ctor, rawBytes, nVoxelsTotal)
     const spatialAxes = origSizes.map((_, i) => i).filter((i) => i !== listAxis) as [number, number, number]
     data = reorderToCanonicalLayout(raw, origSizes, listAxis, spatialAxes, parsed.ctor)
   }
