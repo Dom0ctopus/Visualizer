@@ -92,6 +92,38 @@ const patches = [
       `"//VTK::MaximumSamplesValue","".concat(Math.max(16384,Math.pow(2,Math.ceil(Math.log2(Math.max(1,${samples}))))))`
   },
   {
+    // Skip invisible samples. For every sample along a ray the shader first
+    // computes the lighting gradient -- three more reads of the volume plus
+    // the shading math -- and only then its opacity. With a label image,
+    // that opacity is at most
+    //   gradientOpacityMax * mix0 * ctOpacity(CT) * mix(labelOpacity, 1, 1 - blend)
+    // (the gradient factor is clamped to at most gomax0), which costs two
+    // small table lookups. When that bound is 0 the sample adds exactly
+    // nothing (the ray march adds rgb * alpha and alpha), so it returns
+    // before the gradient: air around the specimen, hidden segments, and
+    // everything outside a search focus at full strength. Samples that are
+    // merely faint (a partial focus's faded tissue) are kept -- together
+    // they make the visible ghost, so skipping them would change the image.
+    name: 'skip invisible samples',
+    skipped: 'invisible samples will still pay for lighting (slower voxel frames)',
+    find: '#else\\n  // compute the normal and gradient magnitude if needed\\n  // We compute it as a vec4 if possible otherwise a mat4\\n  //\\n  vec4 goFactor = vec4(1.0,1.0,1.0,1.0);\\n',
+    replace: (match) =>
+      match +
+      [
+        '  #if defined(vtkIndependentComponentsOn) && vtkNumComponents == 2 && defined(vtkComponent1Proportional) && !defined(vtkComponent0Proportional)',
+        '    #if defined(vtkGradientOpacityOn)',
+        '      float opacityBound = gomax0;',
+        '    #else',
+        '      float opacityBound = 1.0;',
+        '    #endif',
+        '    opacityBound *= mix0 * texture2D(otexture, vec2(tValue.r * oscale0 + oshift0, height0)).r;',
+        '    opacityBound *= mix(texture2D(otexture, vec2(tValue.g * oscale1 + oshift1, height1)).r, 1.0, 1.0 - mix1);',
+        '    if (opacityBound <= 0.0) return vec4(0.0);',
+        '  #endif',
+        ''
+      ].join('\\n')
+  },
+  {
     // The voxel render at one ray per CSS pixel, not per device pixel. Its
     // canvas is sized devicePixelRatio times the pane, so a Retina display
     // cast 4x the rays for a soft volume image that doesn't look sharper
