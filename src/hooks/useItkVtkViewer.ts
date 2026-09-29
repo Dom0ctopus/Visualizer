@@ -107,6 +107,20 @@ const DEFAULT_LABEL_PALETTE = 'glasbey'
 // is being dragged: each one re-renders the whole labeled volume.
 const LABEL_UPDATE_THROTTLE_MS = 150
 
+/** Label changes waiting to be sent to itk-vtk-viewer (see
+ *  scheduleLabelUpdate); `blend` re-applies the search focus's blend. */
+interface LabelUpdate {
+  weights?: Map<number, number>
+  names?: Map<number, string>
+  blend?: true
+}
+
+function sameEntries<K, V>(a: Map<K, V>, b: Map<K, V> | null): boolean {
+  if (!b || a.size !== b.size) return false
+  for (const [key, value] of a) if (b.get(key) !== value) return false
+  return true
+}
+
 // itk-vtk-viewer's hard limits for one image update (read from its source:
 // "Voxel count over max" / "Image byte count over max").
 const ITK_MAX_VOXELS = 268_435_456
@@ -196,6 +210,29 @@ export function useItkVtkViewer() {
   const flushLabelUpdateRef = useRef<() => void>(() => {})
   const turntableFrameRef = useRef(0)
 
+  // Voxel-render frames. Every frame of a large labeled volume is expensive
+  // (seconds of GPU time when search focus lets rays cross the whole
+  // volume), and vtk.js's renderLater doesn't coalesce -- it's
+  // setTimeout(render) -- so one focus change used to draw ~10 full frames
+  // back to back, enough GPU work for macOS to reset the GPU. So this
+  // file's own redraws go through scheduleRender, at most one per animation
+  // frame, and skipped when itk-vtk-viewer already drew one since.
+  const renderCountRef = useRef(0)
+  const renderFrameRef = useRef(0)
+  const scheduleRender = useCallback(() => {
+    if (renderFrameRef.current) return
+    const countAtRequest = renderCountRef.current
+    renderFrameRef.current = requestAnimationFrame(() => {
+      renderFrameRef.current = 0
+      if (renderCountRef.current !== countAtRequest) return
+      try {
+        volumeViewerRef.current?.getViewProxy().renderLater()
+      } catch {
+        // viewer mid-update
+      }
+    })
+  }, [])
+
   const [scriptReady, setScriptReady] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -223,6 +260,8 @@ export function useItkVtkViewer() {
     labelImageReadyRef.current = false
     cancelAnimationFrame(turntableFrameRef.current)
     turntableFrameRef.current = 0
+    cancelAnimationFrame(renderFrameRef.current)
+    renderFrameRef.current = 0
     rotationCenterRef.current = null
     volumeViewerRef.current = null
     const container = volumeContainerRef.current
@@ -252,6 +291,9 @@ export function useItkVtkViewer() {
           rotate: false
         })
         volumeViewer.setViewMode('Volume')
+        ;(volumeViewer.getViewProxy() as unknown as VtkCameraView).getInteractor().onRenderEvent(() => {
+          renderCountRef.current++
+        })
         // itk-vtk-viewer only auto-collapses its (fairly wide) native control
         // panel on genuinely small screens (window.screen.availWidth < 768),
         // which never applies to our side-by-side split -- the pane is
@@ -334,6 +376,8 @@ export function useItkVtkViewer() {
     pendingLabelImageUrlRef.current = null
     const absoluteUrl = new URL(url, window.location.href)
     labelImageReadyRef.current = false
+    // A new label image starts without names; resend them even if unchanged.
+    sentNamesRef.current = null
     await viewer.setLabelImage(absoluteUrl)
     if (viewer !== volumeViewerRef.current) return // replaced meanwhile
     // setLabelImage reveals its own dedicated UI groups (label weight
@@ -392,57 +436,75 @@ export function useItkVtkViewer() {
     loadLabelImageUrlRef.current = loadLabelImageUrl
   }, [loadLabelImageUrl])
 
-  // Opacity sliders fire continuously; forwarding every tick made
-  // itk-vtk-viewer re-render the full labeled volume dozens of times a
-  // second. Only the latest values matter, so send them at most every
-  // LABEL_UPDATE_THROTTLE_MS.
-  const pendingLabelUpdate = useRef<{ weights?: Map<number, number>; names?: Map<number, string> }>({})
-  const labelUpdateTimer = useRef<number | null>(null)
-  const scheduleLabelUpdate = useCallback((update: { weights?: Map<number, number>; names?: Map<number, string> }) => {
+  // Opacity and focus sliders fire continuously, and each update itk-vtk-
+  // viewer applies redraws the whole labeled volume. Only the latest values
+  // matter, so they're sent at most every LABEL_UPDATE_THROTTLE_MS -- and
+  // only on an animation frame, which the browser holds back while the GPU
+  // is still busy with earlier frames, so slow frames slow the updates
+  // down instead of queueing up behind each other.
+  const pendingLabelUpdate = useRef<LabelUpdate>({})
+  const labelUpdateScheduled = useRef(false)
+  const labelUpdateTimer = useRef(0)
+  const labelUpdateFrame = useRef(0)
+  const scheduleLabelUpdate = useCallback((update: LabelUpdate) => {
     Object.assign(pendingLabelUpdate.current, update)
-    if (labelUpdateTimer.current !== null) return
+    if (labelUpdateScheduled.current) return
+    labelUpdateScheduled.current = true
     labelUpdateTimer.current = window.setTimeout(() => {
-      labelUpdateTimer.current = null
-      flushLabelUpdateRef.current()
+      labelUpdateFrame.current = requestAnimationFrame(() => {
+        labelUpdateScheduled.current = false
+        flushLabelUpdateRef.current()
+      })
     }, LABEL_UPDATE_THROTTLE_MS)
   }, [])
-  // Sends the pending weights/names -- only once the label image is set up
-  // (they stay pending until then; loadLabelImageUrl flushes them).
+  const sentNamesRef = useRef<Map<number, string> | null>(null)
+  /** Makes the next voxel frame rebuild the opacity texture (see flush). */
+  const markLabelOpacityStale = () => {
+    try {
+      for (const representation of volumeViewerRef.current?.getViewProxy().getRepresentations?.() ?? []) {
+        representation.getVolumes?.()?.[0]?.getProperty().getScalarOpacity(0)?.modified()
+      }
+    } catch {
+      // viewer mid-update
+    }
+  }
+  // Sends the pending update -- only once the label image is set up (it
+  // stays pending until then; loadLabelImageUrl flushes it).
   flushLabelUpdateRef.current = () => {
     const viewer = volumeViewerRef.current
     if (!viewer || !labelImageReadyRef.current) return
-    const { weights, names } = pendingLabelUpdate.current
+    const { weights, names, blend } = pendingLabelUpdate.current
     pendingLabelUpdate.current = {}
+    const rendersBefore = renderCountRef.current
     try {
-      if (names) viewer.setLabelImageLabelNames(names)
+      // Each of these makes itk-vtk-viewer redraw, so unchanged names (the
+      // usual case: a visibility, opacity or focus change) aren't resent.
+      if (names && !sameEntries(names, sentNamesRef.current)) {
+        viewer.setLabelImageLabelNames(names)
+        sentNamesRef.current = names
+      }
       if (weights) {
-        viewer.setLabelImageWeights(weights)
         // vtk.js rebuilds the volume's opacity texture (all components) only
         // when component 0's opacity function changes -- the same cache-key
         // quirk as colors (see applyLabelColors) -- so without this, new label
         // weights (hiding a segment, an opacity change, search focus) never
-        // reach the voxel render after its first frame. Also once more after
-        // itk-vtk-viewer has finished applying them.
-        const bump = () => {
-          try {
-            for (const representation of viewer.getViewProxy().getRepresentations?.() ?? []) {
-              representation.getVolumes?.()?.[0]?.getProperty().getScalarOpacity(0)?.modified()
-            }
-            viewer.getViewProxy().renderLater()
-          } catch {
-            // viewer mid-update
-          }
-        }
-        bump()
-        window.setTimeout(bump, 0)
+        // reach the voxel render. Marked before the weights go in, so the
+        // redraw itk-vtk-viewer makes for them already rebuilds it (the
+        // listener in hookLabelOpacity covers its later rewrites).
+        markLabelOpacityStale()
+        viewer.setLabelImageWeights(weights)
       }
+      if (blend) applyFocusBlendRef.current()
     } catch (e) {
       console.warn('Could not update label weights yet:', e)
     }
+    // Draw once if itk-vtk-viewer didn't.
+    if (renderCountRef.current === rendersBefore) scheduleRender()
   }
   useEffect(
     () => () => {
-      if (labelUpdateTimer.current !== null) window.clearTimeout(labelUpdateTimer.current)
+      window.clearTimeout(labelUpdateTimer.current)
+      cancelAnimationFrame(labelUpdateFrame.current)
     },
     []
   )
@@ -463,7 +525,10 @@ export function useItkVtkViewer() {
   // 0's opacity function changes. So a listener on the label component's
   // opacity function marks component 0's modified whenever the label one
   // really changes -- whenever itk-vtk-viewer gets round to applying new
-  // weights, which can be after any fixed point we'd pick.
+  // weights, which can be after any fixed point we'd pick. Right away, not
+  // later: itk-vtk-viewer redraws straight after rewriting the function, and
+  // that frame has to see it. It doesn't draw itself; whoever changed the
+  // weights does (see flush).
   const hookedOpacities = useRef(new WeakSet<object>())
   const hookLabelOpacity = useCallback(() => {
     const viewer = volumeViewerRef.current
@@ -478,14 +543,15 @@ export function useItkVtkViewer() {
         const labelOpacity = property.getScalarOpacity(components - 1) as ({ onModified: (cb: () => void) => unknown } & object) | null
         if (!labelOpacity || hookedOpacities.current.has(labelOpacity)) continue
         hookedOpacities.current.add(labelOpacity)
-        let scheduled = false
+        // Once per burst: itk-vtk-viewer rewrites the function point by
+        // point, and marking it once is enough for the frame after.
+        let marked = false
         labelOpacity.onModified(() => {
-          if (scheduled) return
-          scheduled = true
+          if (marked) return
+          marked = true
+          property.getScalarOpacity(0)?.modified()
           queueMicrotask(() => {
-            scheduled = false
-            property.getScalarOpacity(0)?.modified()
-            viewProxy.renderLater()
+            marked = false
           })
         })
       }
@@ -554,9 +620,9 @@ export function useItkVtkViewer() {
       } finally {
         applyingColors.current = false
       }
-      viewProxy.renderLater()
+      scheduleRender()
     }
-  }, [])
+  }, [scheduleRender])
 
   useEffect(() => {
     applyLabelColorsRef.current = applyLabelColors
@@ -566,7 +632,10 @@ export function useItkVtkViewer() {
    *  itk-vtk-viewer's own palette. */
   const setLabelColors = useCallback(
     (colors: Map<number, [number, number, number]> | null) => {
-      const wasOverriding = labelColorsRef.current !== null
+      const previous = labelColorsRef.current
+      // Unchanged (a visibility, opacity or focus change): nothing to redo.
+      if (colors && previous && colors.size === previous.size && [...colors].every(([label, rgb]) => previous.get(label)?.every((c, i) => c === rgb[i]))) return
+      const wasOverriding = previous !== null
       labelColorsRef.current = colors
       if (colors) {
         applyLabelColors()
@@ -591,35 +660,44 @@ export function useItkVtkViewer() {
   // it was; 1 leaves only the focused segments. Steeper than the 2D fade: a
   // volume render accumulates opacity along each ray, so tissue has to fade
   // much further before it stops reading as solid. The user's blend is
-  // restored when the focus ends.
+  // restored when the focus ends. Sent with the label weights (see
+  // scheduleLabelUpdate): each blend change redraws the volume too.
+  const blendToRestoreRef = useRef<number | null>(null)
   applyFocusBlendRef.current = () => {
     const viewer = volumeViewerRef.current
+    if (!viewer || !labelImageReadyRef.current) return
     const focus = focusBlendRef.current
-    if (!viewer || !focus || !labelImageReadyRef.current) return
     try {
-      viewer.setLabelImageBlend(1 - (1 - focus.base) * (1 - focus.strength) ** 2)
+      if (focus) {
+        viewer.setLabelImageBlend(1 - (1 - focus.base) * (1 - focus.strength) ** 2)
+      } else if (blendToRestoreRef.current !== null) {
+        viewer.setLabelImageBlend(blendToRestoreRef.current)
+        blendToRestoreRef.current = null
+      }
     } catch (e) {
       console.warn('Could not apply the focus blend yet:', e)
     }
   }
-  const setFocusBlend = useCallback((strength: number | null) => {
-    const viewer = volumeViewerRef.current
-    const current = focusBlendRef.current
-    if (strength === null) {
-      focusBlendRef.current = null
-      if (current && viewer && labelImageReadyRef.current) {
-        try {
-          viewer.setLabelImageBlend(current.base)
-        } catch {
-          // viewer mid-update
-        }
+  const setFocusBlend = useCallback(
+    (strength: number | null) => {
+      const viewer = volumeViewerRef.current
+      const current = focusBlendRef.current
+      if (strength === null) {
+        if (!current) return
+        focusBlendRef.current = null
+        blendToRestoreRef.current = current.base
+      } else {
+        // The user's own blend: from before this focus, or before one that
+        // ended but whose restore hasn't been sent yet.
+        const base =
+          current?.base ?? blendToRestoreRef.current ?? (viewer && labelImageReadyRef.current ? viewer.getLabelImageBlend() : 0.5)
+        focusBlendRef.current = { strength, base: typeof base === 'number' ? base : 0.5 }
+        blendToRestoreRef.current = null
       }
-      return
-    }
-    const base = current?.base ?? (viewer && labelImageReadyRef.current ? viewer.getLabelImageBlend() : 0.5)
-    focusBlendRef.current = { strength, base: typeof base === 'number' ? base : 0.5 }
-    applyFocusBlendRef.current()
-  }, [])
+      scheduleLabelUpdate({ blend: true })
+    },
+    [scheduleLabelUpdate]
+  )
 
   // Background (label 0) must come first, at 0: itk-vtk-viewer builds the
   // label opacity function from the map in order and only anchors 0 -> 0 when
@@ -700,7 +778,7 @@ export function useItkVtkViewer() {
         })
         return () => subscription.unsubscribe()
       },
-      requestRender: () => volumeViewerRef.current?.getViewProxy().renderLater(),
+      requestRender: scheduleRender,
       viewHeightMm: () => {
         try {
           const view = volumeViewerRef.current?.getViewProxy() as unknown as VtkCameraView | undefined
@@ -713,7 +791,7 @@ export function useItkVtkViewer() {
         }
       }
     }),
-    []
+    [scheduleRender]
   )
 
   /** The segment name the voxel render shows at a screen point, or null

@@ -90,6 +90,20 @@ const patches = [
     find: /"\/\/VTK::MaximumSamplesValue","".concat\(Math\.ceil\((\w+)\)\)/g,
     replace: (_match, samples) =>
       `"//VTK::MaximumSamplesValue","".concat(Math.max(16384,Math.pow(2,Math.ceil(Math.log2(Math.max(1,${samples}))))))`
+  },
+  {
+    // The voxel render at one ray per CSS pixel, not per device pixel. Its
+    // canvas is sized devicePixelRatio times the pane, so a Retina display
+    // cast 4x the rays for a soft volume image that doesn't look sharper
+    // for it -- and with search focus making tissue transparent, every ray
+    // crosses the whole volume: frames took so long that macOS reset the
+    // GPU, and after a few resets Chrome disabled WebGL for the page.
+    name: 'voxel render pixel ratio capped at 1',
+    skipped: 'the voxel render will cast a ray per device pixel (4x the GPU work on Retina displays)',
+    find: 'var r=window.devicePixelRatio||1,o=Math.max(10,Math.floor(r*n.width)),i=Math.max(10,Math.floor(r*n.height));t._openGLRenderWindow.setSize(o,i)',
+    expected: 2,
+    replace: () =>
+      'var r=Math.min(window.devicePixelRatio||1,1),o=Math.max(10,Math.floor(r*n.width)),i=Math.max(10,Math.floor(r*n.height));t._openGLRenderWindow.setSize(o,i)'
   }
 ]
 
