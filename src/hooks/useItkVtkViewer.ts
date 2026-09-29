@@ -34,6 +34,11 @@ interface ItkVtkViewerInstance {
   setLabelImageBlend: (blend: number) => void
   setBackgroundColor: (rgb: [number, number, number]) => void
   setImageColorMap: (colorMap: string) => void
+  // The volume's (component 0's) intensity range for the color and opacity
+  // maps, and the data range it can span.
+  getImageColorRange: () => [number, number] | undefined
+  setImageColorRange: (range: [number, number]) => void
+  getImageColorRangeBounds: () => [number, number] | undefined
   on: (event: string, callback: () => void) => void
   setLabelImageLookupTable: (lookupTable: string) => void
   /** PNG data URL of the render (the vtk.js view's captureImage). */
@@ -320,12 +325,33 @@ export function useItkVtkViewer() {
           const center: [number, number, number] = [2, 1, 0].map((a) => origin[a] + ((size[a] - 1) * spacing[a]) / 2) as [number, number, number]
           rotationCenterRef.current = center
           let colorMapApplied = false
+          // The intensity range starts at the volume's whole range, not
+          // itk-vtk-viewer's default middle 60% (0.2-0.8 of it): for 8-bit
+          // scans exactly 0-255, otherwise the data's own min-max. Redone as
+          // finer levels load (their min-max can be wider), until the user
+          // sets a range of their own.
+          let rangeSet: [number, number] | null = null
+          const applyFullRange = () => {
+            const current = volumeViewer.getImageColorRange()
+            if (rangeSet && current && (current[0] !== rangeSet[0] || current[1] !== rangeSet[1])) return
+            const range: [number, number] | undefined = levels[0].dtype === '|u1' ? [0, 255] : volumeViewer.getImageColorRangeBounds()
+            if (!range || !Number.isFinite(range[0]) || !Number.isFinite(range[1])) return
+            rangeSet = [range[0], range[1]]
+            if (current && current[0] === range[0] && current[1] === range[1]) return
+            volumeViewer.setImageColorRange(rangeSet)
+          }
           const onImageUpdate = () => {
             // Catches the first label render, before the transfer function
-            // is hooked (see applyLabelColors).
+            // is hooked (see applyLabelColors). The range goes in after
+            // itk-vtk-viewer has set its own default for the new image.
             window.setTimeout(() => {
               applyLabelColorsRef.current()
               hookLabelOpacityRef.current()
+              try {
+                applyFullRange()
+              } catch {
+                // viewer mid-update; next image update
+              }
             }, 0)
             try {
               volumeViewer.getViewProxy().getInteractorStyle3D().setCenterOfRotation(center)
