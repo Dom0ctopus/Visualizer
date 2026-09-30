@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   deleteLibraryFile,
   fetchJobs,
@@ -318,16 +318,28 @@ export function ItkVtkViewerPage() {
   // fades (0: not at all, 1: gone), shared by every view.
   const [focusKeys, setFocusKeys] = useState<ReadonlySet<string> | null>(null)
   const [focusStrength, setFocusStrength] = useState(0.85)
-  const focusSpec = useMemo(() => (focusKeys ? { keys: focusKeys, fade: 1 - focusStrength } : null), [focusKeys, focusStrength])
+  // The views follow the focus in a background render: redrawing every
+  // layer's overlays, the voxel weights and the meshes for a big focus set
+  // with many segmentations loaded takes a while, and the sidebar's own
+  // controls (the list, Clear, the slider) must stay responsive meanwhile.
+  const viewFocusKeys = useDeferredValue(focusKeys)
+  const viewFocusStrength = useDeferredValue(focusStrength)
+  const focusSpec = useMemo(
+    () => (viewFocusKeys ? { keys: viewFocusKeys, fade: 1 - viewFocusStrength } : null),
+    [viewFocusKeys, viewFocusStrength]
+  )
   // The voxel render fades on a steeper curve: it accumulates opacity along
   // each ray, so a segment at 15% opacity still looks solid through its
   // thickness (see useItkVtkViewer's setFocusBlend for the blend's share).
-  const voxelFocusSpec = useMemo(() => (focusKeys ? { keys: focusKeys, fade: (1 - focusStrength) ** 3 } : null), [focusKeys, focusStrength])
+  const voxelFocusSpec = useMemo(
+    () => (viewFocusKeys ? { keys: viewFocusKeys, fade: (1 - viewFocusStrength) ** 3 } : null),
+    [viewFocusKeys, viewFocusStrength]
+  )
   const [focusError, setFocusError] = useState<string | null>(null)
   // The voxel render's share: focus also raises its label blend.
   useEffect(() => {
-    setFocusBlend(focusKeys ? focusStrength : null)
-  }, [focusKeys, focusStrength, setFocusBlend])
+    setFocusBlend(viewFocusKeys ? viewFocusStrength : null)
+  }, [viewFocusKeys, viewFocusStrength, setFocusBlend])
 
   const { overlays, error: overlayError } = useSegmentationOverlays(
     zarrSeg.segmentations,
