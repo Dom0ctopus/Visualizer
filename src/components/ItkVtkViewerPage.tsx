@@ -245,6 +245,7 @@ export function ItkVtkViewerPage() {
   // The voxel render's rotatable crop box (CropBoxOverlay).
   const [cropOn, setCropOn] = useState(false)
   const [cropReset, setCropReset] = useState(0)
+  const [cropRotate, setCropRotate] = useState(false)
 
   // Hover in the voxel render names the segment under the pointer, as in
   // the 2D panes (lib/volumePick.ts casts the ray). Throttled to one pick
@@ -754,7 +755,7 @@ export function ItkVtkViewerPage() {
                 <div ref={volumeContainerRef} className="itk-volume-container" />
                 {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
                 {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} />}
-                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} />}
+                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} />}
                 {(loadedName || zarrSeg.segmentations.length > 0) && (
                   <div className="render-toolbar">
                     {loadedName && (
@@ -769,10 +770,20 @@ export function ItkVtkViewerPage() {
                         </button>
                         {cropOn && (
                           <>
+                            <button
+                              className={cropRotate ? 'btn btn-secondary btn-small active' : 'btn btn-secondary btn-small'}
+                              aria-pressed={cropRotate}
+                              title="While on, dragging in the view turns the box instead of the camera (Shift+drag always does)"
+                              onClick={() => setCropRotate((on) => !on)}
+                            >
+                              Rotate box
+                            </button>
                             <button className="btn btn-secondary btn-small" title="Back to a box around the whole volume" onClick={() => setCropReset((n) => n + 1)}>
                               Reset
                             </button>
-                            <span className="render-toolbar-hint">Drag a dot to move a face · Shift+drag to rotate</span>
+                            <span className="render-toolbar-hint">
+                              {cropRotate ? 'Drag to rotate the box' : 'Drag a dot to move a face · Shift+drag to rotate'}
+                            </span>
                           </>
                         )}
                       </span>

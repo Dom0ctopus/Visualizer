@@ -10,17 +10,32 @@ const RADIANS_PER_PIXEL = 0.008
  * edges, and a handle in the middle of each face. Drag a handle to move
  * that face in or out; Shift+drag anywhere in the view to turn the box about
  * its center (left-right about the screen's vertical, up-down about its
- * horizontal), so its faces can cut through the volume at any angle. Plain
- * drags still turn the camera. Keyed by volume, so a new volume starts with
+ * horizontal), so its faces can cut through the volume at any angle; in
+ * rotate mode plain drags do the same. Otherwise plain drags turn the camera. Keyed by volume, so a new volume starts with
  * a box around all of it; `resetToken` changes reset it too.
  */
-export function CropBoxOverlay({ target, enabled, resetToken }: { target: CropTarget; enabled: boolean; resetToken: number }) {
+export function CropBoxOverlay({
+  target,
+  enabled,
+  resetToken,
+  rotateMode
+}: {
+  target: CropTarget
+  enabled: boolean
+  resetToken: number
+  /** Plain drags turn the box too (not just Shift+drags). */
+  rotateMode: boolean
+}) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const boxRef = useRef<CropBox | null>(null)
   const appliedRef = useRef(false)
   const resetRef = useRef(resetToken)
   // Turned on before the volume is ready to measure: try again shortly.
   const [retry, setRetry] = useState(0)
+  const rotateModeRef = useRef(rotateMode)
+  useEffect(() => {
+    rotateModeRef.current = rotateMode
+  }, [rotateMode])
 
   useEffect(() => {
     const svg = svgRef.current
@@ -101,17 +116,19 @@ export function CropBoxOverlay({ target, enabled, resetToken }: { target: CropTa
     }
     svg.addEventListener('pointerdown', onHandleDown)
 
-    // Shift+drag in the view: turn the box. Caught at the window, before any
-    // element's handler -- the render's own mouse handling (where Shift+drag
-    // pans the camera) never sees it.
+    // Shift+drag (or any drag in rotate mode) in the view: turn the box.
+    // Caught at the window, before any element's handler, and so are the
+    // moves that follow: the render's own mouse handling (where Shift+drag
+    // pans the camera) sees neither, so the camera can't move meanwhile.
     const container = target.container()
     const onShiftDown = (e: PointerEvent) => {
-      if (!e.shiftKey || e.button !== 0 || !boxRef.current || !container?.contains(e.target as Node)) return
+      if (!(e.shiftKey || rotateModeRef.current) || e.button !== 0 || !boxRef.current || !container?.contains(e.target as Node)) return
       e.preventDefault()
-      e.stopPropagation()
+      e.stopImmediatePropagation()
       let last = [e.clientX, e.clientY]
       target.beginInteraction()
       const onMove = (m: PointerEvent) => {
+        m.stopImmediatePropagation()
         const axes = target.cameraAxes()
         const box = boxRef.current
         if (!axes || !box) return
@@ -124,14 +141,14 @@ export function CropBoxOverlay({ target, enabled, resetToken }: { target: CropTa
         apply()
       }
       const onUp = () => {
-        window.removeEventListener('pointermove', onMove)
-        window.removeEventListener('pointerup', onUp)
-        window.removeEventListener('pointercancel', onUp)
+        window.removeEventListener('pointermove', onMove, true)
+        window.removeEventListener('pointerup', onUp, true)
+        window.removeEventListener('pointercancel', onUp, true)
         target.endInteraction()
       }
-      window.addEventListener('pointermove', onMove)
-      window.addEventListener('pointerup', onUp)
-      window.addEventListener('pointercancel', onUp)
+      window.addEventListener('pointermove', onMove, true)
+      window.addEventListener('pointerup', onUp, true)
+      window.addEventListener('pointercancel', onUp, true)
     }
     window.addEventListener('pointerdown', onShiftDown, true)
 
