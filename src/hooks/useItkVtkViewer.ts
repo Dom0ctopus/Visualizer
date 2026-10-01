@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CaptureTarget } from '../components/CaptureBar'
 import { dataUrlToBlob } from '../lib/capture'
+import type { CropPlane, Vec3 } from '../lib/cropBox'
 import { pickVolumeLabel, type PickableViewProxy } from '../lib/volumePick'
 import { fetchPyramidLevels, type PyramidLevel } from '../lib/zarrClient'
 
@@ -26,6 +27,7 @@ interface ItkVtkViewerInstance {
   // source -- see loadLabelImageUrl's own comment for why resetCroppingPlanes
   // gets called after a label image reload.
   getCroppingPlanesEnabled: () => boolean
+  setCroppingPlanesEnabled: (enabled: boolean) => void
   resetCroppingPlanes: () => void
   // Sets the displayed pyramid level and turns off itk-vtk-viewer's own
   // framerate-driven level switching ("Framerate-pick").
@@ -100,6 +102,45 @@ interface VtkCameraView {
   renderLater: () => void
   /** Its interactor fires a render event right after each frame is drawn. */
   getInteractor: () => { onRenderEvent: (callback: () => void) => { unsubscribe: () => void } }
+}
+
+/** What CropBoxOverlay needs from the voxel render. */
+export interface CropTarget {
+  /** The whole volume's world bounds (mm), voxel edges included:
+   *  [xmin, xmax, ymin, ymax, zmin, zmax]; null before a volume loads. */
+  bounds: () => number[] | null
+  /** Crops the render to the inside of six planes; null for no crop. */
+  setPlanes: (planes: CropPlane[] | null) => void
+  /** World points -> CSS pixels relative to `element`'s top-left. */
+  project: (points: Vec3[], element: Element) => Array<[number, number]> | null
+  /** The camera's screen-up and screen-right directions in world space. */
+  cameraAxes: () => { up: Vec3; right: Vec3 } | null
+  /** Called after every frame; returns an unsubscribe. */
+  onFrame: (callback: () => void) => () => void
+  /** The element the render's mouse handling listens on. */
+  container: () => HTMLElement | null
+  /** While a box is dragged, frames render at interactive quality (as while
+   *  rotating the camera); ended, the next frame is full quality. */
+  beginInteraction: () => void
+  endInteraction: () => void
+}
+
+// The slices of the vtk.js view proxy CropTarget uses.
+interface VtkCropView {
+  getCamera: () => VtkCamera & { getDirectionOfProjection: () => number[] }
+  getRenderer: () => unknown
+  getOpenGLRenderWindow: () => {
+    getSize: () => number[]
+    getCanvas: () => HTMLCanvasElement | null
+    worldToDisplay: (x: number, y: number, z: number, renderer: unknown) => number[]
+  }
+  getInteractor: () => { requestAnimation: (requestor: object) => void; cancelAnimation: (requestor: object) => void }
+  getRepresentations: () => Array<{ getVolumes?: () => Array<{ getMapper: () => { getClippingPlanes: () => VtkPlane[] } }> }>
+  renderLater: () => void
+}
+interface VtkPlane {
+  setOrigin: (x: number, y: number, z: number) => void
+  setNormal: (x: number, y: number, z: number) => void
 }
 
 /** Turntable speed: one full turn per this many seconds. */
@@ -221,6 +262,12 @@ export function useItkVtkViewer() {
   /** The mouse-rotation center (the whole volume's center); the turntable
    *  spins about it too. */
   const rotationCenterRef = useRef<[number, number, number] | null>(null)
+  /** The whole volume's world bounds, voxel edges included (CropTarget). */
+  const volumeBoundsRef = useRef<number[] | null>(null)
+  /** The crop box's planes while it's on (re-applied whenever
+   *  itk-vtk-viewer swaps in a new image, which resets its planes). */
+  const cropPlanesRef = useRef<CropPlane[] | null>(null)
+  const applyCropPlanesRef = useRef<() => void>(() => {})
   /** Whether itk-vtk-viewer has a label image fully set up. Label weights
    *  or names sent before that make its applyLabelImageWeights throw inside
    *  its state machine ("reading 'has'"), which can leave the 3D view stuck,
@@ -290,6 +337,8 @@ export function useItkVtkViewer() {
     cancelAnimationFrame(renderFrameRef.current)
     renderFrameRef.current = 0
     rotationCenterRef.current = null
+    volumeBoundsRef.current = null
+    cropPlanesRef.current = null
     volumeViewerRef.current = null
     const container = volumeContainerRef.current
     if (container) {
@@ -357,6 +406,7 @@ export function useItkVtkViewer() {
           const y = [origin[1], origin[1] + (size[1] - 1) * spacing[1]]
           const z = [origin[0], origin[0] + (size[0] - 1) * spacing[0]]
           const volumeBounds = [Math.min(...x), Math.max(...x), Math.min(...y), Math.max(...y), Math.min(...z), Math.max(...z)]
+          volumeBoundsRef.current = volumeBounds.map((v, i) => v + (i % 2 ? 0.5 : -0.5) * Math.abs(spacing[2 - (i >> 1)]))
           let userMovedCamera = false
           volumeViewer
             .getViewProxy()
@@ -395,6 +445,7 @@ export function useItkVtkViewer() {
               try {
                 applyFullRange()
                 frameWholeVolume()
+                applyCropPlanesRef.current()
                 // The starting look, once the image exists (its settings
                 // live with the image in itk-vtk-viewer).
                 if (!lookApplied && volumeViewer.getImageColorRangeBounds()) {
@@ -874,6 +925,105 @@ export function useItkVtkViewer() {
     [scheduleRender]
   )
 
+  // The crop box (CropBoxOverlay). It drives the volume mapper's six
+  // clipping planes -- the ones itk-vtk-viewer's own (axis-aligned) cropping
+  // tool uses; the shader has room for no more -- turned to the box's angle.
+  applyCropPlanesRef.current = () => {
+    const planes = cropPlanesRef.current
+    const viewer = volumeViewerRef.current
+    if (!planes || !viewer) return
+    try {
+      const view = viewer.getViewProxy() as unknown as VtkCropView
+      const mapperPlanes = view.getRepresentations().flatMap((r) => r.getVolumes?.() ?? [])[0]?.getMapper().getClippingPlanes() ?? []
+      if (mapperPlanes.length !== 6) return
+      planes.forEach((plane, i) => {
+        mapperPlanes[i].setOrigin(...plane.origin)
+        mapperPlanes[i].setNormal(...plane.normal)
+      })
+      scheduleRender()
+    } catch {
+      // viewer mid-update; re-applied on the next image update
+    }
+  }
+  const cropInteraction = useRef({})
+  const cropTarget = useMemo<CropTarget>(
+    () => ({
+      bounds: () => volumeBoundsRef.current,
+      setPlanes: (planes) => {
+        const viewer = volumeViewerRef.current
+        cropPlanesRef.current = planes
+        if (!viewer) return
+        if (planes) {
+          // One crop at a time: itk-vtk-viewer's tool moves the same planes.
+          if (viewer.getCroppingPlanesEnabled()) viewer.setCroppingPlanesEnabled(false)
+          applyCropPlanesRef.current()
+        } else {
+          viewer.resetCroppingPlanes()
+          scheduleRender()
+        }
+      },
+      project: (points, element) => {
+        const viewer = volumeViewerRef.current
+        if (!viewer) return null
+        try {
+          const view = viewer.getViewProxy() as unknown as VtkCropView
+          const renderWindow = view.getOpenGLRenderWindow()
+          const canvas = renderWindow.getCanvas()
+          if (!canvas) return null
+          const [width, height] = renderWindow.getSize()
+          const c = canvas.getBoundingClientRect()
+          const e = element.getBoundingClientRect()
+          if (!width || !height || !c.width || !c.height) return null
+          return points.map((p) => {
+            const d = renderWindow.worldToDisplay(p[0], p[1], p[2], view.getRenderer())
+            return [c.left - e.left + (d[0] * c.width) / width, c.top - e.top + ((height - d[1]) * c.height) / height]
+          })
+        } catch {
+          return null
+        }
+      },
+      cameraAxes: () => {
+        const viewer = volumeViewerRef.current
+        if (!viewer) return null
+        const camera = (viewer.getViewProxy() as unknown as VtkCropView).getCamera()
+        const d = camera.getDirectionOfProjection()
+        const u = camera.getViewUp()
+        const right: Vec3 = [d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0]]
+        const r = Math.hypot(...right) || 1
+        const unitRight = right.map((v) => v / r) as Vec3
+        const up: Vec3 = [
+          unitRight[1] * d[2] - unitRight[2] * d[1],
+          unitRight[2] * d[0] - unitRight[0] * d[2],
+          unitRight[0] * d[1] - unitRight[1] * d[0]
+        ]
+        return { up, right: unitRight }
+      },
+      onFrame: (callback) => {
+        const viewer = volumeViewerRef.current
+        if (!viewer) return () => {}
+        const subscription = (viewer.getViewProxy() as unknown as VtkCameraView).getInteractor().onRenderEvent(callback)
+        return () => subscription.unsubscribe()
+      },
+      container: () => volumeContainerRef.current,
+      beginInteraction: () => {
+        try {
+          ;(volumeViewerRef.current?.getViewProxy() as unknown as VtkCropView | undefined)?.getInteractor().requestAnimation(cropInteraction.current)
+        } catch {
+          // no viewer
+        }
+      },
+      endInteraction: () => {
+        try {
+          ;(volumeViewerRef.current?.getViewProxy() as unknown as VtkCropView | undefined)?.getInteractor().cancelAnimation(cropInteraction.current)
+          scheduleRender()
+        } catch {
+          // no viewer
+        }
+      }
+    }),
+    [scheduleRender]
+  )
+
   /** The segment name the voxel render shows at a screen point, or null
    *  (see lib/volumePick.ts). */
   const pickLabelName = useCallback((clientX: number, clientY: number): string | null => {
@@ -901,6 +1051,7 @@ export function useItkVtkViewer() {
     pickLabelName,
     setFocusBlend,
     captureTarget,
+    cropTarget,
     setLabelColors,
     applyLabelColors
   }

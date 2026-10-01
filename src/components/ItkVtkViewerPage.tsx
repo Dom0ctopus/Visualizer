@@ -16,6 +16,7 @@ import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
 import { useZarrSegmentations } from '../hooks/useZarrSegmentations'
 import { useZarrSliceViewer } from '../hooks/useZarrSliceViewer'
 import { CaptureBar } from './CaptureBar'
+import { CropBoxOverlay } from './CropBoxOverlay'
 import { LiveScaleBar } from './LiveScaleBar'
 import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
@@ -237,8 +238,12 @@ export function ItkVtkViewerPage() {
     setLabelColors,
     pickLabelName,
     captureTarget,
+    cropTarget,
     setFocusBlend
   } = useItkVtkViewer()
+  // The voxel render's rotatable crop box (CropBoxOverlay).
+  const [cropOn, setCropOn] = useState(false)
+  const [cropReset, setCropReset] = useState(0)
 
   // Hover in the voxel render names the segment under the pointer, as in
   // the 2D panes (lib/volumePick.ts casts the ray). Throttled to one pick
@@ -748,9 +753,30 @@ export function ItkVtkViewerPage() {
                 <div ref={volumeContainerRef} className="itk-volume-container" />
                 {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
                 {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} />}
-                {zarrSeg.segmentations.length > 0 && (
+                {loadedName && <CropBoxOverlay key={loadedName} target={cropTarget} enabled={cropOn} resetToken={cropReset} />}
+                {(loadedName || zarrSeg.segmentations.length > 0) && (
                   <div className="render-toolbar">
-                    {colorToggle(true)}
+                    {loadedName && (
+                      <span className="crop-controls">
+                        <button
+                          className={cropOn ? 'btn btn-secondary btn-small active' : 'btn btn-secondary btn-small'}
+                          aria-pressed={cropOn}
+                          title="A crop box you can turn to any angle: drag a face's dot to move it, Shift+drag in the view to rotate the box"
+                          onClick={() => setCropOn((on) => !on)}
+                        >
+                          Crop box
+                        </button>
+                        {cropOn && (
+                          <>
+                            <button className="btn btn-secondary btn-small" title="Back to a box around the whole volume" onClick={() => setCropReset((n) => n + 1)}>
+                              Reset
+                            </button>
+                            <span className="render-toolbar-hint">Drag a dot to move a face · Shift+drag to rotate</span>
+                          </>
+                        )}
+                      </span>
+                    )}
+                    {zarrSeg.segmentations.length > 0 && colorToggle(true)}
                     {focusKeys && focusSlider}
                     {mergeStatus === 'pending' && <span className="render-toolbar-hint">Colors apply once the combined label map is built</span>}
                   </div>
