@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { CropTarget } from '../hooks/useItkVtkViewer'
 import { BOX_EDGES, boxCorners, boxFromBounds, boxPlanes, faceCenter, faceOutwardNormal, moveFace, rotateBox, type CropBox, type Vec3 } from '../lib/cropBox'
 
@@ -19,6 +19,8 @@ export function CropBoxOverlay({ target, enabled, resetToken }: { target: CropTa
   const boxRef = useRef<CropBox | null>(null)
   const appliedRef = useRef(false)
   const resetRef = useRef(resetToken)
+  // Turned on before the volume is ready to measure: try again shortly.
+  const [retry, setRetry] = useState(0)
 
   useEffect(() => {
     const svg = svgRef.current
@@ -28,7 +30,10 @@ export function CropBoxOverlay({ target, enabled, resetToken }: { target: CropTa
       return
     }
     const bounds = target.bounds()
-    if (!svg || !bounds) return
+    if (!svg || !bounds) {
+      const timer = window.setTimeout(() => setRetry((n) => n + 1), 300)
+      return () => window.clearTimeout(timer)
+    }
     if (!boxRef.current || resetRef.current !== resetToken) boxRef.current = boxFromBounds(bounds)
     resetRef.current = resetToken
     const minHalf = 0.01 * Math.max(bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4])
@@ -96,11 +101,12 @@ export function CropBoxOverlay({ target, enabled, resetToken }: { target: CropTa
     }
     svg.addEventListener('pointerdown', onHandleDown)
 
-    // Shift+drag in the view: turn the box. Caught on the way down to the
-    // render's own mouse handling, which never sees it (so the camera stays).
+    // Shift+drag in the view: turn the box. Caught at the window, before any
+    // element's handler -- the render's own mouse handling (where Shift+drag
+    // pans the camera) never sees it.
     const container = target.container()
     const onShiftDown = (e: PointerEvent) => {
-      if (!e.shiftKey || e.button !== 0 || !boxRef.current) return
+      if (!e.shiftKey || e.button !== 0 || !boxRef.current || !container?.contains(e.target as Node)) return
       e.preventDefault()
       e.stopPropagation()
       let last = [e.clientX, e.clientY]
@@ -127,14 +133,14 @@ export function CropBoxOverlay({ target, enabled, resetToken }: { target: CropTa
       window.addEventListener('pointerup', onUp)
       window.addEventListener('pointercancel', onUp)
     }
-    container?.addEventListener('pointerdown', onShiftDown, true)
+    window.addEventListener('pointerdown', onShiftDown, true)
 
     return () => {
       stopFrames()
       svg.removeEventListener('pointerdown', onHandleDown)
-      container?.removeEventListener('pointerdown', onShiftDown, true)
+      window.removeEventListener('pointerdown', onShiftDown, true)
     }
-  }, [target, enabled, resetToken])
+  }, [target, enabled, resetToken, retry])
 
   // Unmounting (a new volume) ends the crop.
   useEffect(

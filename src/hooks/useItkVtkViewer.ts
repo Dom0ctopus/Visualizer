@@ -311,6 +311,9 @@ export function useItkVtkViewer() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loadedName, setLoadedName] = useState<string | null>(null)
+  /** Bumped for every viewer created (a Reload too), so per-viewer UI like
+   *  the crop box starts over with it. */
+  const [viewerGeneration, setViewerGeneration] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -478,6 +481,7 @@ export function useItkVtkViewer() {
         if (pendingLabelImage) void loadLabelImageUrlRef.current(pendingLabelImage)
         if (import.meta.env.DEV) (window as unknown as { __itkViewer?: ItkVtkViewerInstance }).__itkViewer = volumeViewer
         setLoadedName(name)
+        setViewerGeneration((n) => n + 1)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load volume into itk-vtk-viewer')
       } finally {
@@ -948,7 +952,18 @@ export function useItkVtkViewer() {
   const cropInteraction = useRef({})
   const cropTarget = useMemo<CropTarget>(
     () => ({
-      bounds: () => volumeBoundsRef.current,
+      bounds: () => {
+        if (volumeBoundsRef.current) return volumeBoundsRef.current
+        try {
+          const view = volumeViewerRef.current?.getViewProxy() as unknown as
+            | { getRepresentations: () => Array<{ getVolumes?: () => Array<{ getMapper: () => { getInputData: () => { getBounds: () => number[] } | null } }> }> }
+            | undefined
+          const bounds = view?.getRepresentations().flatMap((r) => r.getVolumes?.() ?? [])[0]?.getMapper().getInputData()?.getBounds()
+          return bounds && bounds.every(Number.isFinite) && bounds[1] > bounds[0] ? bounds : null
+        } catch {
+          return null
+        }
+      },
       setPlanes: (planes) => {
         const viewer = volumeViewerRef.current
         cropPlanesRef.current = planes
@@ -1043,6 +1058,7 @@ export function useItkVtkViewer() {
     busy,
     error,
     loadedName,
+    viewerGeneration,
     clearVolume: clearViewer,
     loadZarrUrl,
     loadLabelImageUrl,

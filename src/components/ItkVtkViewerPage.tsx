@@ -230,6 +230,7 @@ export function ItkVtkViewerPage() {
     busy,
     error: viewerError,
     loadedName,
+    viewerGeneration,
     clearVolume,
     loadZarrUrl,
     loadLabelImageUrl,
@@ -753,7 +754,7 @@ export function ItkVtkViewerPage() {
                 <div ref={volumeContainerRef} className="itk-volume-container" />
                 {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
                 {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} />}
-                {loadedName && <CropBoxOverlay key={loadedName} target={cropTarget} enabled={cropOn} resetToken={cropReset} />}
+                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} />}
                 {(loadedName || zarrSeg.segmentations.length > 0) && (
                   <div className="render-toolbar">
                     {loadedName && (
