@@ -39,6 +39,12 @@ interface ItkVtkViewerInstance {
   getImageColorRange: () => [number, number] | undefined
   setImageColorRange: (range: [number, number]) => void
   getImageColorRangeBounds: () => [number, number] | undefined
+  // Its "sample distance" slider (0-1, 0 = densest sampling), volume
+  // scattering slider (0-1), and the opacity curve's points ([x, y], both
+  // 0-1 over the intensity range).
+  setImageVolumeSampleDistance: (distance: number) => void
+  setImageVolumeScatteringBlend: (blend: number) => void
+  setImagePiecewiseFunctionPoints: (points: Array<[number, number]>) => void
   on: (event: string, callback: () => void) => void
   setLabelImageLookupTable: (lookupTable: string) => void
   /** PNG data URL of the render (the vtk.js view's captureImage). */
@@ -46,7 +52,12 @@ interface ItkVtkViewerInstance {
   /** itk-vtk-viewer's continuous-rotation toggle. */
   setRotateEnabled: (enabled: boolean) => void
   getViewProxy: () => {
-    getInteractorStyle3D: () => { setCenterOfRotation: (center: [number, number, number]) => void }
+    getInteractorStyle3D: () => {
+      setCenterOfRotation: (center: [number, number, number]) => void
+      /** Fires when the user starts rotating, panning or zooming. */
+      onStartInteractionEvent: (callback: () => void) => { unsubscribe: () => void }
+    }
+    getRenderer: () => { resetCamera: (bounds?: number[]) => boolean }
     getRepresentations: () => Array<{ getVolumes?: () => VtkVolume[] }>
     renderLater: () => void
   }
@@ -128,6 +139,17 @@ function sameEntries<K, V>(a: Map<K, V>, b: Map<K, V> | null): boolean {
 
 // itk-vtk-viewer's hard limits for one image update (read from its source:
 // "Voxel count over max" / "Image byte count over max").
+// The voxel render's starting look (its own panel can change all of it):
+// the densest sampling, a touch of volume scattering, and an opacity curve
+// rising steeply over the darkest fifth of the range, then gently.
+const DEFAULT_SAMPLE_DISTANCE = 0
+const DEFAULT_SCATTERING = 0.05
+const DEFAULT_OPACITY_POINTS: Array<[number, number]> = [
+  [0, 0],
+  [0.22, 0.44],
+  [0.95, 0.57]
+]
+
 const ITK_MAX_VOXELS = 268_435_456
 const ITK_MAX_BYTES = 536_870_912
 
@@ -325,6 +347,29 @@ export function useItkVtkViewer() {
           const center: [number, number, number] = [2, 1, 0].map((a) => origin[a] + ((size[a] - 1) * spacing[a]) / 2) as [number, number, number]
           rotationCenterRef.current = center
           let colorMapApplied = false
+          let lookApplied = false
+          // The camera frames the whole volume. itk-vtk-viewer frames
+          // whatever has loaded so far -- one end of the specimen, close up --
+          // and only fetches the part in view, so the rest never loaded until
+          // the user zoomed out. Re-framed after each progressive update until
+          // the user moves the camera themselves.
+          const x = [origin[2], origin[2] + (size[2] - 1) * spacing[2]]
+          const y = [origin[1], origin[1] + (size[1] - 1) * spacing[1]]
+          const z = [origin[0], origin[0] + (size[0] - 1) * spacing[0]]
+          const volumeBounds = [Math.min(...x), Math.max(...x), Math.min(...y), Math.max(...y), Math.min(...z), Math.max(...z)]
+          let userMovedCamera = false
+          volumeViewer
+            .getViewProxy()
+            .getInteractorStyle3D()
+            .onStartInteractionEvent(() => {
+              userMovedCamera = true
+            })
+          const frameWholeVolume = () => {
+            if (userMovedCamera) return
+            const view = volumeViewer.getViewProxy()
+            view.getRenderer().resetCamera(volumeBounds)
+            view.renderLater()
+          }
           // The intensity range starts at the volume's whole range, not
           // itk-vtk-viewer's default middle 60% (0.2-0.8 of it): for 8-bit
           // scans exactly 0-255, otherwise the data's own min-max. Redone as
@@ -349,6 +394,15 @@ export function useItkVtkViewer() {
               hookLabelOpacityRef.current()
               try {
                 applyFullRange()
+                frameWholeVolume()
+                // The starting look, once the image exists (its settings
+                // live with the image in itk-vtk-viewer).
+                if (!lookApplied && volumeViewer.getImageColorRangeBounds()) {
+                  volumeViewer.setImageVolumeSampleDistance(DEFAULT_SAMPLE_DISTANCE)
+                  volumeViewer.setImageVolumeScatteringBlend(DEFAULT_SCATTERING)
+                  volumeViewer.setImagePiecewiseFunctionPoints(DEFAULT_OPACITY_POINTS)
+                  lookApplied = true
+                }
               } catch {
                 // viewer mid-update; next image update
               }
