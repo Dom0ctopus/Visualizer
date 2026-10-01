@@ -118,6 +118,30 @@ export function useZarrSegmentations() {
     [updateSegments]
   )
 
+  /** Several segments of one file at once (the tree's file and system rows
+   *  while a search filter shows only some of their segments). */
+  const setSegmentsVisible = useCallback(
+    (recordId: string, keys: ReadonlySet<string>, visible: boolean) => {
+      updateSegments(
+        recordId,
+        (s) => keys.has(s.key),
+        (s) => ({ ...s, visible })
+      )
+    },
+    [updateSegments]
+  )
+
+  const setSegmentsOpacity = useCallback(
+    (recordId: string, keys: ReadonlySet<string>, opacity: number) => {
+      updateSegments(
+        recordId,
+        (s) => keys.has(s.key),
+        (s) => ({ ...s, opacity, visible: opacity > 0 })
+      )
+    },
+    [updateSegments]
+  )
+
   const setFileVisible = useCallback(
     (recordId: string, visible: boolean) => {
       updateSegments(
@@ -150,6 +174,8 @@ export function useZarrSegmentations() {
     setSystemVisible,
     setSystemOpacity,
     setFileVisible,
+    setSegmentsVisible,
+    setSegmentsOpacity,
     setFileOpacity,
     colorScheme,
     setColorScheme

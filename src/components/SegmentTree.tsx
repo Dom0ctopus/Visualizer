@@ -20,6 +20,10 @@ interface SegmentTreeProps {
   onSystemOpacity: (recordId: string, systemName: string, opacity: number) => void
   onFileVisible: (recordId: string, visible: boolean) => void
   onFileOpacity: (recordId: string, opacity: number) => void
+  /** Several segments of one file: what file and system rows act on while
+   *  a search filter shows only some of their segments. */
+  onSegmentsVisible: (recordId: string, keys: ReadonlySet<string>, visible: boolean) => void
+  onSegmentsOpacity: (recordId: string, keys: ReadonlySet<string>, opacity: number) => void
   onRemoveFile: (recordId: string) => void
 }
 
@@ -54,6 +58,8 @@ export function SegmentTree({
   onSystemOpacity,
   onFileVisible,
   onFileOpacity,
+  onSegmentsVisible,
+  onSegmentsOpacity,
   onRemoveFile
 }: SegmentTreeProps) {
   // Collapsed files/systems, by key (see fileKey/systemKey); all start expanded.
@@ -95,8 +101,12 @@ export function SegmentTree({
         const systems = filterSystems(groupBySystem(loaded.segments), fileMatches, filter)
         if (filter && systems.length === 0) return null
 
-        const fileChecked = loaded.segments.every((s) => s.visible)
-        const fileIndeterminate = !fileChecked && loaded.segments.some((s) => s.visible)
+        // While searching, a file or system row stands for -- and toggles --
+        // only the segments the search shows under it, not the hidden rest.
+        const shownSegments = filter ? systems.flatMap((sys) => sys.segments) : loaded.segments
+        const keysOf = (segs: SegmentState[]) => new Set(segs.map((seg) => seg.key))
+        const fileChecked = shownSegments.every((s) => s.visible)
+        const fileIndeterminate = !fileChecked && shownSegments.some((s) => s.visible)
 
         return (
           <div key={loaded.recordId} className="segment-tree-file">
@@ -105,9 +115,11 @@ export function SegmentTree({
               label={loaded.name}
               checked={fileChecked}
               indeterminate={fileIndeterminate}
-              opacity={avgOpacity(loaded.segments)}
-              onToggle={(checked) => onFileVisible(loaded.recordId, checked)}
-              onOpacityChange={(o) => onFileOpacity(loaded.recordId, o)}
+              opacity={avgOpacity(shownSegments)}
+              onToggle={(checked) =>
+                filter ? onSegmentsVisible(loaded.recordId, keysOf(shownSegments), checked) : onFileVisible(loaded.recordId, checked)
+              }
+              onOpacityChange={(o) => (filter ? onSegmentsOpacity(loaded.recordId, keysOf(shownSegments), o) : onFileOpacity(loaded.recordId, o))}
               onRemove={() => onRemoveFile(loaded.recordId)}
               badge={String(loaded.segments.length)}
               expanded={isExpanded(fileKey(loaded.recordId))}
@@ -141,8 +153,14 @@ export function SegmentTree({
                         checked={sysChecked}
                         indeterminate={sysIndeterminate}
                         opacity={avgOpacity(system.segments)}
-                        onToggle={(checked) => onSystemVisible(loaded.recordId, system.name, checked)}
-                        onOpacityChange={(o) => onSystemOpacity(loaded.recordId, system.name, o)}
+                        onToggle={(checked) =>
+                          filter
+                            ? onSegmentsVisible(loaded.recordId, keysOf(system.segments), checked)
+                            : onSystemVisible(loaded.recordId, system.name, checked)
+                        }
+                        onOpacityChange={(o) =>
+                          filter ? onSegmentsOpacity(loaded.recordId, keysOf(system.segments), o) : onSystemOpacity(loaded.recordId, system.name, o)
+                        }
                         badge={String(system.segments.length)}
                         expanded={isExpanded(systemKey(loaded.recordId, system.name))}
                         onExpandToggle={() => toggle(systemKey(loaded.recordId, system.name))}

@@ -1004,6 +1004,8 @@ export function ItkVtkViewerPage() {
               onSystemOpacity={zarrSeg.setSystemOpacity}
               onFileVisible={zarrSeg.setFileVisible}
               onFileOpacity={zarrSeg.setFileOpacity}
+              onSegmentsVisible={zarrSeg.setSegmentsVisible}
+              onSegmentsOpacity={zarrSeg.setSegmentsOpacity}
               onRemoveFile={zarrSeg.removeSegmentation}
             />
           </section>
