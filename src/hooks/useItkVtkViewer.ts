@@ -164,6 +164,12 @@ const DEFAULT_LABEL_PALETTE = 'glasbey'
 // is being dragged: each one re-renders the whole labeled volume.
 const LABEL_UPDATE_THROTTLE_MS = 150
 
+// While segment edits are coming in, the voxel render samples this many
+// times more coarsely, back to full quality this long after the last one
+// (see beginEditQuality).
+const EDIT_SAMPLING_FACTOR = 4
+const EDIT_SETTLE_MS = 500
+
 /** Label changes waiting to be sent to itk-vtk-viewer (see
  *  scheduleLabelUpdate); `blend` re-applies the search focus's blend. */
 interface LabelUpdate {
@@ -338,6 +344,8 @@ export function useItkVtkViewer() {
     cancelAnimationFrame(turntableFrameRef.current)
     turntableFrameRef.current = 0
     cancelAnimationFrame(renderFrameRef.current)
+    if (editQualityRef.current) window.clearTimeout(editQualityRef.current.timer)
+    editQualityRef.current = null
     renderFrameRef.current = 0
     rotationCenterRef.current = null
     volumeBoundsRef.current = null
@@ -593,6 +601,56 @@ export function useItkVtkViewer() {
     }, LABEL_UPDATE_THROTTLE_MS)
   }, [])
   const sentNamesRef = useRef<Map<number, string> | null>(null)
+
+  // Edits (segment visibility/opacity, focus) redraw the whole voxel render
+  // at full quality, and a burst of them -- an opacity drag, clicks in a
+  // row -- queued full-quality frames back to back: with dense sampling and
+  // scattering on a large scan, enough GPU work for macOS to reset the GPU
+  // (the page froze, then the browser crashed). So while edits are coming
+  // in, frames sample EDIT_SAMPLING_FACTOR times more coarsely (cheap), and
+  // EDIT_SETTLE_MS after the last one a single full-quality frame follows.
+  // Only the mapper's sample distance changes -- a shader parameter, no
+  // recompile -- and itk-vtk-viewer's own setting is left alone.
+  const editQualityRef = useRef<{ full: number; coarse: number; timer: number } | null>(null)
+  const volumeMapper = () => {
+    try {
+      const view = volumeViewerRef.current?.getViewProxy() as unknown as
+        | { getRepresentations: () => Array<{ getVolumes?: () => Array<{ getMapper: () => { getSampleDistance: () => number; setSampleDistance: (d: number) => void } }> }> }
+        | undefined
+      return view?.getRepresentations().flatMap((r) => r.getVolumes?.() ?? [])[0]?.getMapper() ?? null
+    } catch {
+      return null
+    }
+  }
+  const endEditQuality = () => {
+    const edit = editQualityRef.current
+    editQualityRef.current = null
+    if (!edit) return
+    window.clearTimeout(edit.timer)
+    const mapper = volumeMapper()
+    // Unless something else changed it meanwhile (the sample distance
+    // slider, a new resolution level).
+    if (mapper && mapper.getSampleDistance() === edit.coarse) mapper.setSampleDistance(edit.full)
+    scheduleRender()
+  }
+  const beginEditQuality = () => {
+    const mapper = volumeMapper()
+    if (!mapper) return
+    let edit = editQualityRef.current
+    if (edit && mapper.getSampleDistance() !== edit.coarse) {
+      // Changed underneath us: that's the new full-quality value.
+      window.clearTimeout(edit.timer)
+      edit = null
+    }
+    if (!edit) {
+      const full = mapper.getSampleDistance()
+      edit = { full, coarse: full * EDIT_SAMPLING_FACTOR, timer: 0 }
+      mapper.setSampleDistance(edit.coarse)
+      editQualityRef.current = edit
+    }
+    window.clearTimeout(edit.timer)
+    edit.timer = window.setTimeout(endEditQuality, EDIT_SETTLE_MS)
+  }
   /** Makes the next voxel frame rebuild the opacity texture (see flush). */
   const markLabelOpacityStale = () => {
     try {
@@ -610,6 +668,7 @@ export function useItkVtkViewer() {
     if (!viewer || !labelImageReadyRef.current) return
     const { weights, names, blend } = pendingLabelUpdate.current
     pendingLabelUpdate.current = {}
+    beginEditQuality()
     const rendersBefore = renderCountRef.current
     try {
       // Each of these makes itk-vtk-viewer redraw, so unchanged names (the
