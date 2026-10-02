@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 interface TreeRowProps {
@@ -18,7 +18,7 @@ interface TreeRowProps {
   onExpandToggle?: () => void
 }
 
-export function TreeRow({
+export const TreeRow = memo(function TreeRow({
   depth,
   label,
   color,
@@ -148,4 +148,4 @@ export function TreeRow({
         )}
     </div>
   )
-}
+})

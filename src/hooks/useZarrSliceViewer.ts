@@ -54,6 +54,9 @@ export interface DetailWindow {
 
 type Axis = 'z' | 'y' | 'x'
 
+/** Slices ahead (in the scroll direction) fetched in the background. */
+export const SLICE_PREFETCH_STEPS = [1, 2, 3]
+
 /** Loads one plane's slice whenever its index/level changes -- latest-wins,
  *  one read in flight per plane (see useLatestAsync), so each plane scrolls
  *  independently and continuously. */
@@ -66,8 +69,23 @@ function useSliceLoader(
   setSlice: (s: SliceResult | null) => void,
   setError: (e: string | null) => void
 ) {
+  // The direction of travel, for prefetching the next slices.
+  const lastIndex = useRef(index)
+  const direction = index < lastIndex.current ? -1 : 1
+  useEffect(() => {
+    lastIndex.current = index
+  }, [index])
   useLatestAsync(
-    zarrUrl && currentLevel ? () => read(zarrUrl, currentLevel.levelPath, index) : null,
+    zarrUrl && currentLevel
+      ? async () => {
+          const slice = await read(zarrUrl, currentLevel.levelPath, index)
+          // Warm the chunk cache for the next slices ahead, so scrolling on
+          // finds them already fetched and decoded. Out-of-range reads just
+          // fail quietly.
+          for (const step of SLICE_PREFETCH_STEPS) void read(zarrUrl, currentLevel.levelPath, index + direction * step).catch(() => {})
+          return slice
+        }
+      : null,
     [zarrUrl, currentLevel, index],
     `${zarrUrl}|${currentLevel?.levelPath}`,
     (slice) => {

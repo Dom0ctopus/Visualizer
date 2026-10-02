@@ -13,7 +13,8 @@
     "prebuild": "npm run sync:itk-vtk-viewer",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "prod:all": "npm run build && concurrently -n client,server -c green,blue \"npm run preview\" \"npm run dev:server\""
   },
   "dependencies": {
     "itk-vtk-viewer": "^14.51.0",

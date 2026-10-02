@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLatestAsync } from './useLatestAsync'
+import { SLICE_PREFETCH_STEPS } from './useZarrSliceViewer'
 import { segZarrUrl } from '../lib/api'
 import { buildLabelLut } from '../lib/segmentationOverlay'
 import { focusKey } from '../lib/focus'
@@ -70,7 +71,9 @@ export interface SliceFocus {
 // renderer the *same* slice object lets it keep its uploaded label texture
 // (it caches textures by data identity -- see sliceRenderer.ts) instead of
 // re-uploading every layer's slice in all three panes on each slider tick.
-const SLICE_CACHE_LIMIT = 48
+// Room for several positions of every layer of a few multi-layer
+// segmentations (and the slices prefetched ahead of them).
+const SLICE_CACHE_LIMIT = 256
 const sliceCache = new Map<string, Promise<SliceResult>>()
 
 function cachedSlice(key: string, load: () => Promise<SliceResult>): Promise<SliceResult> {
@@ -96,7 +99,9 @@ async function loadPlaneOverlays(
   base: VolumeInfo,
   levelIndex: number,
   infoCache: Map<string, Promise<VolumeInfo>>,
-  focus: SliceFocus | null
+  focus: SliceFocus | null,
+  /** Base-index steps ahead whose slices are fetched in the background. */
+  prefetch: number[] = []
 ): Promise<{ overlays: SliceOverlay[]; error: string | null }> {
   const jobs = segmentations.flatMap((seg) =>
     [...groupByLayer(seg.segments)]
@@ -130,7 +135,13 @@ async function loadPlaneOverlays(
           const segIndex = Math.round(index * scale[fixed] + offset[fixed])
           if (segIndex < 0 || segIndex >= info.size[fixed]) return null
           const read = plane === 'axial' ? readZSlice : plane === 'coronal' ? readCoronalSlice : readSagittalSlice
-          const slice = await cachedSlice(`${plane}|${layerUrl}|${info.levelPath}|${segIndex}`, () => read(layerUrl, info.levelPath, segIndex))
+          const sliceAt = (i: number) => cachedSlice(`${plane}|${layerUrl}|${info.levelPath}|${i}`, () => read(layerUrl, info.levelPath, i))
+          const slice = await sliceAt(segIndex)
+          // Scrolling on usually finds the next slices ready.
+          for (const step of prefetch) {
+            const ahead = Math.round((index + step) * scale[fixed] + offset[fixed])
+            if (ahead !== segIndex && ahead >= 0 && ahead < info.size[fixed]) void sliceAt(ahead).catch(() => {})
+          }
           const { lut, names, focus: focusFlags } = buildLabelLut(
             segsInLayer,
             focus ? { isFocused: (s) => focus.keys.has(focusKey(seg.recordId, s.key)), fade: focus.fade } : null
@@ -172,8 +183,14 @@ function usePlaneOverlays(
 ): { overlays: SliceOverlay[]; error: string | null } {
   const [state, setState] = useState<{ overlays: SliceOverlay[]; error: string | null }>({ overlays: [], error: null })
   const active = segmentations.length > 0 && base !== null
+  const lastIndex = useRef(index)
+  const direction = index < lastIndex.current ? -1 : 1
+  useEffect(() => {
+    lastIndex.current = index
+  }, [index])
+  const prefetch = SLICE_PREFETCH_STEPS.map((step) => step * direction)
   useLatestAsync(
-    active ? () => loadPlaneOverlays(plane, index, segmentations, base, levelIndex, infoCache, focus) : null,
+    active ? () => loadPlaneOverlays(plane, index, segmentations, base, levelIndex, infoCache, focus, prefetch) : null,
     [segmentations, index, base, levelIndex, focus],
     base ? `${levelIndex}|${base.size.join(',')}|${base.origin.join(',')}|${base.spacing.join(',')}` : '',
     setState,

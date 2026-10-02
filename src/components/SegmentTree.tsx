@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { groupBySystem } from '../types'
 import type { SegmentState, SystemGroup } from '../types'
 import { TreeRow } from './TreeRow'
@@ -49,7 +49,9 @@ function filterSystems(systems: SystemGroup[], fileMatches: boolean, filter: str
     .filter((s): s is SystemGroup => s !== null)
 }
 
-export function SegmentTree({
+/** Memoized: the page re-renders on every 2D scroll step, and the tree's
+ *  inputs (segment state, search text, stable callbacks) don't change then. */
+export const SegmentTree = memo(function SegmentTree({
   segmentations,
   filterText,
   onSegmentVisible,
@@ -186,4 +188,4 @@ export function SegmentTree({
       })}
     </div>
   )
-}
+})
