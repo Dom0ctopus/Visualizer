@@ -610,7 +610,12 @@ export function useItkVtkViewer() {
   // in, frames sample EDIT_SAMPLING_FACTOR times more coarsely (cheap), and
   // EDIT_SETTLE_MS after the last one a single full-quality frame follows.
   // Only the mapper's sample distance changes -- a shader parameter, no
-  // recompile -- and itk-vtk-viewer's own setting is left alone.
+  // recompile -- and itk-vtk-viewer's own setting is left alone. vtk.js bakes
+  // the sample distance into its opacity texture (per-sample opacity is
+  // corrected for the step length) but rebuilds that texture only when an
+  // opacity function changes, so each switch marks it stale: without that,
+  // the full-quality frames after an edit used the coarse frames' (4x more
+  // opaque per sample) table until the opacity curve was next touched.
   const editQualityRef = useRef<{ full: number; coarse: number; timer: number } | null>(null)
   const volumeMapper = () => {
     try {
@@ -630,7 +635,10 @@ export function useItkVtkViewer() {
     const mapper = volumeMapper()
     // Unless something else changed it meanwhile (the sample distance
     // slider, a new resolution level).
-    if (mapper && mapper.getSampleDistance() === edit.coarse) mapper.setSampleDistance(edit.full)
+    if (mapper && mapper.getSampleDistance() === edit.coarse) {
+      mapper.setSampleDistance(edit.full)
+      markLabelOpacityStale()
+    }
     scheduleRender()
   }
   const beginEditQuality = () => {
@@ -646,6 +654,7 @@ export function useItkVtkViewer() {
       const full = mapper.getSampleDistance()
       edit = { full, coarse: full * EDIT_SAMPLING_FACTOR, timer: 0 }
       mapper.setSampleDistance(edit.coarse)
+      markLabelOpacityStale()
       editQualityRef.current = edit
     }
     window.clearTimeout(edit.timer)
