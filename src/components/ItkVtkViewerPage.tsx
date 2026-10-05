@@ -16,7 +16,7 @@ import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
 import { useZarrSegmentations } from '../hooks/useZarrSegmentations'
 import { useZarrSliceViewer } from '../hooks/useZarrSliceViewer'
 import { CaptureBar } from './CaptureBar'
-import { CropBoxOverlay } from './CropBoxOverlay'
+import { CropBoxOverlay, type WipeCommand } from './CropBoxOverlay'
 import { LiveScaleBar } from './LiveScaleBar'
 import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
@@ -252,6 +252,18 @@ export function ItkVtkViewerPage() {
   // the voxel render is recording.
   const [cropHidden, setCropHidden] = useState(false)
   const [voxelRecording, setVoxelRecording] = useState(false)
+  // Timed wipes: a face picked on the box sweeps in or out over N seconds.
+  const [wipeFace, setWipeFace] = useState<number | null>(null)
+  const [wipeSeconds, setWipeSeconds] = useState(5)
+  const [wipe, setWipe] = useState<WipeCommand | null>(null)
+  const [wiping, setWiping] = useState(false)
+  const startWipe = (direction: 'in' | 'out') => {
+    if (wipeFace === null) return
+    setWipe({ id: Date.now(), face: wipeFace, direction, seconds: wipeSeconds })
+    setWiping(true)
+  }
+  const stopWipe = () => setWipe((w) => (w ? { ...w, id: Date.now(), direction: 'stop' } : null))
+  const onWipeEnd = useCallback(() => setWiping(false), [])
 
   // Hover in the voxel render names the segment under the pointer, as in
   // the 2D panes (lib/volumePick.ts casts the ray). Throttled to one pick
@@ -761,7 +773,7 @@ export function ItkVtkViewerPage() {
                 <div ref={volumeContainerRef} className="itk-volume-container" />
                 {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
                 {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} onRecordingChange={setVoxelRecording} />}
-                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} hidden={cropHidden || voxelRecording} />}
+                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} hidden={cropHidden || voxelRecording} selectedFace={wipeFace} onSelectFace={setWipeFace} wipe={wipe} onWipeEnd={onWipeEnd} />}
                 {(loadedName || zarrSeg.segmentations.length > 0) && (
                   <div className="render-toolbar">
                     {loadedName && (
@@ -795,8 +807,40 @@ export function ItkVtkViewerPage() {
                             >
                               Hide box
                             </button>
+                            <span className="crop-controls" title="Pick a face by clicking its dot, then sweep it across the volume at a steady speed">
+                              <span className="render-toolbar-label">Wipe</span>
+                              <input
+                                className="crop-wipe-seconds"
+                                type="number"
+                                min={0.5}
+                                max={600}
+                                step={0.5}
+                                value={wipeSeconds}
+                                aria-label="Wipe duration in seconds"
+                                onChange={(e) => setWipeSeconds(Math.max(0.5, Number(e.target.value) || 0.5))}
+                              />
+                              <span className="render-toolbar-hint">s</span>
+                              {wiping ? (
+                                <button className="btn btn-secondary btn-small active" onClick={stopWipe}>
+                                  Stop
+                                </button>
+                              ) : (
+                                <>
+                                  <button className="btn btn-secondary btn-small" disabled={wipeFace === null} title="Sweep the picked face across until the box is a thin slab" onClick={() => startWipe('in')}>
+                                    Wipe in
+                                  </button>
+                                  <button className="btn btn-secondary btn-small" disabled={wipeFace === null} title="Sweep the picked face back out to the edge of the volume" onClick={() => startWipe('out')}>
+                                    Wipe out
+                                  </button>
+                                </>
+                              )}
+                            </span>
                             <span className="render-toolbar-hint">
-                              {cropRotate ? 'Drag to rotate the box' : 'Drag a dot to move a face · Shift+drag to rotate'}
+                              {cropRotate
+                                ? 'Drag to rotate the box'
+                                : wipeFace === null
+                                  ? 'Drag a dot to move a face · click one to pick it for a wipe · Shift+drag to rotate'
+                                  : 'Drag a dot to move a face · Shift+drag to rotate'}
                             </span>
                           </>
                         )}

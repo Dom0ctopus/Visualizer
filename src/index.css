@@ -1519,3 +1519,20 @@ input[type='checkbox'] {
   border-color: var(--accent);
   color: var(--accent-hover);
 }
+
+.crop-box-handle.selected {
+  fill: #ffd166;
+  stroke: rgba(0, 0, 0, 0.75);
+  stroke-width: 2;
+}
+
+.crop-wipe-seconds {
+  width: 52px;
+  padding: 3px 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  color: var(--text-h);
+  font: inherit;
+  font-size: 12px;
+}
