@@ -116,12 +116,18 @@ export function startCompositeRecording(
   source: HTMLCanvasElement,
   onFrame: (draw: (canvas: HTMLCanvasElement) => void) => () => void,
   requestRender: () => void,
-  overlay: (ctx: CanvasRenderingContext2D, width: number, height: number) => void
+  overlay: (ctx: CanvasRenderingContext2D, width: number, height: number) => void,
+  /** Records only this part of the canvas (canvas pixels); the whole canvas
+   *  when omitted. */
+  crop?: { x: number; y: number; width: number; height: number } | null
 ): CanvasRecording {
   // Fixed for the whole recording (encoders don't take size changes); even
   // dimensions, which H.264 needs.
-  const width = Math.max(2, source.width & ~1)
-  const height = Math.max(2, source.height & ~1)
+  const region = crop ?? { x: 0, y: 0, width: source.width, height: source.height }
+  const width = Math.max(2, Math.round(region.width) & ~1)
+  const height = Math.max(2, Math.round(region.height) & ~1)
+  const fullWidth = source.width
+  const fullHeight = source.height
   const makeCanvas = () => {
     const c = document.createElement('canvas')
     c.width = width
@@ -133,11 +139,13 @@ export function startCompositeRecording(
     return { canvas: c, ctx }
   }
   const staging = makeCanvas()
+  staging.canvas.width = fullWidth
+  staging.canvas.height = fullHeight
   const output = makeCanvas()
   const stream = output.canvas.captureStream(0)
   const track = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void }
   const emit = () => {
-    output.ctx.drawImage(staging.canvas, 0, 0)
+    output.ctx.drawImage(staging.canvas, Math.round(region.x), Math.round(region.y), width, height, 0, 0, width, height)
     overlay(output.ctx, width, height)
     track.requestFrame?.()
   }
@@ -154,8 +162,9 @@ export function startCompositeRecording(
   // Every rendered frame is emitted as it's drawn; the animation-frame loop
   // adds frames while the view is still (and keeps the overlay current).
   unsubscribe = onFrame((frame) => {
-    staging.ctx.fillRect(0, 0, width, height)
-    staging.ctx.drawImage(frame, 0, 0, width, height)
+    staging.ctx.fillStyle = '#000'
+    staging.ctx.fillRect(0, 0, fullWidth, fullHeight)
+    staging.ctx.drawImage(frame, 0, 0, fullWidth, fullHeight)
     emit()
   })
   const tick = () => {

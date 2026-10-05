@@ -143,6 +143,60 @@ interface VtkPlane {
   setNormal: (x: number, y: number, z: number) => void
 }
 
+/** The specimen's extent about an axis through `center` along unit `up`:
+ *  its height range along the axis and its largest distance from it --
+ *  from the displayed image's voxels above its null (minimum) value,
+ *  sampled down to a few million. Null when there's no image or no such
+ *  voxel. */
+function specimenSweep(
+  view: unknown,
+  center: number[],
+  up: number[]
+): { hMin: number; hMax: number; radius: number } | null {
+  type Image = {
+    getDimensions: () => number[]
+    getPointData: () => { getScalars: () => { getData: () => ArrayLike<number>; getNumberOfComponents: () => number; getRange: (c: number) => number[] } }
+    indexToWorld: (ijk: number[], out: number[]) => number[]
+  }
+  const image = (view as { getRepresentations: () => Array<{ getVolumes?: () => Array<{ getMapper: () => { getInputData: () => Image | null } }> }> })
+    .getRepresentations()
+    .flatMap((r) => r.getVolumes?.() ?? [])[0]
+    ?.getMapper()
+    .getInputData()
+  if (!image) return null
+  const [nx, ny, nz] = image.getDimensions()
+  const scalars = image.getPointData().getScalars()
+  const data = scalars.getData()
+  const comps = scalars.getNumberOfComponents()
+  const nullValue = scalars.getRange(0)[0]
+  const origin = image.indexToWorld([0, 0, 0], [0, 0, 0])
+  const ex = image.indexToWorld([1, 0, 0], [0, 0, 0]).map((v, i) => v - origin[i])
+  const ey = image.indexToWorld([0, 1, 0], [0, 0, 0]).map((v, i) => v - origin[i])
+  const ez = image.indexToWorld([0, 0, 1], [0, 0, 0]).map((v, i) => v - origin[i])
+  const step = Math.max(1, Math.round(Math.cbrt((nx * ny * nz) / 4e6)))
+  let hMin = Infinity
+  let hMax = -Infinity
+  let r2Max = 0
+  const p = [0, 0, 0]
+  for (let k = 0; k < nz; k += step)
+    for (let j = 0; j < ny; j += step) {
+      const row = (k * ny + j) * nx
+      for (let i = 0; i < nx; i += step) {
+        if (data[(row + i) * comps] <= nullValue) continue
+        for (let a = 0; a < 3; a++) p[a] = origin[a] + i * ex[a] + j * ey[a] + k * ez[a] - center[a]
+        const h = p[0] * up[0] + p[1] * up[1] + p[2] * up[2]
+        if (h < hMin) hMin = h
+        if (h > hMax) hMax = h
+        const r2 = (p[0] - h * up[0]) ** 2 + (p[1] - h * up[1]) ** 2 + (p[2] - h * up[2]) ** 2
+        if (r2 > r2Max) r2Max = r2
+      }
+    }
+  if (!Number.isFinite(hMin)) return null
+  // Sampled every `step` voxels: pad by that much.
+  const pad = step * Math.max(Math.hypot(...ex), Math.hypot(...ey), Math.hypot(...ez))
+  return { hMin: hMin - pad, hMax: hMax + pad, radius: Math.sqrt(r2Max) + pad }
+}
+
 /** Turntable speed: one full turn per this many seconds. */
 const TURNTABLE_SECONDS_PER_TURN = 24
 
@@ -1011,6 +1065,57 @@ export function useItkVtkViewer() {
         return () => subscription.unsubscribe()
       },
       requestRender: scheduleRender,
+      // Where the specimen can be on screen while it turns about the
+      // screen's vertical axis through the volume's center (the turntable,
+      // and left-right drags): the cylinder it sweeps, projected, plus a
+      // small margin. Measured from the displayed image's own voxels -- every
+      // voxel above the null (minimum) value, sampled -- not the volume's
+      // box, which in a masked scan is mostly empty space.
+      contentRect: () => {
+        const viewer = volumeViewerRef.current
+        const bounds = volumeBoundsRef.current
+        if (!viewer || !bounds) return null
+        try {
+          const view = viewer.getViewProxy() as unknown as VtkCropView
+          const renderWindow = view.getOpenGLRenderWindow()
+          const [width, height] = renderWindow.getSize()
+          const camera = view.getCamera()
+          const dir = camera.getDirectionOfProjection()
+          const upRaw = camera.getViewUp()
+          const right = [dir[1] * upRaw[2] - dir[2] * upRaw[1], dir[2] * upRaw[0] - dir[0] * upRaw[2], dir[0] * upRaw[1] - dir[1] * upRaw[0]]
+          const rl = Math.hypot(right[0], right[1], right[2]) || 1
+          for (let i = 0; i < 3; i++) right[i] /= rl
+          const up = [right[1] * dir[2] - right[2] * dir[1], right[2] * dir[0] - right[0] * dir[2], right[0] * dir[1] - right[1] * dir[0]]
+          const center = rotationCenterRef.current ?? [(bounds[0] + bounds[1]) / 2, (bounds[2] + bounds[3]) / 2, (bounds[4] + bounds[5]) / 2]
+          const extent = specimenSweep(view, center, up)
+          if (!extent) return null
+          const { hMin, hMax, radius } = extent
+          let x0 = Infinity
+          let x1 = -Infinity
+          let y0 = Infinity
+          let y1 = -Infinity
+          for (let k = 0; k < 24; k++) {
+            const a = (k / 24) * 2 * Math.PI
+            const c = Math.cos(a) * radius
+            const sn = Math.sin(a) * radius
+            for (const h of [hMin, hMax]) {
+              const p = [0, 1, 2].map((i) => center[i] + up[i] * h + right[i] * c + dir[i] * sn)
+              const d = renderWindow.worldToDisplay(p[0], p[1], p[2], view.getRenderer())
+              x0 = Math.min(x0, d[0])
+              x1 = Math.max(x1, d[0])
+              y0 = Math.min(y0, height - d[1])
+              y1 = Math.max(y1, height - d[1])
+            }
+          }
+          const margin = 0.04 * Math.max(x1 - x0, y1 - y0)
+          const left = Math.max(0, Math.floor(x0 - margin))
+          const top = Math.max(0, Math.floor(y0 - margin))
+          const rect = { x: left, y: top, width: Math.min(width, Math.ceil(x1 + margin)) - left, height: Math.min(height, Math.ceil(y1 + margin)) - top }
+          return rect.width > 16 && rect.height > 16 ? rect : null
+        } catch {
+          return null
+        }
+      },
       viewHeightMm: () => {
         try {
           const view = volumeViewerRef.current?.getViewProxy() as unknown as VtkCameraView | undefined
@@ -1135,6 +1240,8 @@ export function useItkVtkViewer() {
     }),
     [scheduleRender]
   )
+
+  if (import.meta.env.DEV) (window as unknown as { __captureTarget?: CaptureTarget }).__captureTarget = captureTarget
 
   /** The segment name the voxel render shows at a screen point, or null
    *  (see lib/volumePick.ts). */

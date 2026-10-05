@@ -17,6 +17,10 @@ export interface CaptureTarget {
   onFrame: (draw: (canvas: HTMLCanvasElement) => void) => () => void
   /** Renders a frame soon. */
   requestRender: () => void
+  /** The part of the canvas (canvas pixels) the subject can occupy while
+   *  recording -- recordings are cropped to it with "Fit" on; null for the
+   *  whole view. */
+  contentRect?: () => { x: number; y: number; width: number; height: number } | null
 }
 
 function formatDuration(ms: number): string {
@@ -41,6 +45,8 @@ export function CaptureBar({
 }) {
   const [recording, setRecording] = useState<{ rec: CanvasRecording; since: number } | null>(null)
   const [turntable, setTurntable] = useState(false)
+  // Recordings cropped to the subject (see CaptureTarget.contentRect).
+  const [fit, setFit] = useState(true)
   const [now, setNow] = useState(() => Date.now())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -109,7 +115,20 @@ export function CaptureBar({
     }
     try {
       const view = target!
-      const rec = startCompositeRecording(canvas, view.onFrame, view.requestRender, (ctx, w, h) => drawScaleBar(ctx, w, h, view.viewHeightMm()))
+      const crop = fit ? (view.contentRect?.() ?? null) : null
+      // The scale bar's mm-per-pixel is the full view's; a crop shows part of
+      // that height.
+      const heightShare = crop ? crop.height / canvas.height : 1
+      const rec = startCompositeRecording(
+        canvas,
+        view.onFrame,
+        view.requestRender,
+        (ctx, w, h) => {
+          const mm = view.viewHeightMm()
+          drawScaleBar(ctx, w, h, mm === null ? null : mm * heightShare)
+        },
+        crop
+      )
       setRecording({ rec, since: Date.now() })
       setNow(Date.now())
     } catch (e) {
@@ -150,6 +169,21 @@ export function CaptureBar({
         </svg>
         Turntable
       </button>
+      {target?.contentRect && (
+        <button
+          className={fit ? 'capture-button active' : 'capture-button'}
+          disabled={recording !== null}
+          aria-pressed={fit}
+          onClick={() => setFit((f) => !f)}
+          title={
+            fit
+              ? 'Recordings are cropped to the volume (with room for it to turn). Click to record the whole view.'
+              : 'Recordings show the whole view. Click to crop them to the volume.'
+          }
+        >
+          Fit
+        </button>
+      )}
       {error && <span className="capture-error">{error}</span>}
     </div>
   )
