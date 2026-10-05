@@ -176,6 +176,8 @@ interface LabelUpdate {
   weights?: Map<number, number>
   names?: Map<number, string>
   blend?: true
+  /** The user's own label blend (the toolbar slider). */
+  userBlend?: number
 }
 
 function sameEntries<K, V>(a: Map<K, V>, b: Map<K, V> | null): boolean {
@@ -317,6 +319,9 @@ export function useItkVtkViewer() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loadedName, setLoadedName] = useState<string | null>(null)
+  /** The user's label blend, for the toolbar slider: itk-vtk-viewer's own
+   *  value, or during a search focus the value the focus builds on. */
+  const [labelBlend, setLabelBlendState] = useState(0.5)
   /** Bumped for every viewer created (a Reload too), so per-viewer UI like
    *  the crop box starts over with it. */
   const [viewerGeneration, setViewerGeneration] = useState(0)
@@ -480,6 +485,14 @@ export function useItkVtkViewer() {
             }
           }
           volumeViewer.on('renderedImageAssigned', onImageUpdate)
+          // Keep the toolbar's blend slider in step with itk-vtk-viewer's own
+          // (its menu, a new label image). A search focus raises the blend
+          // itself; the slider keeps showing the user's value then.
+          volumeViewer.on('labelImageBlendChanged', () => {
+            const focus = focusBlendRef.current
+            const value = focus ? focus.base : volumeViewer.getLabelImageBlend()
+            if (typeof value === 'number') setLabelBlendState(value)
+          })
           onImageUpdate()
         } catch (e) {
           console.warn('Could not apply itk-vtk-viewer defaults:', e)
@@ -675,7 +688,7 @@ export function useItkVtkViewer() {
   flushLabelUpdateRef.current = () => {
     const viewer = volumeViewerRef.current
     if (!viewer || !labelImageReadyRef.current) return
-    const { weights, names, blend } = pendingLabelUpdate.current
+    const { weights, names, blend, userBlend } = pendingLabelUpdate.current
     pendingLabelUpdate.current = {}
     beginEditQuality()
     const rendersBefore = renderCountRef.current
@@ -697,7 +710,15 @@ export function useItkVtkViewer() {
         markLabelOpacityStale()
         viewer.setLabelImageWeights(weights)
       }
-      if (blend) applyFocusBlendRef.current()
+      if (userBlend !== undefined) {
+        // During a search focus it's the blend the focus builds on (and
+        // restores when it ends); otherwise the blend itself.
+        const focus = focusBlendRef.current
+        if (focus) focus.base = userBlend
+        else if (blendToRestoreRef.current !== null) blendToRestoreRef.current = userBlend
+        else viewer.setLabelImageBlend(userBlend)
+      }
+      if (blend || userBlend !== undefined) applyFocusBlendRef.current()
     } catch (e) {
       console.warn('Could not update label weights yet:', e)
     }
@@ -916,6 +937,14 @@ export function useItkVtkViewer() {
     [scheduleLabelUpdate]
   )
   const labelNamesRef = useRef(new Map<number, string>())
+  /** The toolbar's label blend slider. */
+  const setLabelBlend = useCallback(
+    (blend: number) => {
+      setLabelBlendState(blend)
+      scheduleLabelUpdate({ userBlend: blend })
+    },
+    [scheduleLabelUpdate]
+  )
   const setLabelNames = useCallback(
     (names: Map<number, string>) => {
       labelNamesRef.current = names
@@ -1134,6 +1163,8 @@ export function useItkVtkViewer() {
     setLabelNames,
     pickLabelName,
     setFocusBlend,
+    labelBlend,
+    setLabelBlend,
     captureTarget,
     cropTarget,
     setLabelColors,

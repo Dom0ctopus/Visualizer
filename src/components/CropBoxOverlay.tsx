@@ -18,13 +18,17 @@ export function CropBoxOverlay({
   target,
   enabled,
   resetToken,
-  rotateMode
+  rotateMode,
+  hidden = false
 }: {
   target: CropTarget
   enabled: boolean
   resetToken: number
   /** Plain drags turn the box too (not just Shift+drags). */
   rotateMode: boolean
+  /** The outline and handles hidden (the crop stays; Shift+drag still turns
+   *  the box) -- e.g. while recording. */
+  hidden?: boolean
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const boxRef = useRef<CropBox | null>(null)
@@ -168,7 +172,7 @@ export function CropBoxOverlay({
   )
 
   return (
-    <svg ref={svgRef} className="crop-box-overlay" style={{ display: enabled ? '' : 'none' }} aria-hidden="true">
+    <svg ref={svgRef} className="crop-box-overlay" style={{ display: enabled ? '' : 'none', visibility: hidden ? 'hidden' : undefined }} aria-hidden="true">
       {BOX_EDGES.map((_, i) => (
         <line key={i} className="crop-box-edge" />
       ))}

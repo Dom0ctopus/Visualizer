@@ -29,7 +29,16 @@ function formatDuration(ms: number): string {
  * scale bar (recordings: one that follows the zoom). Files download straight
  * away, named after the view and the time.
  */
-export function CaptureBar({ target, name }: { target: CaptureTarget | null; name: string }) {
+export function CaptureBar({
+  target,
+  name,
+  onRecordingChange
+}: {
+  target: CaptureTarget | null
+  name: string
+  /** Told when a recording starts and stops (e.g. to hide editing overlays). */
+  onRecordingChange?: (recording: boolean) => void
+}) {
   const [recording, setRecording] = useState<{ rec: CanvasRecording; since: number } | null>(null)
   const [turntable, setTurntable] = useState(false)
   const [now, setNow] = useState(() => Date.now())
@@ -37,6 +46,11 @@ export function CaptureBar({ target, name }: { target: CaptureTarget | null; nam
   const [error, setError] = useState<string | null>(null)
   const recordingRef = useRef(recording)
   recordingRef.current = recording
+
+  const isRecording = recording !== null
+  useEffect(() => {
+    onRecordingChange?.(isRecording)
+  }, [isRecording, onRecordingChange])
 
   useEffect(() => {
     if (!recording) return

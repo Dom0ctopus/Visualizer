@@ -240,12 +240,18 @@ export function ItkVtkViewerPage() {
     pickLabelName,
     captureTarget,
     cropTarget,
-    setFocusBlend
+    setFocusBlend,
+    labelBlend,
+    setLabelBlend
   } = useItkVtkViewer()
   // The voxel render's rotatable crop box (CropBoxOverlay).
   const [cropOn, setCropOn] = useState(false)
   const [cropReset, setCropReset] = useState(0)
   const [cropRotate, setCropRotate] = useState(false)
+  // The box's outline and dots can be hidden (the crop stays), and are while
+  // the voxel render is recording.
+  const [cropHidden, setCropHidden] = useState(false)
+  const [voxelRecording, setVoxelRecording] = useState(false)
 
   // Hover in the voxel render names the segment under the pointer, as in
   // the 2D panes (lib/volumePick.ts casts the ray). Throttled to one pick
@@ -754,8 +760,8 @@ export function ItkVtkViewerPage() {
               <div className={renderTab === 'voxel' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
                 <div ref={volumeContainerRef} className="itk-volume-container" />
                 {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
-                {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} />}
-                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} />}
+                {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} onRecordingChange={setVoxelRecording} />}
+                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} hidden={cropHidden || voxelRecording} />}
                 {(loadedName || zarrSeg.segmentations.length > 0) && (
                   <div className="render-toolbar">
                     {loadedName && (
@@ -781,6 +787,14 @@ export function ItkVtkViewerPage() {
                             <button className="btn btn-secondary btn-small" title="Back to a box around the whole volume" onClick={() => setCropReset((n) => n + 1)}>
                               Reset
                             </button>
+                            <button
+                              className={cropHidden ? 'btn btn-secondary btn-small active' : 'btn btn-secondary btn-small'}
+                              aria-pressed={cropHidden}
+                              title="Hide the box's outline and dots; the crop stays (they also hide while recording)"
+                              onClick={() => setCropHidden((h) => !h)}
+                            >
+                              Hide box
+                            </button>
                             <span className="render-toolbar-hint">
                               {cropRotate ? 'Drag to rotate the box' : 'Drag a dot to move a face · Shift+drag to rotate'}
                             </span>
@@ -789,6 +803,13 @@ export function ItkVtkViewerPage() {
                       </span>
                     )}
                     {zarrSeg.segmentations.length > 0 && colorToggle(true)}
+                    {zarrSeg.segmentations.length > 0 && (
+                      <label className="focus-slider" title="Label image blend: how much the segments stand out from the unlabeled tissue (the same setting as in the viewer's own menu)">
+                        <span className="render-toolbar-label">Blend</span>
+                        <input type="range" min={0} max={1} step={0.01} value={labelBlend} onChange={(e) => setLabelBlend(Number(e.target.value))} />
+                        <b>{Math.round(labelBlend * 100)}%</b>
+                      </label>
+                    )}
                     {focusKeys && focusSlider}
                     {mergeStatus === 'pending' && <span className="render-toolbar-hint">Colors apply once the combined label map is built</span>}
                   </div>
