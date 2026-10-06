@@ -193,3 +193,26 @@ export function fetchLayerStats(segmentationId: string, layer: number): Promise<
   }
   return pending
 }
+
+/** A volume's saved default crop box (server/src/cropDefaults.ts): world
+ *  mm, the same shape as lib/cropBox.ts's CropBox. */
+export interface CropDefault {
+  center: [number, number, number]
+  half: [number, number, number]
+  axes: [[number, number, number], [number, number, number], [number, number, number]]
+}
+
+export async function fetchCropDefault(volumeId: string): Promise<CropDefault | null> {
+  const data = await handleJson<{ crop: CropDefault | null }>(await fetch(`/api/volumes/${volumeId}/crop-default`))
+  return data.crop
+}
+
+export async function saveCropDefault(volumeId: string, crop: CropDefault): Promise<void> {
+  await handleJson(
+    await fetch(`/api/volumes/${volumeId}/crop-default`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(crop) })
+  )
+}
+
+export async function clearCropDefault(volumeId: string): Promise<void> {
+  await handleJson(await fetch(`/api/volumes/${volumeId}/crop-default`, { method: 'DELETE' }))
+}

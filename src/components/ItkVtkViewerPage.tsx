@@ -8,8 +8,13 @@ import {
   zarrUrl,
   type JobKind,
   type JobQueueState,
-  type MergeProgress
+  type MergeProgress,
+  fetchCropDefault,
+  saveCropDefault,
+  clearCropDefault,
+  type CropDefault
 } from '../lib/api'
+import { boxEulerXYZ, type CropBox } from '../lib/cropBox'
 import { useItkVtkViewer } from '../hooks/useItkVtkViewer'
 import { useSegmentationMerge3D } from '../hooks/useSegmentationMerge3D'
 import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
@@ -264,6 +269,70 @@ export function ItkVtkViewerPage() {
   }
   const stopWipe = () => setWipe((w) => (w ? { ...w, id: Date.now(), direction: 'stop' } : null))
   const onWipeEnd = useCallback(() => setWiping(false), [])
+  // The volume's saved default crop box (its angle for a tilted specimen):
+  // where the box starts and Reset returns to.
+  const [cropDefault, setCropDefault] = useState<CropDefault | null>(null)
+  const [cropBoxNow, setCropBoxNow] = useState<CropBox | null>(null)
+  const [cropNote, setCropNote] = useState<string | null>(null)
+  useEffect(() => {
+    setCropDefault(null)
+    setCropBoxNow(null)
+    if (!activeVolumeId) return
+    let cancelled = false
+    fetchCropDefault(activeVolumeId)
+      .then((crop) => {
+        if (!cancelled) setCropDefault(crop)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [activeVolumeId])
+  const flashCropNote = (note: string) => {
+    setCropNote(note)
+    window.setTimeout(() => setCropNote((n) => (n === note ? null : n)), 2500)
+  }
+  const saveCropBoxAsDefault = async () => {
+    if (!activeVolumeId || !cropBoxNow) return
+    const crop: CropDefault = { center: cropBoxNow.center, half: cropBoxNow.half, axes: cropBoxNow.axes }
+    try {
+      await saveCropDefault(activeVolumeId, crop)
+      setCropDefault(crop)
+      flashCropNote('Saved as this volume’s default')
+    } catch (e) {
+      flashCropNote(e instanceof Error ? e.message : 'Could not save')
+    }
+  }
+  const clearCropBoxDefault = async () => {
+    if (!activeVolumeId) return
+    try {
+      await clearCropDefault(activeVolumeId)
+      setCropDefault(null)
+      flashCropNote('Default cleared')
+    } catch (e) {
+      flashCropNote(e instanceof Error ? e.message : 'Could not clear')
+    }
+  }
+  const copyCropBoxValues = async () => {
+    if (!cropBoxNow) return
+    const [rx, ry, rz] = boxEulerXYZ(cropBoxNow)
+    const text = JSON.stringify(
+      {
+        rotationDegXYZ: { x: rx, y: ry, z: rz, order: 'x then y then z, about the world axes' },
+        centerMm: cropBoxNow.center,
+        sizeMm: cropBoxNow.half.map((h) => h * 2),
+        axes: cropBoxNow.axes
+      },
+      null,
+      2
+    )
+    try {
+      await navigator.clipboard.writeText(text)
+      flashCropNote('Copied')
+    } catch {
+      window.prompt('Crop box values', text)
+    }
+  }
 
   // Hover in the voxel render names the segment under the pointer, as in
   // the 2D panes (lib/volumePick.ts casts the ray). Throttled to one pick
@@ -773,7 +842,7 @@ export function ItkVtkViewerPage() {
                 <div ref={volumeContainerRef} className="itk-volume-container" />
                 {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
                 {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} onRecordingChange={setVoxelRecording} />}
-                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} hidden={cropHidden || voxelRecording} selectedFace={wipeFace} onSelectFace={setWipeFace} wipe={wipe} onWipeEnd={onWipeEnd} />}
+                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} hidden={cropHidden || voxelRecording} selectedFace={wipeFace} onSelectFace={setWipeFace} wipe={wipe} onWipeEnd={onWipeEnd} initialBox={cropDefault} onBoxCommit={setCropBoxNow} />}
                 {(loadedName || zarrSeg.segmentations.length > 0) && (
                   <div className="render-toolbar">
                     {loadedName && (
@@ -796,9 +865,29 @@ export function ItkVtkViewerPage() {
                             >
                               Rotate box
                             </button>
-                            <button className="btn btn-secondary btn-small" title="Back to a box around the whole volume" onClick={() => setCropReset((n) => n + 1)}>
+                            <button
+                              className="btn btn-secondary btn-small"
+                              title={cropDefault ? 'Back to this volume’s saved default box' : 'Back to a box around the whole volume'}
+                              onClick={() => setCropReset((n) => n + 1)}
+                            >
                               Reset
                             </button>
+                            <button className="btn btn-secondary btn-small" disabled={!cropBoxNow} title="Start this volume’s crop box at this angle, size and position from now on" onClick={() => void saveCropBoxAsDefault()}>
+                              Save as default
+                            </button>
+                            {cropDefault && (
+                              <button className="btn btn-secondary btn-small" title="Forget the saved default (the box starts around the whole volume)" onClick={() => void clearCropBoxDefault()}>
+                                Clear default
+                              </button>
+                            )}
+                            <button className="btn btn-secondary btn-small" disabled={!cropBoxNow} title="Copy the box's rotation angles, center, size and axes" onClick={() => void copyCropBoxValues()}>
+                              Copy values
+                            </button>
+                            {cropBoxNow && (
+                              <span className="render-toolbar-hint" title="Rotations about the world x, y, z axes, applied in that order">
+                                {cropNote ?? `Tilt ${boxEulerXYZ(cropBoxNow).map((d) => `${d.toFixed(1)}°`).join(' ')}`}
+                              </span>
+                            )}
                             <button
                               className={cropHidden ? 'btn btn-secondary btn-small active' : 'btn btn-secondary btn-small'}
                               aria-pressed={cropHidden}

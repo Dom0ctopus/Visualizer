@@ -4,6 +4,7 @@ import multer from 'multer'
 import { rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
+import { parseCropDefault, readCropDefault, removeCropDefault, writeCropDefault } from './cropDefaults.js'
 import { enqueueJob, getJobQueueState, JobPreemptedError } from './jobQueue.js'
 import { readNrrdHeader } from './nrrdHeader.js'
 import { getLayerStats } from './segmentStats.js'
@@ -393,6 +394,36 @@ app.get('/api/segmentation-merges', (_req, res) => {
   res.json(currentMerge ?? { status: 'none' })
 })
 
+// A volume's saved default crop box (see cropDefaults.ts).
+app.get('/api/volumes/:id/crop-default', async (req, res) => {
+  const record = getRecord(req.params.id)
+  if (!record || record.kind !== 'volume') {
+    res.status(404).json({ error: 'No volume with that id' })
+    return
+  }
+  res.json({ crop: await readCropDefault(record.id) })
+})
+
+app.put('/api/volumes/:id/crop-default', express.json(), async (req, res) => {
+  const record = getRecord(req.params.id)
+  if (!record || record.kind !== 'volume') {
+    res.status(404).json({ error: 'No volume with that id' })
+    return
+  }
+  const crop = parseCropDefault(req.body)
+  if (!crop) {
+    res.status(400).json({ error: 'Expected { center, half, axes } as 3-vectors (half > 0)' })
+    return
+  }
+  await writeCropDefault(record.id, crop)
+  res.json({ crop })
+})
+
+app.delete('/api/volumes/:id/crop-default', async (req, res) => {
+  await removeCropDefault(req.params.id)
+  res.json({ ok: true })
+})
+
 app.delete('/api/files/:id', async (req, res) => {
   const removed = await removeRecord(req.params.id)
   if (!removed) {
@@ -411,6 +442,7 @@ app.delete('/api/files/:id', async (req, res) => {
   const rmOptions = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 } as const
   if (removed.kind === 'volume') {
     await rm(zarrPathFor(removed.id), rmOptions)
+    await removeCropDefault(removed.id)
   } else {
     await rm(segZarrPathFor(removed.id), rmOptions)
     await rm(meshDirFor(removed.id), rmOptions)

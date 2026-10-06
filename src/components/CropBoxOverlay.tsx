@@ -33,7 +33,9 @@ export function CropBoxOverlay({
   selectedFace = null,
   onSelectFace,
   wipe = null,
-  onWipeEnd
+  onWipeEnd,
+  initialBox = null,
+  onBoxCommit
 }: {
   target: CropTarget
   enabled: boolean
@@ -49,6 +51,12 @@ export function CropBoxOverlay({
   wipe?: WipeCommand | null
   /** A wipe finished or was stopped. */
   onWipeEnd?: () => void
+  /** The box to start (and Reset) from -- the volume's saved default; a box
+   *  around the whole volume when null. */
+  initialBox?: CropBox | null
+  /** The box after each change settles (a drag, rotation or wipe ends, a
+   *  reset): for saving it, or showing its values. */
+  onBoxCommit?: (box: CropBox) => void
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const boxRef = useRef<CropBox | null>(null)
@@ -60,10 +68,13 @@ export function CropBoxOverlay({
   useEffect(() => {
     rotateModeRef.current = rotateMode
   }, [rotateMode])
-  const callbacksRef = useRef({ onSelectFace, onWipeEnd, selectedFace })
+  const callbacksRef = useRef({ onSelectFace, onWipeEnd, selectedFace, initialBox, onBoxCommit })
   useEffect(() => {
-    callbacksRef.current = { onSelectFace, onWipeEnd, selectedFace }
-  }, [onSelectFace, onWipeEnd, selectedFace])
+    callbacksRef.current = { onSelectFace, onWipeEnd, selectedFace, initialBox, onBoxCommit }
+  }, [onSelectFace, onWipeEnd, selectedFace, initialBox, onBoxCommit])
+  const commit = () => {
+    if (boxRef.current) callbacksRef.current.onBoxCommit?.(boxRef.current)
+  }
   // Set up by the main effect, for wipes: the box re-applied, and its limits.
   const geometryRef = useRef<{ apply: () => void; minHalf: number; bounds: number[] } | null>(null)
 
@@ -79,7 +90,7 @@ export function CropBoxOverlay({
       const timer = window.setTimeout(() => setRetry((n) => n + 1), 300)
       return () => window.clearTimeout(timer)
     }
-    if (!boxRef.current || resetRef.current !== resetToken) boxRef.current = boxFromBounds(bounds)
+    if (!boxRef.current || resetRef.current !== resetToken) boxRef.current = callbacksRef.current.initialBox ?? boxFromBounds(bounds)
     resetRef.current = resetToken
     const minHalf = 0.01 * Math.max(bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4])
     const lines = [...svg.querySelectorAll('line')]
@@ -108,6 +119,7 @@ export function CropBoxOverlay({
       draw()
     }
     apply()
+    commit()
     geometryRef.current = { apply, minHalf, bounds }
     const stopFrames = target.onFrame(draw)
 
@@ -144,6 +156,7 @@ export function CropBoxOverlay({
         handle.removeEventListener('pointerup', onUp)
         handle.removeEventListener('pointercancel', onUp)
         target.endInteraction()
+        if (moved) commit()
         if (!moved) {
           const { onSelectFace, selectedFace } = callbacksRef.current
           onSelectFace?.(selectedFace === face ? null : face)
@@ -184,6 +197,7 @@ export function CropBoxOverlay({
         window.removeEventListener('pointerup', onUp, true)
         window.removeEventListener('pointercancel', onUp, true)
         target.endInteraction()
+        commit()
       }
       window.addEventListener('pointermove', onMove, true)
       window.addEventListener('pointerup', onUp, true)
@@ -202,7 +216,10 @@ export function CropBoxOverlay({
   // slow frame shows the face further along instead of slowing the wipe.
   useEffect(() => {
     if (!wipe || wipe.direction === 'stop') {
-      if (wipe) callbacksRef.current.onWipeEnd?.()
+      if (wipe) {
+        callbacksRef.current.onWipeEnd?.()
+        commit()
+      }
       return
     }
     const geometry = geometryRef.current
@@ -239,7 +256,10 @@ export function CropBoxOverlay({
       boxRef.current = moveFace(start, face, distance * t, geometry.minHalf)
       geometry.apply()
       if (t < 1) timer = window.setTimeout(step, 16)
-      else callbacksRef.current.onWipeEnd?.()
+      else {
+        callbacksRef.current.onWipeEnd?.()
+        commit()
+      }
     }
     step()
     return () => window.clearTimeout(timer)

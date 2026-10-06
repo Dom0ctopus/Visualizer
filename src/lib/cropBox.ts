@@ -92,3 +92,15 @@ export function moveFace(box: CropBox, face: number, distance: number, minHalf: 
   newHalf[axis] = half
   return { ...box, half: newHalf, center: add(box.center, scale(faceOutwardNormal(box, face), moved / 2)) }
 }
+
+/** The box's tilt as rotations (degrees) about the world x, y and z axes,
+ *  applied in that order (x first), that turn the world axes into the box's
+ *  own: its rotation matrix (columns = box axes) is Rz * Ry * Rx. */
+export function boxEulerXYZ(box: CropBox): Vec3 {
+  const [a, b, c] = box.axes // R[row][col] = axes[col][row]
+  const deg = (r: number) => Math.round(((r * 180) / Math.PI) * 100) / 100
+  const ry = Math.asin(Math.max(-1, Math.min(1, -a[2])))
+  const rx = Math.atan2(b[2], c[2])
+  const rz = Math.atan2(a[1], a[0])
+  return [deg(rx), deg(ry), deg(rz)]
+}
