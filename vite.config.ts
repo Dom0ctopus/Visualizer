@@ -8,7 +8,10 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:8787',
-        changeOrigin: true
+        changeOrigin: true,
+        // The browser's address reaches the backend (X-Forwarded-For), which
+        // decides who may edit (server/src/editors.ts).
+        xfwd: true
       }
     }
   },
@@ -18,7 +21,10 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:8787',
-        changeOrigin: true
+        changeOrigin: true,
+        // The browser's address reaches the backend (X-Forwarded-For), which
+        // decides who may edit (server/src/editors.ts).
+        xfwd: true
       }
     }
   }

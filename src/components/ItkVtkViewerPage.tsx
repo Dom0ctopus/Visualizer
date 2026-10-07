@@ -12,7 +12,12 @@ import {
   fetchCropDefault,
   saveCropDefault,
   clearCropDefault,
-  type CropDefault
+  type CropDefault,
+  fetchConfig,
+  fetchRenderDefault,
+  saveRenderDefault,
+  clearRenderDefault,
+  type RenderDefault
 } from '../lib/api'
 import { boxEulerXYZ, type CropBox } from '../lib/cropBox'
 import { useItkVtkViewer } from '../hooks/useItkVtkViewer'
@@ -247,8 +252,20 @@ export function ItkVtkViewerPage() {
     cropTarget,
     setFocusBlend,
     labelBlend,
-    setLabelBlend
+    setLabelBlend,
+    setLabelBlendNow,
+    setRenderLook,
+    getRenderLook
   } = useItkVtkViewer()
+  // Editors (server/src/editors.ts: by default, whoever runs the server, on
+  // that machine) can change things; everyone else sees the saved look and
+  // a minimal set of controls.
+  const [editor, setEditor] = useState(false)
+  useEffect(() => {
+    fetchConfig()
+      .then((c) => setEditor(c.editor))
+      .catch(() => setEditor(false))
+  }, [])
   // The voxel render's rotatable crop box (CropBoxOverlay).
   const [cropOn, setCropOn] = useState(false)
   const [cropReset, setCropReset] = useState(0)
@@ -274,6 +291,82 @@ export function ItkVtkViewerPage() {
   const [cropDefault, setCropDefault] = useState<CropDefault | null>(null)
   const [cropBoxNow, setCropBoxNow] = useState<CropBox | null>(null)
   const [cropNote, setCropNote] = useState<string | null>(null)
+  // The volume's saved look (an editor's): applied as it loads.
+  const [renderDefault, setRenderDefault] = useState<RenderDefault | null>(null)
+  // Blend fade: the label blend sweeps between min and max over N seconds.
+  const [fadeMin, setFadeMin] = useState(0)
+  const [fadeMax, setFadeMax] = useState(1)
+  const [fadeSeconds, setFadeSeconds] = useState(5)
+  const [fading, setFading] = useState(false)
+  const fadeTimerRef = useRef(0)
+  useEffect(() => {
+    setRenderDefault(null)
+    setRenderLook(null)
+    if (!activeVolumeId) return
+    let cancelled = false
+    fetchRenderDefault(activeVolumeId)
+      .then((look) => {
+        if (cancelled || !look) return
+        setRenderDefault(look)
+        setRenderLook(look)
+        setFadeMin(look.fade.min)
+        setFadeMax(look.fade.max)
+        setFadeSeconds(look.fade.seconds)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [activeVolumeId, setRenderLook])
+  const stopFade = () => {
+    window.clearTimeout(fadeTimerRef.current)
+    fadeTimerRef.current = 0
+    setFading(false)
+  }
+  useEffect(() => () => window.clearTimeout(fadeTimerRef.current), [])
+  /** Sweeps the blend from one end of the fade range to the other, by the
+   *  clock (a slow frame shows it further along rather than slowing it). */
+  const startFade = (from: number, to: number) => {
+    window.clearTimeout(fadeTimerRef.current)
+    const duration = Math.max(0.1, fadeSeconds) * 1000
+    const t0 = performance.now()
+    setFading(true)
+    const step = () => {
+      const t = Math.min(1, (performance.now() - t0) / duration)
+      setLabelBlendNow(from + (to - from) * t, t >= 1)
+      if (t < 1) fadeTimerRef.current = window.setTimeout(step, 16)
+      else {
+        fadeTimerRef.current = 0
+        setFading(false)
+      }
+    }
+    step()
+  }
+  const [lookNote, setLookNote] = useState<string | null>(null)
+  const saveLookAsDefault = async () => {
+    const look = getRenderLook()
+    if (!activeVolumeId || !look) return
+    const full: RenderDefault = { ...look, fade: { min: fadeMin, max: fadeMax, seconds: fadeSeconds } }
+    try {
+      await saveRenderDefault(activeVolumeId, full)
+      setRenderDefault(full)
+      setLookNote('Look saved for this volume')
+    } catch (e) {
+      setLookNote(e instanceof Error ? e.message : 'Could not save')
+    }
+    window.setTimeout(() => setLookNote(null), 2500)
+  }
+  const clearLookDefault = async () => {
+    if (!activeVolumeId) return
+    try {
+      await clearRenderDefault(activeVolumeId)
+      setRenderDefault(null)
+      setLookNote('Saved look cleared (built-in defaults on next load)')
+    } catch (e) {
+      setLookNote(e instanceof Error ? e.message : 'Could not clear')
+    }
+    window.setTimeout(() => setLookNote(null), 2500)
+  }
   useEffect(() => {
     setCropDefault(null)
     setCropBoxNow(null)
@@ -388,7 +481,6 @@ export function ItkVtkViewerPage() {
     setXIndex,
     stepXIndex,
     setLevel,
-    inspectNativeHere,
     exitDetailWindow,
     axialSlice,
     coronalSlice,
@@ -720,17 +812,9 @@ export function ItkVtkViewerPage() {
                     value={zIndex}
                     onChange={(e) => setZIndex(Number(e.target.value))}
                   />
-                  {detailWindow ? (
+                  {detailWindow && (
                     <button className="btn btn-secondary btn-small" onClick={exitDetailWindow}>
                       Back to overview
-                    </button>
-                  ) : (
-                    <button
-                      className="btn btn-secondary btn-small"
-                      onClick={() => inspectNativeHere()}
-                      title="Load native resolution for the 50 slices on each side of this one"
-                    >
-                      Inspect here
                     </button>
                   )}
                 </div>
@@ -839,7 +923,7 @@ export function ItkVtkViewerPage() {
               {/* Both tabs stay mounted and sized (visibility, not display:none),
                   so switching never reloads or re-lays-out either renderer. */}
               <div className={renderTab === 'voxel' ? 'render-tab-panel' : 'render-tab-panel inactive'}>
-                <div ref={volumeContainerRef} className="itk-volume-container" />
+                <div ref={volumeContainerRef} className={editor ? 'itk-volume-container' : 'itk-volume-container itk-locked'} />
                 {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
                 {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} onRecordingChange={setVoxelRecording} />}
                 {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} hidden={cropHidden || voxelRecording} selectedFace={wipeFace} onSelectFace={setWipeFace} wipe={wipe} onWipeEnd={onWipeEnd} initialBox={cropDefault} onBoxCommit={setCropBoxNow} />}
@@ -872,21 +956,25 @@ export function ItkVtkViewerPage() {
                             >
                               Reset
                             </button>
-                            <button className="btn btn-secondary btn-small" disabled={!cropBoxNow} title="Start this volume’s crop box at this angle, size and position from now on" onClick={() => void saveCropBoxAsDefault()}>
-                              Save as default
-                            </button>
-                            {cropDefault && (
-                              <button className="btn btn-secondary btn-small" title="Forget the saved default (the box starts around the whole volume)" onClick={() => void clearCropBoxDefault()}>
-                                Clear default
-                              </button>
-                            )}
-                            <button className="btn btn-secondary btn-small" disabled={!cropBoxNow} title="Copy the box's rotation angles, center, size and axes" onClick={() => void copyCropBoxValues()}>
-                              Copy values
-                            </button>
-                            {cropBoxNow && (
-                              <span className="render-toolbar-hint" title="Rotations about the world x, y, z axes, applied in that order">
-                                {cropNote ?? `Tilt ${boxEulerXYZ(cropBoxNow).map((d) => `${d.toFixed(1)}°`).join(' ')}`}
-                              </span>
+                            {editor && (
+                              <>
+                                <button className="btn btn-secondary btn-small" disabled={!cropBoxNow} title="Start this volume’s crop box at this angle, size and position from now on" onClick={() => void saveCropBoxAsDefault()}>
+                                  Save as default
+                                </button>
+                                {cropDefault && (
+                                  <button className="btn btn-secondary btn-small" title="Forget the saved default (the box starts around the whole volume)" onClick={() => void clearCropBoxDefault()}>
+                                    Clear default
+                                  </button>
+                                )}
+                                <button className="btn btn-secondary btn-small" disabled={!cropBoxNow} title="Copy the box's rotation angles, center, size and axes" onClick={() => void copyCropBoxValues()}>
+                                  Copy values
+                                </button>
+                                {cropBoxNow && (
+                                  <span className="render-toolbar-hint" title="Rotations about the world x, y, z axes, applied in that order">
+                                    {cropNote ?? `Tilt ${boxEulerXYZ(cropBoxNow).map((d) => `${d.toFixed(1)}°`).join(' ')}`}
+                                  </span>
+                                )}
+                              </>
                             )}
                             <button
                               className={cropHidden ? 'btn btn-secondary btn-small active' : 'btn btn-secondary btn-small'}
@@ -943,6 +1031,77 @@ export function ItkVtkViewerPage() {
                         <b>{Math.round(labelBlend * 100)}%</b>
                       </label>
                     )}
+                    {zarrSeg.segmentations.length > 0 && (
+                      <span className="crop-controls" title="Sweep the blend between two values at a steady speed">
+                        <span className="render-toolbar-label">Fade</span>
+                        <input
+                          className="crop-wipe-seconds"
+                          type="number"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={Math.round(fadeMin * 100)}
+                          aria-label="Fade minimum blend, percent"
+                          title="Lowest blend (%)"
+                          onChange={(e) => setFadeMin(Math.min(1, Math.max(0, (Number(e.target.value) || 0) / 100)))}
+                        />
+                        <span className="render-toolbar-hint">–</span>
+                        <input
+                          className="crop-wipe-seconds"
+                          type="number"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={Math.round(fadeMax * 100)}
+                          aria-label="Fade maximum blend, percent"
+                          title="Highest blend (%)"
+                          onChange={(e) => setFadeMax(Math.min(1, Math.max(0, (Number(e.target.value) || 0) / 100)))}
+                        />
+                        <span className="render-toolbar-hint">% in</span>
+                        <input
+                          className="crop-wipe-seconds"
+                          type="number"
+                          min={0.5}
+                          max={600}
+                          step={0.5}
+                          value={fadeSeconds}
+                          aria-label="Fade duration in seconds"
+                          onChange={(e) => setFadeSeconds(Math.max(0.5, Number(e.target.value) || 0.5))}
+                        />
+                        <span className="render-toolbar-hint">s</span>
+                        {fading ? (
+                          <button className="btn btn-secondary btn-small active" onClick={stopFade}>
+                            Stop
+                          </button>
+                        ) : (
+                          <>
+                            <button className="btn btn-secondary btn-small" title="Blend from the lowest to the highest value" onClick={() => startFade(fadeMin, fadeMax)}>
+                              Grow
+                            </button>
+                            <button className="btn btn-secondary btn-small" title="Blend from the highest to the lowest value" onClick={() => startFade(fadeMax, fadeMin)}>
+                              Fade
+                            </button>
+                          </>
+                        )}
+                      </span>
+                    )}
+                    {editor && loadedName && (
+                      <span className="crop-controls">
+                        <button
+                          className="btn btn-secondary btn-small"
+                          title="Everyone who opens this volume starts with this look: opacity curve, color range, sample distance, scattering, blend and the fade settings"
+                          onClick={() => void saveLookAsDefault()}
+                        >
+                          Save look
+                        </button>
+                        {renderDefault && (
+                          <button className="btn btn-secondary btn-small" title="Forget the saved look (built-in defaults on next load)" onClick={() => void clearLookDefault()}>
+                            Clear look
+                          </button>
+                        )}
+                        {lookNote && <span className="render-toolbar-hint">{lookNote}</span>}
+                      </span>
+                    )}
                     {focusKeys && focusSlider}
                     {mergeStatus === 'pending' && <span className="render-toolbar-hint">Colors apply once the combined label map is built</span>}
                   </div>
@@ -979,6 +1138,7 @@ export function ItkVtkViewerPage() {
       <aside className="sidebar">
         {combinedError && <div className="error-banner">{combinedError}</div>}
 
+        {editor && (
         <section className="panel">
           <h2 className="panel-title">Upload</h2>
           <div className="library-upload-row">
@@ -1019,6 +1179,7 @@ export function ItkVtkViewerPage() {
             pyramid (and, for segmentations, surface meshes) before it can be loaded.
           </p>
         </section>
+        )}
 
         <section className="panel">
           <h2 className="panel-title">Volumes</h2>
@@ -1043,9 +1204,11 @@ export function ItkVtkViewerPage() {
                 >
                   {record.id === activeVolumeId ? 'Reload' : 'Load'}
                 </button>
-                <button className="icon-btn" onClick={() => void handleRemove(record)} title="Remove from library">
-                  ✕
-                </button>
+                {editor && (
+                  <button className="icon-btn" onClick={() => void handleRemove(record)} title="Remove from library">
+                    ✕
+                  </button>
+                )}
               </li>
             ))}
           </ul>
@@ -1077,9 +1240,11 @@ export function ItkVtkViewerPage() {
                   >
                     {alreadyLoaded ? 'Loaded' : 'Load'}
                   </button>
-                  <button className="icon-btn" onClick={() => void handleRemove(record)} title="Remove from library">
-                    ✕
-                  </button>
+                  {editor && (
+                    <button className="icon-btn" onClick={() => void handleRemove(record)} title="Remove from library">
+                      ✕
+                    </button>
+                  )}
                 </li>
               )
             })}
@@ -1168,10 +1333,7 @@ export function ItkVtkViewerPage() {
         {levels && levels.length > 1 && (
           <section className="panel">
             <h2 className="panel-title">Resolution</h2>
-            <p className="panel-hint">
-              Fly through at a coarser level for speed, then "Inspect here" (on the Axial pane) to drill into native
-              resolution around wherever you land.
-            </p>
+            <p className="panel-hint">The 2D panes' resolution: coarser levels load faster.</p>
             <div className="tf-row resolution-levels">
               {levels.map((level) => (
                 <button

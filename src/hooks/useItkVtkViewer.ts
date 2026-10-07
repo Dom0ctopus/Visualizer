@@ -47,6 +47,9 @@ interface ItkVtkViewerInstance {
   setImageVolumeSampleDistance: (distance: number) => void
   setImageVolumeScatteringBlend: (blend: number) => void
   setImagePiecewiseFunctionPoints: (points: Array<[number, number]>) => void
+  getImageVolumeSampleDistance: () => number
+  getImageVolumeScatteringBlend: () => number
+  getImagePiecewiseFunctionPoints: () => Array<[number, number]> | undefined
   on: (event: string, callback: () => void) => void
   setLabelImageLookupTable: (lookupTable: string) => void
   /** PNG data URL of the render (the vtk.js view's captureImage). */
@@ -253,6 +256,17 @@ const DEFAULT_OPACITY_POINTS: Array<[number, number]> = [
   [0.95, 0.57]
 ]
 
+/** A volume's look in the voxel render (an editor's saved default, see
+ *  server/src/renderDefaults.ts), minus the blend fade the page owns. */
+export interface RenderLook {
+  opacityPoints: Array<[number, number]>
+  /** Null: the volume's whole range. */
+  colorRange: [number, number] | null
+  sampleDistance: number
+  scattering: number
+  labelBlend: number
+}
+
 const ITK_MAX_VOXELS = 268_435_456
 const ITK_MAX_BYTES = 536_870_912
 
@@ -376,6 +390,13 @@ export function useItkVtkViewer() {
   /** The user's label blend, for the toolbar slider: itk-vtk-viewer's own
    *  value, or during a search focus the value the focus builds on. */
   const [labelBlend, setLabelBlendState] = useState(0.5)
+  const labelBlendRef = useRef(0.5)
+  labelBlendRef.current = labelBlend
+  /** The volume's saved look (setRenderLook), applied as it loads; the
+   *  built-in defaults when null. */
+  const renderLookRef = useRef<RenderLook | null>(null)
+  /** Re-applies the look to the current viewer (set per viewer). */
+  const applyLookNowRef = useRef<() => void>(() => {})
   /** Bumped for every viewer created (a Reload too), so per-viewer UI like
    *  the crop box starts over with it. */
   const [viewerGeneration, setViewerGeneration] = useState(0)
@@ -499,11 +520,27 @@ export function useItkVtkViewer() {
           const applyFullRange = () => {
             const current = volumeViewer.getImageColorRange()
             if (rangeSet && current && (current[0] !== rangeSet[0] || current[1] !== rangeSet[1])) return
-            const range: [number, number] | undefined = levels[0].dtype === '|u1' ? [0, 255] : volumeViewer.getImageColorRangeBounds()
+            const range: [number, number] | undefined =
+              renderLookRef.current?.colorRange ?? (levels[0].dtype === '|u1' ? [0, 255] : volumeViewer.getImageColorRangeBounds())
             if (!range || !Number.isFinite(range[0]) || !Number.isFinite(range[1])) return
             rangeSet = [range[0], range[1]]
             if (current && current[0] === range[0] && current[1] === range[1]) return
             volumeViewer.setImageColorRange(rangeSet)
+          }
+          // The saved look (or the built-in defaults) -- its curve, sampling
+          // and scattering; the range follows via applyFullRange.
+          const applyLook = () => {
+            const look = renderLookRef.current
+            volumeViewer.setImageVolumeSampleDistance(look?.sampleDistance ?? DEFAULT_SAMPLE_DISTANCE)
+            volumeViewer.setImageVolumeScatteringBlend(look?.scattering ?? DEFAULT_SCATTERING)
+            volumeViewer.setImagePiecewiseFunctionPoints(look?.opacityPoints ?? DEFAULT_OPACITY_POINTS)
+            lookApplied = true
+          }
+          applyLookNowRef.current = () => {
+            if (!volumeViewer.getImageColorRangeBounds()) return // applied once the image is in
+            rangeSet = null
+            applyFullRange()
+            applyLook()
           }
           const onImageUpdate = () => {
             // Catches the first label render, before the transfer function
@@ -518,12 +555,7 @@ export function useItkVtkViewer() {
                 applyCropPlanesRef.current()
                 // The starting look, once the image exists (its settings
                 // live with the image in itk-vtk-viewer).
-                if (!lookApplied && volumeViewer.getImageColorRangeBounds()) {
-                  volumeViewer.setImageVolumeSampleDistance(DEFAULT_SAMPLE_DISTANCE)
-                  volumeViewer.setImageVolumeScatteringBlend(DEFAULT_SCATTERING)
-                  volumeViewer.setImagePiecewiseFunctionPoints(DEFAULT_OPACITY_POINTS)
-                  lookApplied = true
-                }
+                if (!lookApplied && volumeViewer.getImageColorRangeBounds()) applyLook()
               } catch {
                 // viewer mid-update; next image update
               }
@@ -999,6 +1031,66 @@ export function useItkVtkViewer() {
     },
     [scheduleLabelUpdate]
   )
+  /** The blend set right away, not throttled like the slider -- for the
+   *  blend fade, one step per ~16 ms. The slider follows every ~100 ms (and
+   *  on the `final` step), not on every step, sparing the page re-renders. */
+  const blendStateTimeRef = useRef(0)
+  const setLabelBlendNow = useCallback(
+    (blend: number, final = false) => {
+      const viewer = volumeViewerRef.current
+      const now = performance.now()
+      if (final || now - blendStateTimeRef.current > 100) {
+        blendStateTimeRef.current = now
+        setLabelBlendState(blend)
+      }
+      if (!viewer || !labelImageReadyRef.current) {
+        scheduleLabelUpdate({ userBlend: blend })
+        return
+      }
+      try {
+        const focus = focusBlendRef.current
+        if (focus) focus.base = blend
+        else if (blendToRestoreRef.current !== null) blendToRestoreRef.current = blend
+        else viewer.setLabelImageBlend(blend)
+        applyFocusBlendRef.current()
+      } catch {
+        // viewer mid-update
+      }
+    },
+    [scheduleLabelUpdate]
+  )
+  /** Apply a volume's saved look (null: the built-in defaults). */
+  const setRenderLook = useCallback(
+    (look: RenderLook | null) => {
+      renderLookRef.current = look
+      try {
+        applyLookNowRef.current()
+      } catch {
+        // viewer mid-update; applied as the image loads
+      }
+      if (look) setLabelBlend(look.labelBlend)
+    },
+    [setLabelBlend]
+  )
+  /** The current look, for saving as the volume's default. */
+  const getRenderLook = useCallback((): RenderLook | null => {
+    const viewer = volumeViewerRef.current
+    if (!viewer) return null
+    try {
+      const points = viewer.getImagePiecewiseFunctionPoints()
+      const range = viewer.getImageColorRange()
+      if (!points) return null
+      return {
+        opacityPoints: points.map(([x, y]) => [x, y] as [number, number]),
+        colorRange: range ? [range[0], range[1]] : null,
+        sampleDistance: viewer.getImageVolumeSampleDistance(),
+        scattering: viewer.getImageVolumeScatteringBlend(),
+        labelBlend: labelBlendRef.current
+      }
+    } catch {
+      return null
+    }
+  }, [])
   const setLabelNames = useCallback(
     (names: Map<number, string>) => {
       labelNamesRef.current = names
@@ -1272,6 +1364,9 @@ export function useItkVtkViewer() {
     setFocusBlend,
     labelBlend,
     setLabelBlend,
+    setLabelBlendNow,
+    setRenderLook,
+    getRenderLook,
     captureTarget,
     cropTarget,
     setLabelColors,

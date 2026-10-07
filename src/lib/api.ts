@@ -216,3 +216,33 @@ export async function saveCropDefault(volumeId: string, crop: CropDefault): Prom
 export async function clearCropDefault(volumeId: string): Promise<void> {
   await handleJson(await fetch(`/api/volumes/${volumeId}/crop-default`, { method: 'DELETE' }))
 }
+
+/** Whether this browser may change things (server/src/editors.ts). */
+export async function fetchConfig(): Promise<{ editor: boolean }> {
+  return handleJson<{ editor: boolean }>(await fetch('/api/config'))
+}
+
+/** A volume's default look (server/src/renderDefaults.ts). */
+export interface RenderDefault {
+  opacityPoints: Array<[number, number]>
+  colorRange: [number, number] | null
+  sampleDistance: number
+  scattering: number
+  labelBlend: number
+  fade: { min: number; max: number; seconds: number }
+}
+
+export async function fetchRenderDefault(volumeId: string): Promise<RenderDefault | null> {
+  const data = await handleJson<{ look: RenderDefault | null }>(await fetch(`/api/volumes/${volumeId}/render-default`))
+  return data.look
+}
+
+export async function saveRenderDefault(volumeId: string, look: RenderDefault): Promise<void> {
+  await handleJson(
+    await fetch(`/api/volumes/${volumeId}/render-default`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(look) })
+  )
+}
+
+export async function clearRenderDefault(volumeId: string): Promise<void> {
+  await handleJson(await fetch(`/api/volumes/${volumeId}/render-default`, { method: 'DELETE' }))
+}

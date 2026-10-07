@@ -912,6 +912,13 @@ input[type='checkbox'] {
   display: none !important; /* it sets display inline */
 }
 
+/* For viewers who aren't editors (server/src/editors.ts), the volume shows
+   the saved look with no itk-vtk-viewer menu to change it. */
+.itk-locked [class*='ItkVtkViewer-module_uiContainer'],
+.itk-locked [class*='ItkVtkViewer-module_uiGroup'] {
+  display: none !important;
+}
+
 /* itk-vtk-viewer's menu toggle (three dark lines) disappears against a black
    background; a white halo keeps it visible on any background. */
 .itk-volume-container collapse-ui {
@@ -1285,11 +1292,11 @@ input[type='checkbox'] {
   }
 }
 
-/* Live scale bar on the surface mesh view (the voxel render has
-   itk-vtk-viewer's own); captures draw theirs into the image. */
+/* Live scale bar, bottom right just above the capture bar (where captures
+   draw theirs into the image). */
 .scale-bar {
   position: absolute;
-  top: 14px;
+  bottom: 58px;
   right: 16px;
   display: flex;
   flex-direction: column;
@@ -1297,11 +1304,6 @@ input[type='checkbox'] {
   gap: 3px;
   pointer-events: none;
   filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.9));
-}
-
-/* In the voxel render, clear of the vtk.js logo in the corner. */
-.itk-volume-container ~ .scale-bar {
-  right: 46px;
 }
 
 .scale-bar-label {

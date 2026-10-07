@@ -4,6 +4,8 @@ import multer from 'multer'
 import { rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
+import { isEditor, requireEditor } from './editors.js'
+import { parseRenderDefault, readRenderDefault, removeRenderDefault, writeRenderDefault } from './renderDefaults.js'
 import { parseCropDefault, readCropDefault, removeCropDefault, writeCropDefault } from './cropDefaults.js'
 import { enqueueJob, getJobQueueState, JobPreemptedError } from './jobQueue.js'
 import { readNrrdHeader } from './nrrdHeader.js'
@@ -275,7 +277,7 @@ app.get('/api/files/:id', (req, res) => {
   res.sendFile(path.join(FILES_DIR, record.storedFilename))
 })
 
-app.post('/api/volumes', upload.single('file'), async (req, res) => {
+app.post('/api/volumes', requireEditor, upload.single('file'), async (req, res) => {
   const file = req.file
   if (!file) {
     res.status(400).json({ error: 'Missing file' })
@@ -295,7 +297,7 @@ app.post('/api/volumes', upload.single('file'), async (req, res) => {
   convertInBackground(record.id, path.join(FILES_DIR, file.filename))
 })
 
-app.post('/api/segmentations', upload.single('file'), async (req, res) => {
+app.post('/api/segmentations', requireEditor, upload.single('file'), async (req, res) => {
   const file = req.file
   if (!file) {
     res.status(400).json({ error: 'Missing file' })
@@ -355,7 +357,7 @@ app.get('/api/jobs', (_req, res) => {
   res.json(getJobQueueState())
 })
 
-app.post('/api/segmentations/:id/meshes', async (req, res) => {
+app.post('/api/segmentations/:id/meshes', requireEditor, async (req, res) => {
   const record = getRecord(req.params.id)
   if (!record || record.kind !== 'segmentation' || record.zarrStatus !== 'ready') {
     res.status(404).json({ error: 'No converted segmentation with that id' })
@@ -404,7 +406,7 @@ app.get('/api/volumes/:id/crop-default', async (req, res) => {
   res.json({ crop: await readCropDefault(record.id) })
 })
 
-app.put('/api/volumes/:id/crop-default', express.json(), async (req, res) => {
+app.put('/api/volumes/:id/crop-default', requireEditor, express.json(), async (req, res) => {
   const record = getRecord(req.params.id)
   if (!record || record.kind !== 'volume') {
     res.status(404).json({ error: 'No volume with that id' })
@@ -419,12 +421,47 @@ app.put('/api/volumes/:id/crop-default', express.json(), async (req, res) => {
   res.json({ crop })
 })
 
-app.delete('/api/volumes/:id/crop-default', async (req, res) => {
+app.delete('/api/volumes/:id/crop-default', requireEditor, async (req, res) => {
   await removeCropDefault(req.params.id)
   res.json({ ok: true })
 })
 
-app.delete('/api/files/:id', async (req, res) => {
+// Whether this browser may change things (see editors.ts).
+app.get('/api/config', (req, res) => {
+  res.json({ editor: isEditor(req) })
+})
+
+// A volume's default look in the voxel render (see renderDefaults.ts).
+app.get('/api/volumes/:id/render-default', async (req, res) => {
+  const record = getRecord(req.params.id)
+  if (!record || record.kind !== 'volume') {
+    res.status(404).json({ error: 'No volume with that id' })
+    return
+  }
+  res.json({ look: await readRenderDefault(record.id) })
+})
+
+app.put('/api/volumes/:id/render-default', requireEditor, express.json(), async (req, res) => {
+  const record = getRecord(req.params.id)
+  if (!record || record.kind !== 'volume') {
+    res.status(404).json({ error: 'No volume with that id' })
+    return
+  }
+  const look = parseRenderDefault(req.body)
+  if (!look) {
+    res.status(400).json({ error: 'Invalid look' })
+    return
+  }
+  await writeRenderDefault(record.id, look)
+  res.json({ look })
+})
+
+app.delete('/api/volumes/:id/render-default', requireEditor, async (req, res) => {
+  await removeRenderDefault(req.params.id)
+  res.json({ ok: true })
+})
+
+app.delete('/api/files/:id', requireEditor, async (req, res) => {
   const removed = await removeRecord(req.params.id)
   if (!removed) {
     res.status(404).json({ error: 'Not found' })
@@ -443,6 +480,7 @@ app.delete('/api/files/:id', async (req, res) => {
   if (removed.kind === 'volume') {
     await rm(zarrPathFor(removed.id), rmOptions)
     await removeCropDefault(removed.id)
+    await removeRenderDefault(removed.id)
   } else {
     await rm(segZarrPathFor(removed.id), rmOptions)
     await rm(meshDirFor(removed.id), rmOptions)
