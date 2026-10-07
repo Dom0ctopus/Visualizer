@@ -1511,8 +1511,35 @@ input[type='checkbox'] {
 
 .crop-controls {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
+}
+
+/* Open, the crop controls take their own rows at the top of the toolbar
+   and wrap whole groups rather than squeezing labels onto several lines. */
+.render-toolbar > .crop-controls-open {
+  flex: 1 1 100%;
+}
+
+/* Controls that belong together (a wipe, the blend fade) wrap as one. */
+.toolbar-group {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.render-toolbar .btn,
+.render-toolbar-hint {
+  white-space: nowrap;
+}
+
+.render-toolbar-hint.crop-hint {
+  flex: 1 1 100%;
+  white-space: normal;
+  font-size: 11px;
 }
 
 .btn-secondary.active,

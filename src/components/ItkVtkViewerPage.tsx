@@ -930,7 +930,7 @@ export function ItkVtkViewerPage() {
                 {(loadedName || zarrSeg.segmentations.length > 0) && (
                   <div className="render-toolbar">
                     {loadedName && (
-                      <span className="crop-controls">
+                      <span className={cropOn ? 'crop-controls crop-controls-open' : 'crop-controls'}>
                         <button
                           className={cropOn ? 'btn btn-secondary btn-small active' : 'btn btn-secondary btn-small'}
                           aria-pressed={cropOn}
@@ -984,7 +984,7 @@ export function ItkVtkViewerPage() {
                             >
                               Hide box
                             </button>
-                            <span className="crop-controls" title="Pick a face by clicking its dot, then sweep it across the volume at a steady speed">
+                            <span className="toolbar-group" title="Pick a face by clicking its dot, then sweep it across the volume at a steady speed">
                               <span className="render-toolbar-label">Wipe</span>
                               <input
                                 className="crop-wipe-seconds"
@@ -1012,11 +1012,11 @@ export function ItkVtkViewerPage() {
                                 </>
                               )}
                             </span>
-                            <span className="render-toolbar-hint">
+                            <span className="render-toolbar-hint crop-hint">
                               {cropRotate
                                 ? 'Drag to rotate the box'
                                 : wipeFace === null
-                                  ? 'Drag a dot to move a face · click one to pick it for a wipe · Shift+drag to rotate'
+                                  ? 'Drag a dot to move a face · click a dot to pick it for a wipe · Shift+drag to rotate'
                                   : 'Drag a dot to move a face · Shift+drag to rotate'}
                             </span>
                           </>
@@ -1032,7 +1032,7 @@ export function ItkVtkViewerPage() {
                       </label>
                     )}
                     {zarrSeg.segmentations.length > 0 && (
-                      <span className="crop-controls" title="Sweep the blend between two values at a steady speed">
+                      <span className="toolbar-group" title="Sweep the blend between two values at a steady speed">
                         <span className="render-toolbar-label">Fade</span>
                         <input
                           className="crop-wipe-seconds"
@@ -1086,7 +1086,7 @@ export function ItkVtkViewerPage() {
                       </span>
                     )}
                     {editor && loadedName && (
-                      <span className="crop-controls">
+                      <span className="toolbar-group">
                         <button
                           className="btn btn-secondary btn-small"
                           title="Everyone who opens this volume starts with this look: opacity curve, color range, sample distance, scattering, blend and the fade settings"
