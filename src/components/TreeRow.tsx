@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
 interface TreeRowProps {
@@ -16,7 +16,15 @@ interface TreeRowProps {
    *  leave it undefined and get a spacer so labels stay aligned. */
   expanded?: boolean
   onExpandToggle?: () => void
+  /** Highlighted for focusing (see SegmentTree's selection). */
+  selected?: boolean
+  /** A click on the label: always on segment rows; on group rows only
+   *  with Shift or Cmd/Ctrl held (a plain click expands or collapses). */
+  onSelect?: (e: MouseEvent) => void
 }
+
+// On a Mac, Ctrl+click opens the context menu instead of clicking.
+const IS_MAC = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform)
 
 export const TreeRow = memo(function TreeRow({
   depth,
@@ -30,7 +38,9 @@ export const TreeRow = memo(function TreeRow({
   onRemove,
   badge,
   expanded,
-  onExpandToggle
+  onExpandToggle,
+  selected,
+  onSelect
 }: TreeRowProps) {
   const [hovered, setHovered] = useState(false)
   const [popoverPos, setPopoverPos] = useState({ top: 0, left: 0 })
@@ -80,7 +90,7 @@ export const TreeRow = memo(function TreeRow({
   )
 
   return (
-    <div ref={rowRef} className="tree-row" style={{ paddingLeft: depth * 16 }} onMouseEnter={show} onMouseLeave={scheduleHide}>
+    <div ref={rowRef} className={selected ? 'tree-row selected' : 'tree-row'} aria-selected={onSelect ? Boolean(selected) : undefined} style={{ paddingLeft: depth * 16 }} onMouseEnter={show} onMouseLeave={scheduleHide}>
       {onExpandToggle ? (
         <button
           className={expanded ? 'tree-chevron expanded' : 'tree-chevron'}
@@ -98,9 +108,22 @@ export const TreeRow = memo(function TreeRow({
       <input ref={checkboxRef} type="checkbox" checked={checked} onChange={(e) => onToggle(e.target.checked)} />
       {color && <span className="color-swatch" style={{ background: color }} />}
       <span
-        className={onExpandToggle ? 'tree-label tree-label-group' : 'tree-label'}
+        className={onExpandToggle ? 'tree-label tree-label-group' : onSelect ? 'tree-label tree-label-selectable' : 'tree-label'}
         title={label}
-        onClick={onExpandToggle}
+        onClick={(e) => {
+          if (onSelect && (!onExpandToggle || e.shiftKey || e.metaKey || e.ctrlKey)) onSelect(e)
+          else onExpandToggle?.()
+        }}
+        onMouseDown={(e) => {
+          // Keep Shift+click from selecting the page's text.
+          if (e.shiftKey && onSelect) e.preventDefault()
+        }}
+        onContextMenu={(e) => {
+          if (IS_MAC && e.ctrlKey && onSelect) {
+            e.preventDefault()
+            onSelect(e)
+          }
+        }}
       >
         {label}
       </span>

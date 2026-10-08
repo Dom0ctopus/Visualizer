@@ -1,4 +1,5 @@
-import { memo, useState } from 'react'
+import { memo, useRef, useState, type MouseEvent } from 'react'
+import { focusKey } from '../lib/focus'
 import { groupBySystem } from '../types'
 import type { SegmentState, SystemGroup } from '../types'
 import { TreeRow } from './TreeRow'
@@ -25,7 +26,12 @@ interface SegmentTreeProps {
   onSegmentsVisible: (recordId: string, keys: ReadonlySet<string>, visible: boolean) => void
   onSegmentsOpacity: (recordId: string, keys: ReadonlySet<string>, opacity: number) => void
   onRemoveFile: (recordId: string) => void
+  /** Segments highlighted for focusing, by focusKey. */
+  selected: ReadonlySet<string>
+  onSelectionChange: (selected: ReadonlySet<string>) => void
 }
+
+const IS_MAC_LABEL = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? '⌘' : 'Ctrl'
 
 function colorCss([r, g, b]: [number, number, number]): string {
   return `rgb(${r}, ${g}, ${b})`
@@ -62,10 +68,14 @@ export const SegmentTree = memo(function SegmentTree({
   onFileOpacity,
   onSegmentsVisible,
   onSegmentsOpacity,
-  onRemoveFile
+  onRemoveFile,
+  selected,
+  onSelectionChange
 }: SegmentTreeProps) {
   // Collapsed files/systems, by key (see fileKey/systemKey); all start expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  // Where a Shift+click range starts: the last segment clicked without Shift.
+  const anchorRef = useRef<string | null>(null)
 
   if (segmentations.length === 0) {
     return <p className="empty-hint">No segmentations loaded yet.</p>
@@ -86,9 +96,74 @@ export const SegmentTree = memo(function SegmentTree({
   const allGroupKeys = segmentations.flatMap((l) => [fileKey(l.recordId), ...groupBySystem(l.segments).map((sys) => systemKey(l.recordId, sys.name))])
   const anyExpanded = allGroupKeys.some((k) => !collapsed.has(k))
 
+  // What the tree shows, file by file (after the search and collapsing),
+  // and its segment rows in screen order, for Shift+click ranges.
+  const views = segmentations.flatMap((loaded) => {
+    const fileMatches = filter.length === 0 || loaded.name.toLowerCase().includes(filter)
+    const systems = filterSystems(groupBySystem(loaded.segments), fileMatches, filter)
+    return filter && systems.length === 0 ? [] : [{ loaded, systems }]
+  })
+  const shownRows: string[] = []
+  for (const { loaded, systems } of views) {
+    if (!isExpanded(fileKey(loaded.recordId))) continue
+    const flat = systems.length === 1 && systems[0].name === 'Ungrouped'
+    for (const system of systems) {
+      if (!flat && !isExpanded(systemKey(loaded.recordId, system.name))) continue
+      for (const seg of system.segments) shownRows.push(focusKey(loaded.recordId, seg.key))
+    }
+  }
+
+  /** Click: select just this one (or nothing, if it already was) ·
+   *  Shift+click: add the range from the last clicked one ·
+   *  Cmd/Ctrl+click: add or remove this one. */
+  const selectRow = (key: string, e: MouseEvent) => {
+    const anchor = anchorRef.current
+    if (e.shiftKey && anchor !== null && shownRows.includes(anchor)) {
+      const [a, b] = [shownRows.indexOf(anchor), shownRows.indexOf(key)].sort((x, y) => x - y)
+      onSelectionChange(new Set([...selected, ...shownRows.slice(a, b + 1)]))
+      return
+    }
+    anchorRef.current = key
+    const next = new Set(e.metaKey || e.ctrlKey || e.shiftKey ? selected : [])
+    if (e.metaKey || e.ctrlKey || e.shiftKey) {
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+    } else if (!(selected.size === 1 && selected.has(key))) next.add(key)
+    onSelectionChange(next)
+  }
+  /** Shift or Cmd/Ctrl+click on a file or system: select all of its shown
+   *  segments, or deselect them if they all were. */
+  const selectGroup = (recordId: string, segs: SegmentState[]) => {
+    const keys = segs.map((seg) => focusKey(recordId, seg.key))
+    const next = new Set(selected)
+    if (keys.every((k) => next.has(k))) keys.forEach((k) => next.delete(k))
+    else keys.forEach((k) => next.add(k))
+    onSelectionChange(next)
+  }
+  const leafRow = (recordId: string, seg: SegmentState, depth: number) => {
+    const key = focusKey(recordId, seg.key)
+    return (
+      <TreeRow
+        key={seg.key}
+        depth={depth}
+        label={seg.name}
+        color={colorCss(seg.color)}
+        checked={seg.visible}
+        opacity={seg.opacity}
+        onToggle={(checked) => onSegmentVisible(recordId, seg.key, checked)}
+        onOpacityChange={(o) => onSegmentOpacity(recordId, seg.key, o)}
+        selected={selected.has(key)}
+        onSelect={(e) => selectRow(key, e)}
+      />
+    )
+  }
+
   return (
     <div className="segment-tree">
       <div className="segment-tree-actions">
+        <span className="segment-tree-hint" title="Click a segment to select it · Shift+click: a range · ⌘/Ctrl+click: add or remove one · Shift or ⌘/Ctrl+click a file or system: all of it">
+          Click to select · Shift: range · {IS_MAC_LABEL}: add
+        </span>
         <button
           className="icon-btn"
           disabled={filter.length > 0}
@@ -98,10 +173,7 @@ export const SegmentTree = memo(function SegmentTree({
           {anyExpanded ? 'Collapse all' : 'Expand all'}
         </button>
       </div>
-      {segmentations.map((loaded) => {
-        const fileMatches = filter.length === 0 || loaded.name.toLowerCase().includes(filter)
-        const systems = filterSystems(groupBySystem(loaded.segments), fileMatches, filter)
-        if (filter && systems.length === 0) return null
+      {views.map(({ loaded, systems }) => {
 
         // While searching, a file or system row stands for -- and toggles --
         // only the segments the search shows under it, not the hidden rest.
@@ -123,6 +195,7 @@ export const SegmentTree = memo(function SegmentTree({
               }
               onOpacityChange={(o) => (filter ? onSegmentsOpacity(loaded.recordId, keysOf(shownSegments), o) : onFileOpacity(loaded.recordId, o))}
               onRemove={() => onRemoveFile(loaded.recordId)}
+              onSelect={() => selectGroup(loaded.recordId, shownSegments)}
               badge={String(loaded.segments.length)}
               expanded={isExpanded(fileKey(loaded.recordId))}
               onExpandToggle={() => toggle(fileKey(loaded.recordId))}
@@ -132,18 +205,7 @@ export const SegmentTree = memo(function SegmentTree({
               : systems.length === 1 && systems[0].name === 'Ungrouped'
               ? // No real grouping was detected for this file — skip the redundant
                 // "Ungrouped" wrapper and list segments directly under the file.
-                systems[0].segments.map((seg) => (
-                  <TreeRow
-                    key={seg.key}
-                    depth={1}
-                    label={seg.name}
-                    color={colorCss(seg.color)}
-                    checked={seg.visible}
-                    opacity={seg.opacity}
-                    onToggle={(checked) => onSegmentVisible(loaded.recordId, seg.key, checked)}
-                    onOpacityChange={(o) => onSegmentOpacity(loaded.recordId, seg.key, o)}
-                  />
-                ))
+                systems[0].segments.map((seg) => leafRow(loaded.recordId, seg, 1))
               : systems.map((system) => {
                   const sysChecked = system.segments.every((s) => s.visible)
                   const sysIndeterminate = !sysChecked && system.segments.some((s) => s.visible)
@@ -166,20 +228,10 @@ export const SegmentTree = memo(function SegmentTree({
                         badge={String(system.segments.length)}
                         expanded={isExpanded(systemKey(loaded.recordId, system.name))}
                         onExpandToggle={() => toggle(systemKey(loaded.recordId, system.name))}
+                        onSelect={() => selectGroup(loaded.recordId, system.segments)}
                       />
                       {isExpanded(systemKey(loaded.recordId, system.name)) &&
-                        system.segments.map((seg) => (
-                        <TreeRow
-                          key={seg.key}
-                          depth={2}
-                          label={seg.name}
-                          color={colorCss(seg.color)}
-                          checked={seg.visible}
-                          opacity={seg.opacity}
-                          onToggle={(checked) => onSegmentVisible(loaded.recordId, seg.key, checked)}
-                          onOpacityChange={(o) => onSegmentOpacity(loaded.recordId, seg.key, o)}
-                        />
-                      ))}
+                        system.segments.map((seg) => leafRow(loaded.recordId, seg, 2))}
                     </div>
                   )
                 })}

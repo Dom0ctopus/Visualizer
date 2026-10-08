@@ -47,19 +47,19 @@ export function SearchBar({ value, onChange, segmentations, onSegmentVisible, on
           <button
             className="btn btn-secondary btn-small"
             disabled={matches.length === 0}
-            title="Focus the views on the matches (Enter)"
+            title="Focus the views on all the matches (Enter)"
             onClick={() => onFocus(false)}
           >
-            Focus
+            Focus all
           </button>
           {focusActive && (
             <button
               className="btn btn-secondary btn-small"
               disabled={matches.length === 0}
-              title="Add the matches to the focus (Shift+Enter)"
+              title="Add all the matches to the focus (Shift+Enter)"
               onClick={() => onFocus(true)}
             >
-              Add
+              Add all
             </button>
           )}
           <button className="btn btn-secondary btn-small" disabled={matches.length === 0} onClick={() => applyToMatches(true)}>

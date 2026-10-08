@@ -650,6 +650,47 @@ input[type='checkbox'] {
   margin-right: -4px;
 }
 
+.tree-label-selectable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.tree-row.selected,
+.tree-row.selected:hover {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.segment-tree-hint {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Segments picked in the tree, ready to focus. */
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-s);
+}
+
+.selection-bar > span {
+  margin-right: auto;
+}
+
+.selection-bar b {
+  color: var(--text-h);
+}
+
 .tree-label-group {
   cursor: pointer;
   color: var(--text-h);

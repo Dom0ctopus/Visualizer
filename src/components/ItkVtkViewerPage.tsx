@@ -32,7 +32,7 @@ import { MeshViewer } from './MeshViewer'
 import { SearchBar } from './SearchBar'
 import { SegmentTree } from './SegmentTree'
 import { ZarrSliceCanvas, type CanvasPan, type OrientationLabels } from './ZarrSliceCanvas'
-import { focusKey, matchSegments, segmentTarget } from '../lib/focus'
+import { focusKey, matchSegments, segmentTarget, type FocusMatch } from '../lib/focus'
 import { realisticColor } from '../lib/realisticPalette'
 import type { LibraryRecord, SegmentationRecord, VolumeRecord, ZarrLoadedSegmentation } from '../types'
 
@@ -568,11 +568,25 @@ export function ItkVtkViewerPage() {
     }
   }
 
-  /** Focuses the search's matches (replacing the focus set, or adding to it),
+  // Segments picked in the tree (click, Shift+click, Cmd/Ctrl+click), by
+  // focusKey, for focusing just those. Kept while the search changes, so a
+  // pick can be built up over several searches.
+  const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const selectedMatches: FocusMatch[] = [...selectedKeys].flatMap((key) => {
+    const recordId = key.slice(0, key.indexOf('|'))
+    const segmentKey = key.slice(key.indexOf('|') + 1)
+    return findSegment(recordId, segmentKey) ? [{ recordId, key: segmentKey }] : []
+  })
+  const focusSelected = (add: boolean) => {
+    focusOn(selectedMatches, add)
+    setSelectedKeys(new Set())
+  }
+  /** Focuses the search's matches (replacing the focus set, or adding to it). */
+  const applyFocus = (add: boolean) => focusOn(matchSegments(zarrSeg.segmentations, searchText), add)
+  /** Focuses some segments (replacing the focus set, or adding to it),
    *  makes sure they're visible, and centers the 2D panes on the first of
    *  them (when adding, the first newly added one). */
-  const applyFocus = (add: boolean) => {
-    const matches = matchSegments(zarrSeg.segmentations, searchText)
+  const focusOn = (matches: FocusMatch[], add: boolean) => {
     if (matches.length === 0) return
     const previous = add && focusKeys ? focusKeys : new Set<string>()
     const keys = new Set(previous)
@@ -1283,6 +1297,28 @@ export function ItkVtkViewerPage() {
               onClearFocus={clearFocus}
               focusActive={focusKeys !== null}
             />
+            {selectedMatches.length > 0 && (
+              <div className="selection-bar">
+                <span>
+                  <b>{selectedMatches.length}</b> selected
+                </span>
+                <button
+                  className="btn btn-secondary btn-small"
+                  title={focusKeys ? 'Focus on just the selected segments (replacing the focus)' : 'Focus the views on the selected segments'}
+                  onClick={() => focusSelected(false)}
+                >
+                  Focus
+                </button>
+                {focusKeys && (
+                  <button className="btn btn-primary btn-small" title="Add the selected segments to the focus" onClick={() => focusSelected(true)}>
+                    Add to focus
+                  </button>
+                )}
+                <button className="icon-btn" title="Deselect all" onClick={() => setSelectedKeys(new Set())}>
+                  Clear
+                </button>
+              </div>
+            )}
             {focusKeys && (
               <div className="focus-summary">
                 <div className="focus-summary-row">
@@ -1326,6 +1362,8 @@ export function ItkVtkViewerPage() {
               onSegmentsVisible={zarrSeg.setSegmentsVisible}
               onSegmentsOpacity={zarrSeg.setSegmentsOpacity}
               onRemoveFile={zarrSeg.removeSegmentation}
+              selected={selectedKeys}
+              onSelectionChange={setSelectedKeys}
             />
           </section>
         )}
