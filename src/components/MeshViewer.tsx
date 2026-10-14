@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { fetchMeshManifest, meshFileUrl, regenerateMeshes, type MeshManifest } from '../lib/api'
-import { focusKey } from '../lib/focus'
+import { focusKey, focusMultiplier, type FocusSpec } from '../lib/focus'
 import { disposeOitMaterial, OitRenderer } from '../lib/oitRenderer'
 import { scaleBarFor } from '../lib/scaleBar'
 import { tissueFinish, type TissueFinish } from '../lib/realisticPalette'
@@ -19,7 +19,7 @@ interface MeshViewerProps {
   onHoverLabel?: (info: { name: string; clientX: number; clientY: number } | null) => void
   /** Search focus: segments outside `keys` (lib/focus.ts's focusKey) have
    *  their opacity multiplied by `fade`. */
-  focus?: { keys: ReadonlySet<string>; fade: number } | null
+  focus?: FocusSpec | null
 }
 
 interface LoadedMeshes {
@@ -389,7 +389,7 @@ export function MeshViewer({ segmentations, records, active, onHoverLabel, focus
           mesh.material = makeMaterial(hard ? 'hard' : 'soft')
         }
         const material = mesh.material as THREE.MeshStandardMaterial
-        const opacity = s.opacity * (focus && !focus.keys.has(focusKey(seg.recordId, s.key)) ? focus.fade : 1)
+        const opacity = s.opacity * (focus ? focusMultiplier(focus, focusKey(seg.recordId, s.key)) : 1)
         mesh.visible = s.visible && opacity > 0.001
         material.color.setRGB(s.color[0] / 255, s.color[1] / 255, s.color[2] / 255, THREE.SRGBColorSpace)
         material.opacity = opacity

@@ -670,6 +670,27 @@ input[type='checkbox'] {
   text-overflow: ellipsis;
 }
 
+/* Timed focus changes: a checkbox and seconds under the search box. */
+.focus-fade-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.focus-fade-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.focus-fade-row input:disabled {
+  opacity: 0.45;
+}
+
 /* Segments picked in the tree, ready to focus. */
 .selection-bar {
   display: flex;

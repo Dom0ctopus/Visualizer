@@ -12,6 +12,22 @@ export function focusKey(recordId: string, segmentKey: string): string {
   return `${recordId}|${segmentKey}`
 }
 
+/** A focus as the views apply it: segments in `keys` show fully, the rest
+ *  at `fade` (an opacity multiplier) -- except those in `partial`, part way
+ *  in (1) or out (0) while a timed focus change fades them. */
+export interface FocusSpec {
+  keys: ReadonlySet<string>
+  fade: number
+  partial?: ReadonlyMap<string, number> | null
+}
+
+/** The opacity multiplier a focus gives one segment (by focusKey). */
+export function focusMultiplier(spec: FocusSpec, key: string): number {
+  const t = spec.partial?.get(key)
+  if (t !== undefined) return spec.fade + (1 - spec.fade) * t
+  return spec.keys.has(key) ? 1 : spec.fade
+}
+
 export interface FocusMatch {
   recordId: string
   key: string

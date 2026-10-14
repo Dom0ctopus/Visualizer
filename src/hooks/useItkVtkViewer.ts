@@ -688,16 +688,22 @@ export function useItkVtkViewer() {
   const labelUpdateScheduled = useRef(false)
   const labelUpdateTimer = useRef(0)
   const labelUpdateFrame = useRef(0)
+  // A timed focus change (see setLabelAnimating) skips the wait: one
+  // update per frame.
+  const labelAnimatingRef = useRef(false)
   const scheduleLabelUpdate = useCallback((update: LabelUpdate) => {
     Object.assign(pendingLabelUpdate.current, update)
     if (labelUpdateScheduled.current) return
     labelUpdateScheduled.current = true
-    labelUpdateTimer.current = window.setTimeout(() => {
-      labelUpdateFrame.current = requestAnimationFrame(() => {
-        labelUpdateScheduled.current = false
-        flushLabelUpdateRef.current()
-      })
-    }, LABEL_UPDATE_THROTTLE_MS)
+    labelUpdateTimer.current = window.setTimeout(
+      () => {
+        labelUpdateFrame.current = requestAnimationFrame(() => {
+          labelUpdateScheduled.current = false
+          flushLabelUpdateRef.current()
+        })
+      },
+      labelAnimatingRef.current ? 0 : LABEL_UPDATE_THROTTLE_MS
+    )
   }, [])
   const sentNamesRef = useRef<Map<number, string> | null>(null)
 
@@ -726,6 +732,7 @@ export function useItkVtkViewer() {
       return null
     }
   }
+  const endEditQualityRef = useRef<() => void>(() => {})
   const endEditQuality = () => {
     const edit = editQualityRef.current
     editQualityRef.current = null
@@ -740,6 +747,7 @@ export function useItkVtkViewer() {
     }
     scheduleRender()
   }
+  endEditQualityRef.current = endEditQuality
   const beginEditQuality = () => {
     const mapper = volumeMapper()
     if (!mapper) return
@@ -776,7 +784,8 @@ export function useItkVtkViewer() {
     if (!viewer || !labelImageReadyRef.current) return
     const { weights, names, blend, userBlend } = pendingLabelUpdate.current
     pendingLabelUpdate.current = {}
-    beginEditQuality()
+    // A timed change is meant to be watched (and recorded): full quality.
+    if (!labelAnimatingRef.current) beginEditQuality()
     const rendersBefore = renderCountRef.current
     try {
       // Each of these makes itk-vtk-viewer redraw, so unchanged names (the
@@ -1059,6 +1068,14 @@ export function useItkVtkViewer() {
     },
     [scheduleLabelUpdate]
   )
+  /** While on, label weight and focus blend changes reach the voxel render
+   *  on the next frame at full quality, rather than throttled and coarsely
+   *  sampled like slider drags -- for timed focus fades. Animation frames
+   *  wait for the GPU, so the steps keep pace with what it can draw. */
+  const setLabelAnimating = useCallback((on: boolean) => {
+    labelAnimatingRef.current = on
+    if (on) endEditQualityRef.current()
+  }, [])
   /** Apply a volume's saved look (null: the built-in defaults). */
   const setRenderLook = useCallback(
     (look: RenderLook | null) => {
@@ -1362,6 +1379,7 @@ export function useItkVtkViewer() {
     setLabelNames,
     pickLabelName,
     setFocusBlend,
+    setLabelAnimating,
     labelBlend,
     setLabelBlend,
     setLabelBlendNow,

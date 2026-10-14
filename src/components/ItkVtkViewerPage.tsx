@@ -251,6 +251,7 @@ export function ItkVtkViewerPage() {
     captureTarget,
     cropTarget,
     setFocusBlend,
+    setLabelAnimating,
     labelBlend,
     setLabelBlend,
     setLabelBlendNow,
@@ -508,18 +509,21 @@ export function ItkVtkViewerPage() {
   // layer's overlays, the voxel weights and the meshes for a big focus set
   // with many segmentations loaded takes a while, and the sidebar's own
   // controls (the list, Clear, the slider) must stay responsive meanwhile.
+  // Segments part way in (1) or out (0) during a timed focus change.
+  const [focusPartial, setFocusPartial] = useState<ReadonlyMap<string, number> | null>(null)
   const viewFocusKeys = useDeferredValue(focusKeys)
   const viewFocusStrength = useDeferredValue(focusStrength)
+  const viewFocusPartial = useDeferredValue(focusPartial)
   const focusSpec = useMemo(
-    () => (viewFocusKeys ? { keys: viewFocusKeys, fade: 1 - viewFocusStrength } : null),
-    [viewFocusKeys, viewFocusStrength]
+    () => (viewFocusKeys ? { keys: viewFocusKeys, fade: 1 - viewFocusStrength, partial: viewFocusPartial } : null),
+    [viewFocusKeys, viewFocusStrength, viewFocusPartial]
   )
   // The voxel render fades on a steeper curve: it accumulates opacity along
   // each ray, so a segment at 15% opacity still looks solid through its
   // thickness (see useItkVtkViewer's setFocusBlend for the blend's share).
   const voxelFocusSpec = useMemo(
-    () => (viewFocusKeys ? { keys: viewFocusKeys, fade: (1 - viewFocusStrength) ** 3 } : null),
-    [viewFocusKeys, viewFocusStrength]
+    () => (viewFocusKeys ? { keys: viewFocusKeys, fade: (1 - viewFocusStrength) ** 3, partial: viewFocusPartial } : null),
+    [viewFocusKeys, viewFocusStrength, viewFocusPartial]
   )
   const [focusError, setFocusError] = useState<string | null>(null)
   // The voxel render's share: focus also raises its label blend.
@@ -583,15 +587,104 @@ export function ItkVtkViewerPage() {
   }
   /** Focuses the search's matches (replacing the focus set, or adding to it). */
   const applyFocus = (add: boolean) => focusOn(matchSegments(zarrSeg.segmentations, searchText), add)
+  // Timed focus changes, for recordings: when on, focusing fades the rest
+  // out (or new segments in) over focusFadeSeconds instead of snapping, and
+  // Clear / removing a segment fade back.
+  const [focusFadeOn, setFocusFadeOn] = useState(false)
+  const [focusFadeSeconds, setFocusFadeSeconds] = useState(3)
+  // Mirrors of the focus state, current even between renders, so a change
+  // made while another is fading builds on where that one ends.
+  const focusKeysRef = useRef<ReadonlySet<string> | null>(null)
+  const focusStrengthRef = useRef(focusStrength)
+  const setFocusKeysNow = (keys: ReadonlySet<string> | null) => {
+    focusKeysRef.current = keys
+    setFocusKeys(keys)
+  }
+  const setFocusStrengthNow = (strength: number) => {
+    focusStrengthRef.current = strength
+    setFocusStrength(strength)
+  }
+  const focusAnimRef = useRef<{ timer: number; finish: () => void } | null>(null)
+  /** Ends a running focus fade where it was headed. */
+  const finishFocusAnim = () => {
+    const anim = focusAnimRef.current
+    if (!anim) return
+    focusAnimRef.current = null
+    window.clearTimeout(anim.timer)
+    anim.finish()
+  }
+  useEffect(
+    () => () => {
+      if (focusAnimRef.current) window.clearTimeout(focusAnimRef.current.timer)
+      setLabelAnimating(false)
+    },
+    [setLabelAnimating]
+  )
+  /** Runs `step(t)` for t from 0 to 1 over focusFadeSeconds (eased in and
+   *  out, by the clock), then `done`. */
+  const runFocusAnim = (step: (t: number) => void, done: () => void) => {
+    finishFocusAnim()
+    const duration = Math.max(0.1, focusFadeSeconds) * 1000
+    const t0 = performance.now()
+    const finish = () => {
+      setLabelAnimating(false)
+      done()
+    }
+    const anim = { timer: 0, finish }
+    focusAnimRef.current = anim
+    setLabelAnimating(true)
+    const tick = () => {
+      if (focusAnimRef.current !== anim) return
+      const t = Math.min(1, (performance.now() - t0) / duration)
+      step(t * t * (3 - 2 * t))
+      if (t < 1) anim.timer = window.setTimeout(tick, 16)
+      else {
+        focusAnimRef.current = null
+        finish()
+      }
+    }
+    tick()
+  }
+  /** Fades the strength from one value to another. */
+  const fadeStrength = (from: number, to: number, done: () => void = () => {}) =>
+    runFocusAnim((t) => setFocusStrengthNow(from + (to - from) * t), done)
+  /** Fades `entering` segments in and `leaving` ones out, ending on `final`. */
+  const crossfade = (final: ReadonlySet<string> | null, entering: string[], leaving: string[], done: () => void = () => {}) => {
+    setFocusKeysNow(new Set([...(focusKeysRef.current ?? []), ...(final ?? [])]))
+    runFocusAnim(
+      (t) => setFocusPartial(new Map([...entering.map((k): [string, number] => [k, t]), ...leaving.map((k): [string, number] => [k, 1 - t])])),
+      () => {
+        setFocusPartial(null)
+        setFocusKeysNow(final)
+        done()
+      }
+    )
+  }
+
   /** Focuses some segments (replacing the focus set, or adding to it),
    *  makes sure they're visible, and centers the 2D panes on the first of
    *  them (when adding, the first newly added one). */
   const focusOn = (matches: FocusMatch[], add: boolean) => {
     if (matches.length === 0) return
-    const previous = add && focusKeys ? focusKeys : new Set<string>()
+    finishFocusAnim()
+    const current = focusKeysRef.current
+    const previous = add && current ? current : new Set<string>()
     const keys = new Set(previous)
     for (const m of matches) keys.add(focusKey(m.recordId, m.key))
-    setFocusKeys(keys)
+    if (!focusFadeOn) setFocusKeysNow(keys)
+    else if (!current) {
+      // From no focus: the rest fades out, from strength 0 to the slider's.
+      const target = focusStrengthRef.current
+      setFocusStrengthNow(0)
+      setFocusKeysNow(keys)
+      fadeStrength(0, target)
+    } else {
+      crossfade(
+        keys,
+        [...keys].filter((k) => !current.has(k)),
+        [...current].filter((k) => !keys.has(k))
+      )
+    }
     for (const m of matches) {
       const seg = findSegment(m.recordId, m.key)
       if (seg && !seg.visible) zarrSeg.setSegmentVisible(m.recordId, m.key, true)
@@ -599,17 +692,34 @@ export function ItkVtkViewerPage() {
     const first = matches.find((m) => !previous.has(focusKey(m.recordId, m.key))) ?? matches[0]
     void centerOn(first.recordId, first.key)
   }
-  const clearFocus = () => {
-    setFocusKeys(null)
+  const endFocus = () => {
+    setFocusKeysNow(null)
     setFocusError(null)
     setCenteredKey(null)
   }
+  const clearFocus = () => {
+    finishFocusAnim()
+    if (!focusKeysRef.current) return
+    if (!focusFadeOn) {
+      endFocus()
+      return
+    }
+    // Fade the rest back in, then end the focus with the slider where it was.
+    const strength = focusStrengthRef.current
+    fadeStrength(strength, 0, () => {
+      endFocus()
+      setFocusStrengthNow(strength)
+    })
+  }
   const removeFromFocus = (key: string) => {
-    if (!focusKeys) return
-    const next = new Set(focusKeys)
+    finishFocusAnim()
+    const current = focusKeysRef.current
+    if (!current) return
+    const next = new Set(current)
     next.delete(key)
     if (next.size === 0) clearFocus()
-    else setFocusKeys(next)
+    else if (focusFadeOn) crossfade(next, [], [key])
+    else setFocusKeysNow(next)
   }
   // The focused segments, in the order they were focused.
   const focusList = focusKeys
@@ -624,7 +734,17 @@ export function ItkVtkViewerPage() {
   const focusSlider = (
     <label className="focus-slider" title="How much everything outside the focus fades (0: not at all; 100%: hidden)">
       <span className="render-toolbar-label">Focus</span>
-      <input type="range" min={0} max={1} step={0.01} value={focusStrength} onChange={(e) => setFocusStrength(Number(e.target.value))} />
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.01}
+        value={focusStrength}
+        onChange={(e) => {
+          finishFocusAnim()
+          setFocusStrengthNow(Number(e.target.value))
+        }}
+      />
       <b>{Math.round(focusStrength * 100)}%</b>
     </label>
   )
@@ -1297,6 +1417,24 @@ export function ItkVtkViewerPage() {
               onClearFocus={clearFocus}
               focusActive={focusKeys !== null}
             />
+            <div className="focus-fade-row" title="For recordings: focusing fades the other segments out (or new ones in) over this long instead of all at once; Clear and removing a segment fade back">
+              <label>
+                <input type="checkbox" checked={focusFadeOn} onChange={(e) => setFocusFadeOn(e.target.checked)} />
+                Fade focus changes over
+              </label>
+              <input
+                className="crop-wipe-seconds"
+                type="number"
+                min={0.5}
+                max={600}
+                step={0.5}
+                value={focusFadeSeconds}
+                disabled={!focusFadeOn}
+                aria-label="Focus fade duration in seconds"
+                onChange={(e) => setFocusFadeSeconds(Math.max(0.5, Number(e.target.value) || 0.5))}
+              />
+              <span>s</span>
+            </div>
             {selectedMatches.length > 0 && (
               <div className="selection-bar">
                 <span>

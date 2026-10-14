@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { focusKey } from '../lib/focus'
+import { focusKey, focusMultiplier, type FocusSpec } from '../lib/focus'
 import { fetchSegmentationMergeStatus, mergeZarrUrl, requestSegmentationMerge, type MergedSegmentMapping, type MergeProgress } from '../lib/api'
 import { groupByLayer, type ZarrLoadedSegmentation } from '../types'
 
@@ -36,7 +36,7 @@ export function useSegmentationMerge3D(
   useSegmentColors: boolean,
   /** Search focus: segments outside `keys` (lib/focus.ts's focusKey) have
    *  their weight multiplied by `fade`. */
-  focus: { keys: ReadonlySet<string>; fade: number } | null = null
+  focus: FocusSpec | null = null
 ) {
   const [status, setStatus] = useState<'idle' | 'pending' | 'ready' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -145,7 +145,7 @@ export function useSegmentationMerge3D(
       const seg = segmentations.find((s) => s.recordId === key.recordId)
       const segment = seg?.segments.find((s) => s.layer === key.layer && s.labelValue === originalLabelValue)
       if (!segment) continue
-      const faded = focus && !focus.keys.has(focusKey(key.recordId, segment.key)) ? focus.fade : 1
+      const faded = focus ? focusMultiplier(focus, focusKey(key.recordId, segment.key)) : 1
       weights.set(globalLabelValue, segment.visible ? segment.opacity * faded : 0)
       names.set(globalLabelValue, segment.name)
       colors.set(globalLabelValue, [segment.color[0] / 255, segment.color[1] / 255, segment.color[2] / 255])

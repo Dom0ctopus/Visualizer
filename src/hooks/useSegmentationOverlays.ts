@@ -3,7 +3,7 @@ import { useLatestAsync } from './useLatestAsync'
 import { SLICE_PREFETCH_STEPS } from './useZarrSliceViewer'
 import { segZarrUrl } from '../lib/api'
 import { buildLabelLut } from '../lib/segmentationOverlay'
-import { focusKey } from '../lib/focus'
+import { focusKey, focusMultiplier, type FocusSpec } from '../lib/focus'
 import {
   fetchVolumeInfo,
   readCoronalSlice,
@@ -59,12 +59,8 @@ export interface OrthogonalOverlays {
 
 type Plane = 'axial' | 'coronal' | 'sagittal'
 
-/** Search focus for the 2D panes: the focused segments' keys (see
- *  lib/focus.ts's focusKey) and the opacity multiplier for the rest. */
-export interface SliceFocus {
-  keys: ReadonlySet<string>
-  fade: number
-}
+/** Search focus for the 2D panes (see lib/focus.ts). */
+export type SliceFocus = FocusSpec
 
 // Assembled overlay slices, keyed by source array + plane + position. An
 // opacity/visibility edit only changes the color table, so handing the
@@ -144,7 +140,12 @@ async function loadPlaneOverlays(
           }
           const { lut, names, focus: focusFlags } = buildLabelLut(
             segsInLayer,
-            focus ? { isFocused: (s) => focus.keys.has(focusKey(seg.recordId, s.key)), fade: focus.fade } : null
+            focus
+              ? {
+                  isFocused: (s) => focus.keys.has(focusKey(seg.recordId, s.key)),
+                  multiplier: (s) => focusMultiplier(focus, focusKey(seg.recordId, s.key))
+                }
+              : null
           )
           return {
             width: slice.width,

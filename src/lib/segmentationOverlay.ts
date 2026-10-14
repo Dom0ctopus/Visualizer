@@ -20,8 +20,8 @@ export interface LabelLut {
 /** Search focus as the 2D overlays apply it. */
 export interface OverlayFocus {
   isFocused: (segment: SegmentState) => boolean
-  /** Opacity multiplier for segments outside the focus set. */
-  fade: number
+  /** Opacity multiplier for a segment (1 when focused, less outside). */
+  multiplier: (segment: SegmentState) => number
 }
 
 /**
@@ -42,7 +42,7 @@ export function buildLabelLut(segmentsInLayer: SegmentState[], focus: OverlayFoc
     lut[i] = seg.color[0]
     lut[i + 1] = seg.color[1]
     lut[i + 2] = seg.color[2]
-    lut[i + 3] = Math.round(seg.opacity * (focus && !focused ? focus.fade : 1) * 255)
+    lut[i + 3] = Math.round(seg.opacity * (focus ? focus.multiplier(seg) : 1) * 255)
     // Same visibility/opacity gate as the color above -- a hover shouldn't
     // report the name of a segment that's currently hidden (alpha 0), since
     // there's nothing actually drawn there to be hovering over.
