@@ -1,4 +1,5 @@
 import type { LibraryRecord, SegmentationRecord, VolumeRecord } from '../types'
+import type { FocusList, VideoSequence } from './sequence'
 
 async function handleJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -245,4 +246,32 @@ export async function saveRenderDefault(volumeId: string, look: RenderDefault): 
 
 export async function clearRenderDefault(volumeId: string): Promise<void> {
   await handleJson(await fetch(`/api/volumes/${volumeId}/render-default`, { method: 'DELETE' }))
+}
+
+// Named focus lists and video sequences (server/src/savedItems.ts): anyone
+// can load them, editors save them.
+export async function fetchFocusLists(): Promise<FocusList[]> {
+  return (await handleJson<{ lists: FocusList[] }>(await fetch('/api/focus-lists'))).lists
+}
+
+export async function saveFocusList(list: FocusList): Promise<FocusList[]> {
+  const res = await fetch(`/api/focus-lists/${list.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(list) })
+  return (await handleJson<{ lists: FocusList[] }>(res)).lists
+}
+
+export async function deleteFocusList(id: string): Promise<FocusList[]> {
+  return (await handleJson<{ lists: FocusList[] }>(await fetch(`/api/focus-lists/${id}`, { method: 'DELETE' }))).lists
+}
+
+export async function fetchSequences(): Promise<VideoSequence[]> {
+  return (await handleJson<{ sequences: VideoSequence[] }>(await fetch('/api/sequences'))).sequences
+}
+
+export async function saveSequence(sequence: VideoSequence): Promise<VideoSequence[]> {
+  const res = await fetch(`/api/sequences/${sequence.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sequence) })
+  return (await handleJson<{ sequences: VideoSequence[] }>(res)).sequences
+}
+
+export async function deleteSequence(id: string): Promise<VideoSequence[]> {
+  return (await handleJson<{ sequences: VideoSequence[] }>(await fetch(`/api/sequences/${id}`, { method: 'DELETE' }))).sequences
 }

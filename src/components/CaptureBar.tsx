@@ -23,6 +23,28 @@ export interface CaptureTarget {
   contentRect?: () => { x: number; y: number; width: number; height: number } | null
 }
 
+/** Starts recording a view, with a scale bar that follows the zoom; with
+ *  `fit`, cropped to the subject (see CaptureTarget.contentRect). Null when
+ *  there's nothing to record yet. */
+export function startViewRecording(view: CaptureTarget, fit: boolean): CanvasRecording | null {
+  const canvas = view.canvas()
+  if (!canvas) return null
+  const crop = fit ? (view.contentRect?.() ?? null) : null
+  // The scale bar's mm-per-pixel is the full view's; a crop shows part of
+  // that height.
+  const heightShare = crop ? crop.height / canvas.height : 1
+  return startCompositeRecording(
+    canvas,
+    view.onFrame,
+    view.requestRender,
+    (ctx, w, h) => {
+      const mm = view.viewHeightMm()
+      drawScaleBar(ctx, w, h, mm === null ? null : mm * heightShare)
+    },
+    crop
+  )
+}
+
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000)
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
@@ -108,27 +130,12 @@ export function CaptureBar({
       downloadBlob(blob, captureFilename(name, recording.rec.extension))
       return
     }
-    const canvas = target?.canvas()
-    if (!canvas) {
-      setError('Nothing to record yet')
-      return
-    }
     try {
-      const view = target!
-      const crop = fit ? (view.contentRect?.() ?? null) : null
-      // The scale bar's mm-per-pixel is the full view's; a crop shows part of
-      // that height.
-      const heightShare = crop ? crop.height / canvas.height : 1
-      const rec = startCompositeRecording(
-        canvas,
-        view.onFrame,
-        view.requestRender,
-        (ctx, w, h) => {
-          const mm = view.viewHeightMm()
-          drawScaleBar(ctx, w, h, mm === null ? null : mm * heightShare)
-        },
-        crop
-      )
+      const rec = target && startViewRecording(target, fit)
+      if (!rec) {
+        setError('Nothing to record yet')
+        return
+      }
       setRecording({ rec, since: Date.now() })
       setNow(Date.now())
     } catch (e) {

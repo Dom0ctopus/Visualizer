@@ -4,6 +4,7 @@ import multer from 'multer'
 import { rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { backfillOrthogonalCopies, storeNeedsOrthogonalBackfill } from './backfill.js'
+import { focusLists, isItemId, parseFocusList, parseSequence, sequences } from './savedItems.js'
 import { isEditor, requireEditor } from './editors.js'
 import { parseRenderDefault, readRenderDefault, removeRenderDefault, writeRenderDefault } from './renderDefaults.js'
 import { parseCropDefault, readCropDefault, removeCropDefault, writeCropDefault } from './cropDefaults.js'
@@ -425,6 +426,32 @@ app.delete('/api/volumes/:id/crop-default', requireEditor, async (req, res) => {
   await removeCropDefault(req.params.id)
   res.json({ ok: true })
 })
+
+// Named focus lists and video sequences (see savedItems.ts): anyone can
+// use them, editors save them.
+const savedRoutes = <T extends { id: string }>(
+  route: string,
+  field: string,
+  store: { list: () => Promise<T[]>; put: (item: T) => Promise<T[]>; remove: (id: string) => Promise<T[]> },
+  parse: (id: string, body: unknown) => T | null
+) => {
+  app.get(`/api/${route}`, async (_req, res) => {
+    res.json({ [field]: await store.list() })
+  })
+  app.put(`/api/${route}/:id`, requireEditor, express.json({ limit: '2mb' }), async (req, res) => {
+    const item = isItemId(req.params.id) ? parse(req.params.id, req.body) : null
+    if (!item) {
+      res.status(400).json({ error: `Invalid ${route.replace(/-/g, ' ').replace(/s$/, '')}` })
+      return
+    }
+    res.json({ [field]: await store.put(item) })
+  })
+  app.delete(`/api/${route}/:id`, requireEditor, async (req, res) => {
+    res.json({ [field]: await store.remove(req.params.id) })
+  })
+}
+savedRoutes('focus-lists', 'lists', focusLists, parseFocusList)
+savedRoutes('sequences', 'sequences', sequences, parseSequence)
 
 // Whether this browser may change things (see editors.ts).
 app.get('/api/config', (req, res) => {

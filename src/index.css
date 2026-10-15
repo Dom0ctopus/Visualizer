@@ -1627,3 +1627,152 @@ input[type='checkbox'] {
   font: inherit;
   font-size: 12px;
 }
+
+/* ---------------------------------------------------------------------------
+   Saved focus lists and the video builder (VideoBuilder.tsx)
+   ------------------------------------------------------------------------ */
+.focus-save {
+  margin-top: 6px;
+}
+
+.focus-save-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.focus-save-form input,
+.video-builder select,
+.video-name {
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  padding: 3px 6px;
+}
+
+.focus-save-form input {
+  flex: 1;
+}
+
+.saved-lists {
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.saved-lists summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.saved-lists ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.saved-lists li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: var(--radius-s);
+}
+
+.saved-lists li:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.saved-list-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.video-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.video-name {
+  flex: 1;
+}
+
+.video-hint {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.video-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  counter-reset: step;
+}
+
+.video-step {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+/* Steps running alongside the one above hang off it. */
+.video-step.with-previous {
+  margin-left: 14px;
+  border-left: 2px solid var(--accent);
+}
+
+.video-step-params {
+  color: var(--text-dim);
+}
+
+.video-step-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.video-step-time {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.video-progress {
+  flex: 1;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+.video-save {
+  margin-left: auto;
+}

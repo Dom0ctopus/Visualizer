@@ -17,15 +17,24 @@ import {
   fetchRenderDefault,
   saveRenderDefault,
   clearRenderDefault,
-  type RenderDefault
+  type RenderDefault,
+  fetchFocusLists,
+  saveFocusList,
+  deleteFocusList,
+  fetchSequences,
+  saveSequence,
+  deleteSequence
 } from '../lib/api'
+import { newId, playSequence, type FocusList, type Playback, type SequenceActions, type VideoSequence } from '../lib/sequence'
+import { captureFilename, downloadBlob, type CanvasRecording } from '../lib/capture'
+import { VideoBuilder, type PlaybackState } from './VideoBuilder'
 import { boxEulerXYZ, type CropBox } from '../lib/cropBox'
 import { useItkVtkViewer } from '../hooks/useItkVtkViewer'
 import { useSegmentationMerge3D } from '../hooks/useSegmentationMerge3D'
 import { useSegmentationOverlays } from '../hooks/useSegmentationOverlays'
 import { useZarrSegmentations } from '../hooks/useZarrSegmentations'
 import { useZarrSliceViewer } from '../hooks/useZarrSliceViewer'
-import { CaptureBar } from './CaptureBar'
+import { CaptureBar, startViewRecording } from './CaptureBar'
 import { CropBoxOverlay, type WipeCommand } from './CropBoxOverlay'
 import { LiveScaleBar } from './LiveScaleBar'
 import { MeshViewer } from './MeshViewer'
@@ -252,6 +261,7 @@ export function ItkVtkViewerPage() {
     cropTarget,
     setFocusBlend,
     setLabelAnimating,
+    viewControl,
     labelBlend,
     setLabelBlend,
     setLabelBlendNow,
@@ -620,11 +630,11 @@ export function ItkVtkViewerPage() {
     },
     [setLabelAnimating]
   )
-  /** Runs `step(t)` for t from 0 to 1 over focusFadeSeconds (eased in and
+  /** Runs `step(t)` for t from 0 to 1 over `seconds` (eased in and
    *  out, by the clock), then `done`. */
-  const runFocusAnim = (step: (t: number) => void, done: () => void) => {
+  const runFocusAnim = (seconds: number, step: (t: number) => void, done: () => void) => {
     finishFocusAnim()
-    const duration = Math.max(0.1, focusFadeSeconds) * 1000
+    const duration = Math.max(0.1, seconds) * 1000
     const t0 = performance.now()
     const finish = () => {
       setLabelAnimating(false)
@@ -646,12 +656,13 @@ export function ItkVtkViewerPage() {
     tick()
   }
   /** Fades the strength from one value to another. */
-  const fadeStrength = (from: number, to: number, done: () => void = () => {}) =>
-    runFocusAnim((t) => setFocusStrengthNow(from + (to - from) * t), done)
+  const fadeStrength = (seconds: number, from: number, to: number, done: () => void = () => {}) =>
+    runFocusAnim(seconds, (t) => setFocusStrengthNow(from + (to - from) * t), done)
   /** Fades `entering` segments in and `leaving` ones out, ending on `final`. */
-  const crossfade = (final: ReadonlySet<string> | null, entering: string[], leaving: string[], done: () => void = () => {}) => {
+  const crossfade = (seconds: number, final: ReadonlySet<string> | null, entering: string[], leaving: string[], done: () => void = () => {}) => {
     setFocusKeysNow(new Set([...(focusKeysRef.current ?? []), ...(final ?? [])]))
     runFocusAnim(
+      seconds,
       (t) => setFocusPartial(new Map([...entering.map((k): [string, number] => [k, t]), ...leaving.map((k): [string, number] => [k, 1 - t])])),
       () => {
         setFocusPartial(null)
@@ -663,23 +674,25 @@ export function ItkVtkViewerPage() {
 
   /** Focuses some segments (replacing the focus set, or adding to it),
    *  makes sure they're visible, and centers the 2D panes on the first of
-   *  them (when adding, the first newly added one). */
-  const focusOn = (matches: FocusMatch[], add: boolean) => {
+   *  them (when adding, the first newly added one). Fades over `seconds`
+   *  (0: at once). */
+  const focusOn = (matches: FocusMatch[], add: boolean, seconds = focusFadeOn ? focusFadeSeconds : 0) => {
     if (matches.length === 0) return
     finishFocusAnim()
     const current = focusKeysRef.current
     const previous = add && current ? current : new Set<string>()
     const keys = new Set(previous)
     for (const m of matches) keys.add(focusKey(m.recordId, m.key))
-    if (!focusFadeOn) setFocusKeysNow(keys)
+    if (seconds <= 0) setFocusKeysNow(keys)
     else if (!current) {
       // From no focus: the rest fades out, from strength 0 to the slider's.
       const target = focusStrengthRef.current
       setFocusStrengthNow(0)
       setFocusKeysNow(keys)
-      fadeStrength(0, target)
+      fadeStrength(seconds, 0, target)
     } else {
       crossfade(
+        seconds,
         keys,
         [...keys].filter((k) => !current.has(k)),
         [...current].filter((k) => !keys.has(k))
@@ -697,16 +710,16 @@ export function ItkVtkViewerPage() {
     setFocusError(null)
     setCenteredKey(null)
   }
-  const clearFocus = () => {
+  const clearFocus = (seconds = focusFadeOn ? focusFadeSeconds : 0) => {
     finishFocusAnim()
     if (!focusKeysRef.current) return
-    if (!focusFadeOn) {
+    if (seconds <= 0) {
       endFocus()
       return
     }
     // Fade the rest back in, then end the focus with the slider where it was.
     const strength = focusStrengthRef.current
-    fadeStrength(strength, 0, () => {
+    fadeStrength(seconds, strength, 0, () => {
       endFocus()
       setFocusStrengthNow(strength)
     })
@@ -718,7 +731,7 @@ export function ItkVtkViewerPage() {
     const next = new Set(current)
     next.delete(key)
     if (next.size === 0) clearFocus()
-    else if (focusFadeOn) crossfade(next, [], [key])
+    else if (focusFadeOn) crossfade(focusFadeSeconds, next, [], [key])
     else setFocusKeysNow(next)
   }
   // The focused segments, in the order they were focused.
@@ -748,6 +761,108 @@ export function ItkVtkViewerPage() {
       <b>{Math.round(focusStrength * 100)}%</b>
     </label>
   )
+
+  // --- Saved focus lists and video sequences (lib/sequence.ts) ------------
+  const [focusLists, setFocusLists] = useState<FocusList[]>([])
+  const [sequences, setSequences] = useState<VideoSequence[]>([])
+  useEffect(() => {
+    fetchFocusLists().then(setFocusLists, () => {})
+    fetchSequences().then(setSequences, () => {})
+  }, [])
+  /** A list's segments that are loaded now. */
+  const listMatches = (list: FocusList): FocusMatch[] =>
+    list.keys.flatMap((key) => {
+      const recordId = key.slice(0, key.indexOf('|'))
+      const segmentKey = key.slice(key.indexOf('|') + 1)
+      return findSegment(recordId, segmentKey) ? [{ recordId, key: segmentKey }] : []
+    })
+  const [listName, setListName] = useState<string | null>(null)
+  const [listNote, setListNote] = useState<string | null>(null)
+  const saveCurrentFocus = async () => {
+    const name = listName?.trim()
+    if (!name || !focusKeysRef.current) return
+    // Saving under an existing name replaces that list.
+    const existing = focusLists.find((l) => l.name.toLowerCase() === name.toLowerCase())
+    try {
+      setFocusLists(await saveFocusList({ id: existing?.id ?? newId(), name, keys: [...focusKeysRef.current] }))
+      setListName(null)
+      setListNote(`Saved "${name}"`)
+    } catch (e) {
+      setListNote(e instanceof Error ? e.message : 'Could not save')
+    }
+    window.setTimeout(() => setListNote(null), 2500)
+  }
+  const removeFocusList = async (list: FocusList) => {
+    if (!window.confirm(`Delete the focus list "${list.name}"?`)) return
+    try {
+      setFocusLists(await deleteFocusList(list.id))
+    } catch (e) {
+      setListNote(e instanceof Error ? e.message : 'Could not delete')
+    }
+  }
+
+  const [playback, setPlayback] = useState<PlaybackState | null>(null)
+  const playbackRef = useRef<{ play: Playback; rec: CanvasRecording | null; name: string } | null>(null)
+  const playVideo = (sequence: VideoSequence, record: boolean, fit: boolean) => {
+    if (playbackRef.current || !loadedName) return
+    openTab('voxel')
+    const entry: { play: Playback | null; rec: CanvasRecording | null; name: string } = { play: null, rec: null, name: sequence.name }
+    const actions: SequenceActions = {
+      prepare: async (seq) => {
+        // Every run starts the same: no focus, the start camera, and -- if
+        // it wipes -- the crop box back at its default.
+        finishFocusAnim()
+        stopFade()
+        endFocus()
+        if (seq.startView) viewControl.setCamera(seq.startView)
+        if (seq.steps.some((s) => s.kind === 'wipe')) {
+          setCropOn(true)
+          setCropReset((n) => n + 1)
+        }
+        setVideoPlaying(true)
+        // Let the views settle (the label weights, the crop box) first.
+        await new Promise((resolve) => window.setTimeout(resolve, 800))
+        if (record) {
+          entry.rec = startViewRecording(captureTarget, fit)
+          if (!entry.rec) throw new Error('Nothing to record yet')
+          setVoxelRecording(true)
+        }
+      },
+      rotateBy: viewControl.rotateBy,
+      setBlend: setLabelBlendNow,
+      focus: (listId, add, seconds) => {
+        const list = focusLists.find((l) => l.id === listId)
+        if (list) focusOn(listMatches(list), add, seconds)
+      },
+      clearFocus: (seconds) => clearFocus(seconds),
+      wipe: (face, direction, seconds) => {
+        setWipeFace(face)
+        setWipe({ id: Date.now() + face, face, direction, seconds })
+        setWiping(true)
+      },
+      stopAll: () => {
+        stopWipe()
+        finishFocusAnim()
+      }
+    }
+    const play = playSequence(sequence, actions, (seconds, total) => setPlayback({ seconds, total, recording: record }))
+    entry.play = play
+    playbackRef.current = entry as { play: Playback; rec: CanvasRecording | null; name: string }
+    setPlayback({ seconds: 0, total: 0, recording: record })
+    void play.done.then(async () => {
+      playbackRef.current = null
+      setPlayback(null)
+      setVideoPlaying(false)
+      if (entry.rec) {
+        setVoxelRecording(false)
+        const blob = await entry.rec.stop()
+        downloadBlob(blob, captureFilename(entry.name.replace(/[^\w.-]+/g, '-') || 'video', entry.rec.extension))
+      }
+    })
+  }
+  const stopVideo = () => playbackRef.current?.play.stop()
+  const [videoPlaying, setVideoPlaying] = useState(false)
+  useEffect(() => () => playbackRef.current?.play.stop(), [])
 
   const refreshLibrary = useCallback(async () => {
     try {
@@ -1060,7 +1175,7 @@ export function ItkVtkViewerPage() {
                 <div ref={volumeContainerRef} className={editor ? 'itk-volume-container' : 'itk-volume-container itk-locked'} />
                 {loadedName && <LiveScaleBar viewHeightMm={captureTarget.viewHeightMm} active={renderTab === 'voxel'} />}
                 {loadedName && <CaptureBar target={captureTarget} name={`${loadedName.replace(/\.[^.]*$/, '')}-voxel`} onRecordingChange={setVoxelRecording} />}
-                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} hidden={cropHidden || voxelRecording} selectedFace={wipeFace} onSelectFace={setWipeFace} wipe={wipe} onWipeEnd={onWipeEnd} initialBox={cropDefault} onBoxCommit={setCropBoxNow} />}
+                {loadedName && <CropBoxOverlay key={viewerGeneration} target={cropTarget} enabled={cropOn} resetToken={cropReset} rotateMode={cropRotate} hidden={cropHidden || voxelRecording || videoPlaying} selectedFace={wipeFace} onSelectFace={setWipeFace} wipe={wipe} onWipeEnd={onWipeEnd} initialBox={cropDefault} onBoxCommit={setCropBoxNow} />}
                 {(loadedName || zarrSeg.segmentations.length > 0) && (
                   <div className="render-toolbar">
                     {loadedName && (
@@ -1463,11 +1578,33 @@ export function ItkVtkViewerPage() {
                   <span>
                     Focused on <b>{focusCount}</b> segment{focusCount === 1 ? '' : 's'}
                   </span>
-                  <button className="icon-btn" onClick={clearFocus} title="Clear the focus (Esc in the search box)">
+                  <button className="icon-btn" onClick={() => clearFocus()} title="Clear the focus (Esc in the search box)">
                     Clear
                   </button>
                 </div>
                 {focusSlider}
+                {editor &&
+                  (listName === null ? (
+                    <button className="btn btn-secondary btn-small focus-save" title="Save these segments as a named list, to focus again later or use in a video" onClick={() => setListName('')}>
+                      Save as list…
+                    </button>
+                  ) : (
+                    <form
+                      className="focus-save-form"
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        void saveCurrentFocus()
+                      }}
+                    >
+                      <input autoFocus placeholder="List name" value={listName} aria-label="List name" onChange={(e) => setListName(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && setListName(null)} />
+                      <button className="btn btn-primary btn-small" type="submit" disabled={!listName.trim()}>
+                        Save
+                      </button>
+                      <button className="icon-btn" type="button" onClick={() => setListName(null)}>
+                        Cancel
+                      </button>
+                    </form>
+                  ))}
                 <ul className="focus-list" aria-label="Focused segments">
                   {focusList.map(({ key, recordId, segment, file }) => (
                     <li key={key} className={key === centeredKey ? 'focus-item centered' : 'focus-item'}>
@@ -1488,6 +1625,37 @@ export function ItkVtkViewerPage() {
                 {focusError && <p className="render-toolbar-hint">{focusError}</p>}
               </div>
             )}
+            {listNote && <p className="render-toolbar-hint">{listNote}</p>}
+            {focusLists.length > 0 && (
+              <details className="saved-lists" open>
+                <summary>Saved focus lists ({focusLists.length})</summary>
+                <ul>
+                  {focusLists.map((list) => {
+                    const loaded = listMatches(list).length
+                    return (
+                      <li key={list.id}>
+                        <span className="saved-list-name" title={`${loaded} of ${list.keys.length} segments loaded`}>
+                          {list.name} <span className="tree-badge">{loaded < list.keys.length ? `${loaded}/${list.keys.length}` : list.keys.length}</span>
+                        </span>
+                        <button className="icon-btn" disabled={loaded === 0} title="Focus on this list (fades if fading is on)" onClick={() => focusOn(listMatches(list), false)}>
+                          Focus
+                        </button>
+                        {focusKeys && (
+                          <button className="icon-btn" disabled={loaded === 0} title="Add this list to the focus" onClick={() => focusOn(listMatches(list), true)}>
+                            Add
+                          </button>
+                        )}
+                        {editor && (
+                          <button className="icon-btn" aria-label={`Delete ${list.name}`} onClick={() => void removeFocusList(list)}>
+                            ✕
+                          </button>
+                        )}
+                      </li>
+                    )
+                  })}
+                </ul>
+              </details>
+            )}
             <SegmentTree
               segmentations={zarrSeg.segmentations}
               filterText={searchText}
@@ -1502,6 +1670,23 @@ export function ItkVtkViewerPage() {
               onRemoveFile={zarrSeg.removeSegmentation}
               selected={selectedKeys}
               onSelectionChange={setSelectedKeys}
+            />
+          </section>
+        )}
+
+        {loadedName && (
+          <section className="panel">
+            <h2 className="panel-title">Video builder</h2>
+            <VideoBuilder
+              editor={editor}
+              lists={focusLists}
+              sequences={sequences}
+              onSave={async (seq) => setSequences(await saveSequence(seq))}
+              onDelete={async (id) => setSequences(await deleteSequence(id))}
+              getCamera={viewControl.getCamera}
+              onPlay={playVideo}
+              onStop={stopVideo}
+              playback={playback}
             />
           </section>
         )}

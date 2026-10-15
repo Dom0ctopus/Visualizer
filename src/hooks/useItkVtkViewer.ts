@@ -4,6 +4,7 @@ import { dataUrlToBlob } from '../lib/capture'
 import type { CropPlane, Vec3 } from '../lib/cropBox'
 import { pickVolumeLabel, type PickableViewProxy } from '../lib/volumePick'
 import { fetchPyramidLevels, type PyramidLevel } from '../lib/zarrClient'
+import type { CameraState } from '../lib/sequence'
 
 // itk-vtk-viewer ships as a legacy global-script webpack bundle, not an
 // ESM/CJS module -- its own type declarations use `declare namespace
@@ -94,6 +95,9 @@ interface VtkCamera {
   getViewUp: () => number[]
   setPosition: (x: number, y: number, z: number) => void
   setFocalPoint: (x: number, y: number, z: number) => void
+  setViewUp: (x: number, y: number, z: number) => void
+  setViewAngle: (angle: number) => void
+  setParallelScale: (scale: number) => void
   getDistance: () => number
   getViewAngle: () => number
   getParallelProjection: () => boolean
@@ -105,6 +109,14 @@ interface VtkCameraView {
   renderLater: () => void
   /** Its interactor fires a render event right after each frame is drawn. */
   getInteractor: () => { onRenderEvent: (callback: () => void) => { unsubscribe: () => void } }
+}
+
+/** Camera moves for video sequences (lib/sequence.ts). */
+export interface ViewControl {
+  /** Turns the view like the turntable, by `radians`. */
+  rotateBy: (radians: number) => void
+  getCamera: () => CameraState | null
+  setCamera: (state: CameraState) => void
 }
 
 /** What CropBoxOverlay needs from the voxel render. */
@@ -1116,6 +1128,58 @@ export function useItkVtkViewer() {
     [scheduleLabelUpdate]
   )
 
+  /** Camera moves for video sequences (lib/sequence.ts). */
+  const viewControl = useMemo<ViewControl>(() => {
+    const cameraView = () => {
+      const viewer = volumeViewerRef.current
+      return viewer ? (viewer.getViewProxy() as unknown as VtkCameraView) : null
+    }
+    return {
+      rotateBy: (radians) => {
+        const view = cameraView()
+        if (!view || radians === 0) return
+        try {
+          // The turntable's turn: about the screen's vertical axis through
+          // the rotation center, positive the same way the turntable goes.
+          const camera = view.getCamera()
+          const up = camera.getViewUp()
+          const length = Math.hypot(up[0], up[1], up[2]) || 1
+          const axis = up.map((c) => c / length)
+          const center = rotationCenterRef.current ?? camera.getFocalPoint()
+          camera.setPosition(...rotateAbout(camera.getPosition(), center, axis, -radians))
+          camera.setFocalPoint(...rotateAbout(camera.getFocalPoint(), center, axis, -radians))
+          view.getRenderer().resetCameraClippingRange()
+          view.renderLater()
+        } catch {
+          // viewer mid-update
+        }
+      },
+      getCamera: () => {
+        const view = cameraView()
+        if (!view) return null
+        const c = view.getCamera()
+        const v3 = (a: number[]) => [a[0], a[1], a[2]] as [number, number, number]
+        return { position: v3(c.getPosition()), focalPoint: v3(c.getFocalPoint()), viewUp: v3(c.getViewUp()), viewAngle: c.getViewAngle(), parallelScale: c.getParallelScale() }
+      },
+      setCamera: (state) => {
+        const view = cameraView()
+        if (!view) return
+        try {
+          const c = view.getCamera()
+          c.setPosition(...state.position)
+          c.setFocalPoint(...state.focalPoint)
+          c.setViewUp(...state.viewUp)
+          c.setViewAngle(state.viewAngle)
+          c.setParallelScale(state.parallelScale)
+          view.getRenderer().resetCameraClippingRange()
+          view.renderLater()
+        } catch {
+          // viewer mid-update
+        }
+      }
+    }
+  }, [])
+
   /** Snapshot / recording / turntable access to the render (CaptureBar). */
   const captureTarget = useMemo<CaptureTarget>(
     () => ({
@@ -1386,6 +1450,7 @@ export function useItkVtkViewer() {
     setRenderLook,
     getRenderLook,
     captureTarget,
+    viewControl,
     cropTarget,
     setLabelColors,
     applyLabelColors
