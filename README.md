@@ -2,8 +2,6 @@
 
 A browser-based viewer for large micro-CT volumes and their 3D Slicer segmentations. Volumes and segmentations are converted server-side into chunked, multiscale [OME-Zarr](https://ngff.openmicroscopy.org/) pyramids, so scans far larger than a single GPU texture can be browsed interactively: three linked 2D panes read slices directly from the pyramid, and a 3D pane renders a voxel volume ([itk-vtk-viewer](https://github.com/Kitware/itk-vtk-viewer)), or per-segment surface meshes ([three.js](https://threejs.org/)).
 
-A simpler, low-resolution [NiiVue](https://github.com/niivue/niivue) viewer that loads whole volumes into the GPU is kept as a separate, shelved project in [`niivue-fallback/`](niivue-fallback/README.md).
-
 ## Features
 
 - **Upload and library**: upload NRRD volumes and 3D Slicer segmentation NRRDs from the sidebar. Files are stored server-side (`server/data/`) and converted in the background, one job at a time; anything already uploaded can be reloaded later without re-uploading.

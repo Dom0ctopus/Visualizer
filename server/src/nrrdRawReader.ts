@@ -4,9 +4,8 @@ import { reversedAxes, zarrDtypeFor, type TypedArray, type TypedArrayConstructor
 
 // Maps NRRD's "type" field spellings to the same canonical component-type
 // strings zarrDtypeFor already understands (itk-wasm's own componentType
-// vocabulary) -- kept in sync with niivue's own NRRD type switch
-// (node_modules/@niivue/niivue/src/nvimage/ImageReaders/nrrd.ts) so a file
-// that displays correctly in the niivue engine is read identically here.
+// vocabulary), covering the spellings NRRD writers use (the same set NiiVue's
+// NRRD reader accepts).
 export function nrrdComponentType(type: string): string {
   switch (type.toLowerCase()) {
     case 'uchar':
