@@ -23,6 +23,11 @@ server/.luxar-venv
 __pycache__
 server/data/index.json
 server/data/index.json.*
+# Editors' saved settings (per-machine data, like the uploads above)
+server/data/crop-defaults
+server/data/render-defaults
+server/data/focus-lists.json
+server/data/sequences.json
 
 # itk-vtk-viewer's dist assets (100MB+ of format-decoder wasm binaries) --
 # synced from node_modules by scripts/sync-itk-vtk-viewer.mjs, not vendored

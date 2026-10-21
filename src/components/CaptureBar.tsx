@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { captureFilename, composeSnapshot, downloadBlob, recordingSupported, startCompositeRecording, type CanvasRecording } from '../lib/capture'
+import { captureFilename, composeSnapshot, downloadBlob, recordingSupported, type CanvasRecording } from '../lib/capture'
+import { startViewRecording } from '../lib/viewRecording'
 import { drawScaleBar } from '../lib/scaleBar'
 
 export interface CaptureTarget {
@@ -21,28 +22,6 @@ export interface CaptureTarget {
    *  recording -- recordings are cropped to it with "Fit" on; null for the
    *  whole view. */
   contentRect?: () => { x: number; y: number; width: number; height: number } | null
-}
-
-/** Starts recording a view, with a scale bar that follows the zoom; with
- *  `fit`, cropped to the subject (see CaptureTarget.contentRect). Null when
- *  there's nothing to record yet. */
-export function startViewRecording(view: CaptureTarget, fit: boolean): CanvasRecording | null {
-  const canvas = view.canvas()
-  if (!canvas) return null
-  const crop = fit ? (view.contentRect?.() ?? null) : null
-  // The scale bar's mm-per-pixel is the full view's; a crop shows part of
-  // that height.
-  const heightShare = crop ? crop.height / canvas.height : 1
-  return startCompositeRecording(
-    canvas,
-    view.onFrame,
-    view.requestRender,
-    (ctx, w, h) => {
-      const mm = view.viewHeightMm()
-      drawScaleBar(ctx, w, h, mm === null ? null : mm * heightShare)
-    },
-    crop
-  )
 }
 
 function formatDuration(ms: number): string {
